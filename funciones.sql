@@ -1,0 +1,913 @@
+
+CREATE OR REPLACE FUNCTION public.get_item(p_item_id int)
+RETURNS jsonb
+LANGUAGE sql
+AS $$
+SELECT
+jsonb_build_object('item',
+jsonb_build_object(
+    'id', i.item_id,
+    'codigo', i.item_codigo,
+    'nombre', i.item_nombre,
+    'item_tipo_id', i.item_tipo_id,
+    'item_tipo_codigo', i.item_tipo_codigo,
+    'unidad_id', i.unidad_id,
+    'unidad_codigo', i.unidad_codigo,
+    'detalle', 
+        CASE i.item_tipo_codigo
+      WHEN 'INSUMO' THEN jsonb_build_object(
+        'insumo', (
+          SELECT jsonb_build_object(
+            'medida', iin.medida,
+            'insumo_tipo', jsonb_build_object(
+              'id', ti.id,
+              'codigo', ti.codigo,
+              'nombre', ti.nombre
+            ),
+            'colorante_tipo',
+              CASE WHEN iin.colorante_tipo_id IS NOT NULL THEN
+                jsonb_build_object(
+                  'id', tc.id,
+                  'nombre', tc.nombre
+                )
+              END
+          )
+          FROM item_insumo_detalle iin
+          JOIN insumo_tipo ti ON ti.id = iin.insumo_tipo_id
+          LEFT JOIN colorante_tipo tc ON tc.id = iin.colorante_tipo_id
+          WHERE iin.item_id = i.item_id
+        )
+      )
+
+      WHEN 'ROLLO' THEN jsonb_build_object(
+        'rollo', (
+          SELECT jsonb_build_object(
+            'articulo_id', ir.articulo_id,
+            'articulo',ar.articulo,
+            'tipo_articulo_id', ta.id,
+            'tipo_articulo', ta.tipo_articulo,
+            'fibra', ir.fibra,
+            'color_x_cliente',
+              CASE WHEN ir.color_x_cliente_id IS NOT NULL THEN
+                jsonb_build_object(
+                  'id', cxc.id,
+                  'color_id', cxc.color_id,
+                  'color', cxc.color,
+                  'cliente_id', cxc.cliente_id,
+                  'cliente', cxc.cliente
+                )
+              END
+          )
+          FROM item_rollo_detalle ir
+          LEFT JOIN color_x_cliente cxc ON cxc.id = ir.color_x_cliente_id
+          LEFT JOIN articulo ar ON ar.id=ir.articulo_id
+          LEFT JOIN tipo_articulo ta ON ta.id=ar.tipo_articulo_id
+          WHERE ir.item_id = i.item_id
+        )
+      )
+    END
+))
+FROM vw_items i
+WHERE i.item_id = p_item_id;
+$$;
+
+CREATE OR REPLACE FUNCTION public.crear_item_insumo(p_item jsonb,ptcr p_item_id int)
+RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_usr_id int := get_user_id();
+BEGIN
+    IF p_item ? 'articulo' AND p_item ? 'fibra' THEN
+    BEGIN
+        INSERT INTO item_insumo_detalle (item_id, medida, insumo_tipo_id, colorante_tipo_id)
+        VALUES (
+            p_item_id,
+            p_item->>'medida',
+            (p_item->>'insumo_tipo')::SMALLINT,
+            CASE
+                WHEN p_item ? 'colorante_tipo_id' THEN (p_item->>'colorante_tipo_id')::SMALLINT
+                ELSE NULL
+            END
+        );
+        EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('crear_item_insumo', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+        END;
+    ELSE
+       RAISE EXCEPTION
+        'Los campos articulo y fibra son obligatorios para crear un item de tipo insumo'
+    END IF;
+    RETURN format('Detalle de insumo para item_id %s creado correctamente.', p_item_id);
+END;
+$function$;
+CREATE OR REPLACE FUNCTION public.crear_item_rollo(p_item jsonb, p_item_id int)
+RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_usr_id int := get_user_id();
+BEGIN
+    IF p_item ? 'articulo_id' THEN
+    BEGIN
+        INSERT INTO item_rollo_detalle (item_id, articulo_id, fibra,color_x_cliente_id)
+        VALUES (
+            p_item_id,
+            (p_item->>'articulo_id')::INT,
+            (p_item->>'fibra')::SMALLINT,
+            (p_item->>'color_x_cliente_id')::INT
+        );
+        EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('crear_item_rollo', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+        END;
+    ELSE
+       RAISE EXCEPTION
+        'El campo articulo_id es obligatorio para crear un item de tipo rollo'
+    END IF;
+    RETURN format('Detalle de rollo para item_id %s creado correctamente.', p_item_id);
+END;
+$function$;
+CREATE OR REPLACE FUNCTION public.crear_item(p_item jsonb)
+ RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_item_id   INT;
+    v_tipo_codigo text;
+    v_usr_id int := get_user_id();
+BEGIN
+ INSERT INTO logs_api(function_name, user_id, params)
+        VALUES ('crear_item', v_usr_id, p_item::TEXT);
+    INSERT INTO item (codigo, nombre, item_tipo_id, unidad_id)
+    VALUES (
+        p_item->>'codigo',
+        p_item->>'nombre',
+        (p_item->>'item_tipo_id')::INT,
+        (p_item->>'unidad_id')::INT
+    )
+    RETURNING id INTO v_item_id;
+     SELECT codigo INTO v_tipo_codigo FROM item_tipo WHERE id = (p_item->>'item_tipo_id')::INT;
+
+    -- Create rollo or insumo detail
+    IF v_tipo_codigo = 'ROLLO' THEN
+        PERFORM crear_item_rollo(p_item, v_item_id);
+    ELSIF v_tipo_codigo = 'INSUMO' THEN
+        PERFORM crear_item_insumo(p_item, v_item_id);
+    END IF;
+INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
+SELECT ur.user_id,'Nuevo Item Creado', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó un nuevo item de tipo' || COALESCE(p_item->>'nombre','sin nombre'), 'info',jsonb_build_object('objeto_tipo','item','item_id',v_item_id)
+FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+LEFT JOIN iam.rol r ON ur.rol_id=r.id
+WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
+   RETURN format('Item con ID %s creado correctamente.', v_item_id);
+ EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION inventario.get_almacen(p_almacen_id int)
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+AS $$
+SELECT 
+jsonb_build_object(
+    'id', a.id,
+    'codigo', a.codigo,
+    'nombre', a.nombre,
+    'ubicaciones', (
+        SELECT jsonb_agg( 
+            jsonb_build_object(
+                'id', u.id,
+                'codigo', u.codigo,
+                'nombre', u.nombre
+            )
+        )
+        FROM inventario.ubicacion u
+        WHERE u.almacen_id = a.id
+    )
+)FROM inventario.almacen a WHERE a.id = p_almacen_id;
+$$
+
+
+CREATE FUNCTION inventario.crear_almacen(p_almacen json)
+RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public','doc','inventario'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_almacen_id   INT;
+    v_guia_tipo guia_remision_tipo%ROWTYPE;
+    v_usr_id int := get_user_id();
+    v_lote_id int;
+    v_error_payload jsonb;
+BEGIN
+INSERT INTO inventario.almacen(codigo,nombre,usr_cre)
+VALUES ((p_almacen->>'codigo')::TEXT,(p_almacen->>'nombre')::TEXT)
+RETURNING id INTO v_almacen_id;
+IF p_almacen ? 'ubicaciones' THEN
+    INSERT INTO inventario.ubicacion(almacen_id,codigo,nombre,usr_cre)
+    SELECT v_almacen_id,(u->>'codigo')::TEXT,(u->>'nombre')::TEXT
+    FROM jsonb_array_elements(p_almacen->'ubicaciones') AS u;
+END IF;
+
+INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
+SELECT ur.user_id,'Nuevo almacen y ubicaciones', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó un nuevo almacen y ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',v_almacen_id)
+FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+LEFT JOIN iam.rol r ON ur.rol_id=r.id
+WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
+   RETURN format('Almacen con ID %s creado correctamente.', v_almacen_id);
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('crear_almacen', v_usr_id, p_almacen::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+END;
+$function$;
+
+CREATE FUNCTION inventario.modificar_almacen(p_almacen json)
+RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public','doc','inventario'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_almacen_id   INT;
+    v_guia_tipo guia_remision_tipo%ROWTYPE;
+    v_usr_id int := get_user_id();
+    v_lote_id int;
+    v_error_payload jsonb;
+BEGIN
+UPDATE inventario.almacen
+SET codigo = (p_almacen->>'codigo')::TEXT,
+    nombre = (p_almacen->>'nombre')::TEXT,
+    usr_mod = v_usr_id,
+    fyh_mod = NOW()
+WHERE id = (p_almacen->>'id')::INT;
+
+IF p_almacen ? 'ubicaciones' THEN
+    INSERT INTO inventario.ubicacion(almacen_id,codigo,nombre,usr_cre)
+    SELECT (p_almacen->>'id')::INT,(u->>'codigo')::TEXT,(u->>'nombre')::TEXT,v_usr_id
+    FROM jsonb_array_elements(p_almacen->'ubicaciones') AS u
+    ON CONFLICT (almacen_id,codigo) DO UPDATE SET nombre = EXCLUDED.nombre, usr_mod = v_usr_id, fyh_mod = NOW();
+
+    DELETE FROM inventario.ubicacion WHERE almacen_id = (p_almacen->>'id')::INT 
+    AND codigo NOT IN (SELECT u->>'id' FROM jsonb_array_elements(p_almacen->'ubicaciones') AS u);
+END IF;
+
+INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
+SELECT ur.user_id,'Almacen y/o ubicaciones actualizadas', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' modifico un almacen y/o sus ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',v_almacen_id)
+FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+LEFT JOIN iam.rol r ON ur.rol_id=r.id
+WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
+   RETURN format('Almacen con ID %s creado correctamente.', v_almacen_id);
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('modificar_almacen', v_usr_id, p_almacen::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+END;
+$function$;
+
+
+CREATE FUNCTION inventario.eliminar_almacen(p_almacen_id int)
+RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public','doc','inventario'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_almacen_id   INT;
+    v_guia_tipo guia_remision_tipo%ROWTYPE;
+    v_usr_id int := get_user_id();
+    v_almacen_nombre text;
+    v_error_payload jsonb;
+BEGIN
+
+DELETE FROM ubicacion WHERE almacen_id = p_almacen_id;
+DELETE FROM almacen WHERE id = p_almacen_id
+RETURNING nombre INTO v_almacen_nombre;
+
+INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
+SELECT ur.user_id,'Almacen eliminado', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' eliminó un almacen y sus ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',v_almacen_id)
+FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+LEFT JOIN iam.rol r ON ur.rol_id=r.id
+WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
+   RETURN format('Almacen %s eliminado ', v_almacen_nombre);
+EXCEPTION
+    WHEN foreign_key_violation THEN
+        RAISE EXCEPTION 'No se puede eliminar el almacen porque tiene ubicaciones en uso.';
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('eliminar_almacen', v_usr_id, p_almacen::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+END;
+$function$;
+
+
+CREATE OR REPLACE FUNCTION doc.crear_partida(p_partida jsonb)
+ RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public','doc','mes'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_partida_id   INT;
+    v_tipo_codigo text;
+    v_usr_id int := get_user_id();
+BEGIN
+ INSERT INTO logs_api(function_name, user_id, params)
+        VALUES ('crear_partida', v_usr_id, p_partida::TEXT);
+
+--------------------------------------------------
+---VALIDAR DISPONIBILIDAD DE ROLLOS RESERVADOS
+--------------------------------------------------
+WITH partida_rollos AS (
+        SELECT
+            (i->>'item_id')::int        AS item_id,
+            (i->>'lote_id')::int        AS lote_id,
+            (i->>'ubicacion_id')::int  AS ubicacion_id,
+            SUM((i->>'cantidad')::numeric)  AS cantidad
+        FROM jsonb_array_elements(p_partida->'partida_rollos') i
+        GROUP BY 1,2,3
+    ),errores as(  SELECT
+            im.item_id,
+            im.lote_id,
+            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+            items.cantidad,
+            SUM(
+                CASE
+                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+                END
+            ) AS saldo
+        FROM inventario.item_movimientos im
+        JOIN partida_rollos AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
+        GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
+        HAVING SUM(
+                CASE
+                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+                END
+            )< items.cantidad
+    ) SELECT jsonb_agg(
+        jsonb_build_object(
+            'item_id', item_id,
+            'lote_id', lote_id,
+            'ubicacion_id', ubicacion_id,
+            'saldo_disponible', saldo,
+            'cantidad_requerida', cantidad
+        )
+    )
+    INTO v_error_payload
+    FROM errores;
+    IF v_error_payload IS NOT NULL THEN
+        RAISE EXCEPTION
+            'Stock insuficiente para emitir la guía'
+            USING
+                DETAIL  = v_error_payload::text;
+    END IF;
+
+-------------------------------------------------------------------------
+    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,previo_id,malla,rendimiento)
+    VALUES (
+        p_partida->>'prioridad_id',
+        p_partida->>'cliente_id',
+        (p_partida->>'tenido_id')::INT,
+        (p_partida->>'previo_id')::INT,
+        p_partida->>'malla',
+        p_partida->>'rendimiento'
+    )
+    RETURNING id INTO v_partida_id;
+     INSERT INTO doc.partida_detalle(partida_id, item_id,cantidad)
+     SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT
+     FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
+
+     INSERT INTO mes.partida_rollo(partida_id, lote_id, ubicacion_id,cantidad, peso_kg)
+     SELECT v_partida_id, (u->>'lote_id')::INT, (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT,(SELECT (u->>'cantidad')::int*l.peso/l.cantidad FROM inventario.lotes l WHERE l.id=(u->>'lote_id')::INT)::numeric(8,2)
+     FROM jsonb_array_elements(p_partida->'partida_rollos') AS u;
+
+    INSERT INTO inventario.item_movimientos(item_id,lote_id,movimiento_tipo,origen_ubicacion_id,cantidad,documento_tipo,documento_id)
+    SELECT (u->>'item_id')::INT, (u->>'lote_id')::INT, 'EGRESO', (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT, 'PARTIDA', v_partida_id
+    FROM jsonb_array_elements(p_partida->'partida_rollos') AS u;
+
+INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
+SELECT ur.user_id,'Nueva Partida Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva partida', 'info',jsonb_build_object('objeto_tipo','partida','partida_id',v_partida_id)
+FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+LEFT JOIN iam.rol r ON ur.rol_id=r.id
+WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
+   RETURN format('Partida con ID %s creada correctamente.', v_partida_id);
+ EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+END;
+$function$;
+
+
+CREATE OR REPLACE FUNCTION doc.modificar_partida(p_partida jsonb)
+ RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public','doc','mes'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_partida_id   INT;
+    v_tipo_codigo text;
+    v_usr_id int := get_user_id();
+BEGIN
+ INSERT INTO logs_api(function_name, user_id, params)
+        VALUES ('crear_partida', v_usr_id, p_partida::TEXT);
+
+--------------------------------------------------
+---VALIDAR DISPONIBILIDAD DE ROLLOS RESERVADOS
+--------------------------------------------------
+WITH partida_rollos AS (
+        SELECT
+            (i->>'item_id')::int        AS item_id,
+            (i->>'lote_id')::int        AS lote_id,
+            (i->>'ubicacion_id')::int  AS ubicacion_id,
+            SUM((i->>'cantidad')::numeric)  AS cantidad
+        FROM jsonb_array_elements(p_partida->'partida_rollos') i
+        GROUP BY 1,2,3
+    ),errores as(  SELECT
+            im.item_id,
+            im.lote_id,
+            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+            items.cantidad,
+            SUM(
+                CASE
+                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+                END
+            ) AS saldo
+        FROM inventario.item_movimientos im
+        JOIN partida_rollos AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
+        GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
+        HAVING SUM(
+                CASE
+                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+                END
+            )< items.cantidad
+    ) SELECT jsonb_agg(
+        jsonb_build_object(
+            'item_id', item_id,
+            'lote_id', lote_id,
+            'ubicacion_id', ubicacion_id,
+            'saldo_disponible', saldo,
+            'cantidad_requerida', cantidad
+        )
+    )
+    INTO v_error_payload
+    FROM errores;
+    IF v_error_payload IS NOT NULL THEN
+        RAISE EXCEPTION
+            'Stock insuficiente para emitir la guía'
+            USING
+                DETAIL  = v_error_payload::text;
+    END IF;
+
+-------------------------------------------------------------------------
+    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,previo_id,malla,rendimiento)
+    VALUES (
+        p_partida->>'prioridad_id',
+        p_partida->>'cliente_id',
+        (p_partida->>'tenido_id')::INT,
+        (p_partida->>'previo_id')::INT,
+        p_partida->>'malla',
+        p_partida->>'rendimiento'
+    )
+    RETURNING id INTO v_partida_id;
+     INSERT INTO doc.partida_detalle(partida_id, item_id,cantidad)
+     SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT
+     FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
+
+     INSERT INTO mes.partida_rollo(partida_id, lote_id, ubicacion_id,cantidad, peso_kg)
+     SELECT v_partida_id, (u->>'lote_id')::INT, (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT,(SELECT (u->>'cantidad')::int*l.peso/l.cantidad FROM inventario.lotes l WHERE l.id=(u->>'lote_id')::INT)::numeric(8,2)
+     FROM jsonb_array_elements(p_partida->'partida_rollos') AS u;
+
+    INSERT INTO inventario.item_movimientos(item_id,lote_id,movimiento_tipo,origen_ubicacion_id,cantidad,documento_tipo,documento_id)
+    SELECT (u->>'item_id')::INT, (u->>'lote_id')::INT, 'EGRESO', (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT, 'PARTIDA', v_partida_id
+    FROM jsonb_array_elements(p_partida->'partida_rollos') AS u;
+
+INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
+SELECT ur.user_id,'Nueva Partida Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva partida', 'info',jsonb_build_object('objeto_tipo','partida','partida_id',v_partida_id)
+FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+LEFT JOIN iam.rol r ON ur.rol_id=r.id
+WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
+   RETURN format('Partida con ID %s creada correctamente.', v_partida_id);
+ EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+END;
+$function$;
+
+
+
+CREATE OR REPLACE FUNCTION mes.crear_plantilla(p_plantilla jsonb)
+ RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public','inventario','doc','mes'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_plantilla_id   INT;
+    v_tipo_codigo text;
+    v_usr_id int := get_user_id();
+BEGIN
+ INSERT INTO logs_api(function_name, user_id, params)
+        VALUES ('crear_plantilla', v_usr_id, p_plantilla::TEXT);
+
+INSERT INTO ruta_plantilla (nombre)
+    SELECT 
+        p_plantilla->>'nombre'
+    RETURNING id INTO v_plantilla_id;
+
+INSERT INTO ruta_plantilla_detalle (ruta_plantilla_id, operacion_id, secuencia, ph, temperatura, tiempo_estandar)
+    SELECT v_plantilla_id,
+           (detalle->>'operacion_id')::INT,
+           (detalle->>'secuencia')::SMALLINT,
+           (detalle->>'ph')::NUMERIC(4,2),
+           (detalle->>'temperatura')::NUMERIC(5,2),
+           (detalle->>'tiempo_estandar')::INT;
+           FROM json_array_elements(p_plantilla->'plantilla_detalles') AS detalle;
+
+INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
+SELECT ur.user_id,'Nueva Plantilla Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva plantilla', 'info',jsonb_build_object('objeto_tipo','plantilla','plantilla_id',v_plantilla_id)
+FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+LEFT JOIN iam.rol r ON ur.rol_id=r.id
+WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
+   RETURN format('Plantilla con ID %s creada correctamente.', v_plantilla_id);
+ EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+END;
+$function$;
+
+
+
+CREATE OR REPLACE FUNCTION mes.planificar_partida(p_partida_pasos jsonb)
+ RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public','mes','doc'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_item_id   INT;
+    v_tipo_codigo text;
+    v_usr_id int := get_user_id();
+BEGIN
+ INSERT INTO logs_api(function_name, user_id, params)
+        VALUES ('planificar_partida', v_usr_id, p_partida_pasos::TEXT);
+    INSERT INTO partida_paso (
+        partida_id,
+        secuencia,
+        operacion_id
+        estado
+    )
+    VALUES (
+        (p_partida_pasos->>'partida_id')::BIGINT,
+        (p_partida_pasos->>'secuencia')::INT,
+        (p_partida_pasos->>'operacion_id')::smallint,
+        'PENDIENTE'
+    )
+    RETURNING id INTO v_item_id;
+
+INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
+SELECT ur.user_id,'Partida Planificada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' planificó la partida' || COALESCE(p_partida_pasos->>'partida_id','error'), 'info',jsonb_build_object('objeto_tipo','partida','partida_id', (p_partida_pasos->>'partida_id')::BIGINT)
+FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+LEFT JOIN iam.rol r ON ur.rol_id=r.id
+WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
+   RETURN format('Item con ID %s creado correctamente.', v_item_id);
+ EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+END;
+$function$;
+
+
+
+
+
+
+CREATE FUNCTION doc.crear_guia(p_guia json)
+RETURNS text
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public','doc','inventario'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_guia_id   INT;
+    v_guia_tipo guia_remision_tipo%ROWTYPE;
+    v_usr_id int := get_user_id();
+    v_lote_id int;
+    v_error_payload jsonb;
+BEGIN
+ -- guard condition
+ SELECT * INTO v_guia_tipo FROM guia_remision_tipo WHERE id = (p_guia->>'guia_remision_tipo_id')::SMALLINT;
+ IF NOT FOUND THEN
+     RAISE EXCEPTION 'Tipo de guía con id % no existe', (p_guia->>'guia_remision_tipo_id');
+ END IF;
+
+IF v_guia_tipo.flg_emitida THEN
+        -- SELECT im.lote_id,COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id),SUM(CASE WHEN im.movimiento_tipo = 'EGRESO' THEN -im.cantidad WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad ELSE 0 END) FROM inventario.item_movimientos im
+        -- JOIN jsonb_array_elements(p_guia->'items') AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
+        -- GROUP BY im.lote_id,COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
+        ---------------------
+        --VALIDAR DISPONIBILIDAD DE items
+        -------------------
+        WITH guia_items AS (
+        SELECT
+            (i->>'item_id')::int        AS item_id,
+            (i->>'lote_id')::int        AS lote_id,
+            (i->>'ubicacion_id')::int  AS ubicacion_id,
+            SUM((i->>'cantidad')::numeric)  AS cantidad
+        FROM jsonb_array_elements(p_guia->'items') i
+        GROUP BY 1,2,3
+    ),errores as(  SELECT
+            im.item_id,
+            im.lote_id,
+            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+            items.cantidad,
+            SUM(
+                CASE
+                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+                END
+            ) AS saldo
+        FROM inventario.item_movimientos im
+        JOIN guia_items AS items ON guia_items.item_id=im.item_id AND guia_items.lote_id=im.lote_id AND guia_items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
+        GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
+        HAVING SUM(
+                CASE
+                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+                END
+            )< items.cantidad
+    ) SELECT jsonb_agg(
+        jsonb_build_object(
+            'item_id', item_id,
+            'lote_id', lote_id,
+            'ubicacion_id', ubicacion_id,
+            'saldo_disponible', saldo,
+            'cantidad_requerida', cantidad
+        )
+    )
+    INTO v_error_payload
+    FROM errores;
+    IF v_error_payload IS NOT NULL THEN
+        RAISE EXCEPTION
+            'Stock insuficiente para emitir la guía'
+            USING
+                DETAIL  = v_error_payload::text;
+    END IF;
+-----------------------------------------------------------------------------------------------------------------------
+    IF v_guia_tipo.flg_cliente AND (p_guia->>'receptor_cliente_id') IS NULL THEN
+        RAISE EXCEPTION 'Guía inválida: se esperaba receptor_cliente_id para documento de cliente emitido';
+    ELSIF NOT v_guia_tipo.flg_cliente AND (p_guia->>'receptor_proveedor_id') IS NULL THEN
+        RAISE EXCEPTION 'Guía inválida: se esperaba receptor_proveedor_id para documento de proveedor emitido';
+    END IF;
+ELSE
+    -- incoming
+    IF v_guia_tipo.flg_cliente AND (p_guia->>'emisor_cliente_id') IS NULL THEN
+        RAISE EXCEPTION 'Guía inválida: se esperaba emisor_cliente_id para documento de cliente recibido';
+    ELSIF NOT v_guia_tipo.flg_cliente AND (p_guia->>'emisor_proveedor_id') IS NULL THEN
+        RAISE EXCEPTION 'Guía inválida: se esperaba emisor_proveedor_id para documento de proveedor recibido';
+    END IF;
+END IF;
+
+ INSERT INTO logs_api(function_name, user_id, params)
+        VALUES ('crear_guia', v_usr_id, p_guia::TEXT);
+
+    INSERT INTO doc.guia_remision(guia_remision_tipo_id, serie, correlativo, emisor_cliente_id, emisor_proveedor_id, receptor_cliente_id, receptor_proveedor_id, fecha_emision, fecha_recepcion)
+    VALUES (
+        (p_guia->>'guia_remision_tipo_id')::INT,
+        p_guia->>'serie',
+        p_guia->>'correlativo',
+        CASE
+            WHEN p_guia ? 'emisor_cliente_id' THEN (p_guia->>'emisor_cliente_id')::INT
+            ELSE NULL
+        END,
+        CASE
+            WHEN p_guia ? 'emisor_proveedor_id' THEN (p_guia->>'emisor_proveedor_id')::INT
+            ELSE NULL
+        END,
+        CASE
+            WHEN p_guia ? 'receptor_cliente_id' THEN (p_guia->>'receptor_cliente_id')::INT
+            ELSE NULL
+        END,
+        CASE
+            WHEN p_guia ? 'receptor_proveedor_id' THEN (p_guia->>'receptor_proveedor_id')::INT
+            ELSE NULL
+        END,
+        (p_guia->>'fecha_emision')::DATE
+    )
+    RETURNING id INTO v_guia_id;
+
+INSERT INTO doc.guia_remision_detalle (guia_id, item_id, cantidad,lote_id,ubicacion_id)
+SELECT
+    v_guia_id,
+    (item->>'item_id')::INT,
+    (item->>'cantidad')::NUMERIC(12,2),
+    (item->>'lote_id')::INT,
+    (item->>'ubicacion_id')::INT
+FROM jsonb_array_elements(p_guia->'items') AS item;
+
+IF v_guia_tipo.flg_emitida THEN
+    -- For issued guides, create item movements as EGRESO from warehouse
+    INSERT INTO inventario.item_movimientos (item_id, lote_id, movimiento_tipo, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id, observacion)
+    SELECT
+        (item->>'item_id')::INT,
+        (item->>'lote_id')::INT, 
+        'EGRESO',
+        (p_guia->>'origen_ubicacion_id')::INT,
+        NULL, -- destination is external
+        (item->>'cantidad')::NUMERIC(12,2),
+        now(),
+        'guia_remision',
+        v_guia_id,
+        NULL
+    FROM jsonb_array_elements(p_guia->'items') AS item;
+ELSE
+WITH nuevos_lotes AS(
+    INSERT INTO lote (item_id, documento_tipo, documento_id, cantidad, peso, color_x_cliente_id)
+    SELECT
+    (item->>'item_id')::INT,
+    'guia_remision',
+    v_guia_id,
+    (item->>'cantidad')::NUMERIC(12,2),
+    CASE
+        WHEN (item->>'peso') IS NOT NULL THEN (item->>'peso')::NUMERIC(8,2)
+        ELSE NULL
+    END,
+    CASE
+        WHEN (item->>'color_x_cliente_id') IS NOT NULL THEN (item->>'color_x_cliente_id')::INT
+        ELSE NULL
+    END
+    RETURNING id,item_id
+)
+    -- For received guides, create item movements as INGRESO to warehouse
+    INSERT INTO inventario.item_movimientos (item_id, lote_id, movimiento_tipo, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id, observacion)
+    SELECT
+        (item->>'item_id')::INT,
+        nl.id, --id del lote recien creado
+        'ingreso',
+        NULL, -- origin is external
+        (p_guia->>'destino_ubicacion_id')::INT,
+        (item->>'cantidad')::NUMERIC(12,2),
+        COALESCE((p_guia->>'fecha_emision'),now()),
+        'guia_remision',
+        v_guia_id,
+        NULL
+    FROM jsonb_array_elements(p_guia->'items') AS item
+    LEFT JOIN nuevos_lotes nl ON nl.item_id = (item->>'item_id')::INT
+    ;
+END IF;
