@@ -146,7 +146,7 @@ $$;
 
 CREATE EXTENSION IF NOT EXISTS unaccent;
 
-CREATE TYPE movimiento_tipo_enum AS ENUM ('INGRESO', 'EGRESO');
+
 
 -- Unit of Measure master
 CREATE TABLE unidad (
@@ -311,6 +311,170 @@ EXECUTE FUNCTION public.fn_trg_set_elm_fields();
 
 
 CREATE SCHEMA inventario;
+create enum inventario.item_movimiento_tipo_categoria_enum as enum (
+    'COMPRA',
+    'VENTA',
+    'PRODUCCION',
+    'PROCESO_EXTERNO',
+    'DEVOLUCION',
+    'AJUSTE',
+    'TRANSFERENCIA'
+    );
+CREATE OR REPLACE VIEW inventario.vw_item_movimiento_categoria AS
+SELECT
+    unnest(enum_range(NULL::inventario.item_movimiento_tipo_categoria_enum))::text AS codigo,
+    CASE unnest(enum_range(NULL::inventario.item_movimiento_tipo_categoria_enum))
+        WHEN 'COMPRA' THEN 'Compras'
+        WHEN 'VENTA' THEN 'Ventas'
+        WHEN 'PRODUCCION' THEN 'Producción'
+        WHEN 'PROCESO_EXTERNO' THEN 'Proceso externo'
+        WHEN 'DEVOLUCION' THEN 'Devoluciones'
+        WHEN 'AJUSTE' THEN 'Ajustes'
+        WHEN 'TRANSFERENCIA' THEN 'Transferencias'
+    END AS nombre;
+CREATE SCHEMA IF NOT EXISTS inventario;
+
+-- 1. CATEGORY ENUM (Kept yours, it's good)
+CREATE TYPE inventario.item_movimiento_tipo_categoria_enum AS ENUM (
+    'COMPRA',
+    'VENTA',
+    'PRODUCCION',
+    'PROCESO_EXTERNO',
+    'DEVOLUCION',
+    'AJUSTE',
+    'TRANSFERENCIA'
+);
+
+-- 2. THE TABLE (Enhanced)
+CREATE TABLE inventario.item_movimiento_tipo(
+    id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT GENERATED ALWAYS AS (lower(public.unaccent(codigo))) STORED,
+    nombre text NOT NULL,
+    
+    categoria inventario.item_movimiento_tipo_categoria_enum NOT NULL,
+    
+    -- REPLACED 'direccion' with 'factor'. 
+    -- 1 = Adds Stock, -1 = Removes Stock, 0 = Neutral (Transfer)
+    factor SMALLINT NOT NULL CHECK (factor IN (1, -1, 0)), 
+
+    descripcion text,
+
+    -- LOGIC FLAGS
+    flg_afecta_stock    BOOLEAN NOT NULL DEFAULT true,  -- Does it touch QTY?
+    flg_valorizable     BOOLEAN NOT NULL DEFAULT true,  -- Does it have $$ value?
+    
+    -- NEW: COSTING LOGIC
+    -- If TRUE, this entry triggers a Weighted Average Cost recalculation (e.g., Purchases)
+    -- If FALSE, it enters stock at current existing cost (e.g., Transfers, Returns)
+    flg_recalcula_costo BOOLEAN NOT NULL DEFAULT false,
+
+    -- NEW: VALIDATION FLAGS (For UI and Backend checks)
+    req_partner         BOOLEAN NOT NULL DEFAULT false, -- Requires Client/Provider?
+    req_origen          BOOLEAN NOT NULL DEFAULT false, -- Requires source warehouse?
+    req_destino         BOOLEAN NOT NULL DEFAULT false, -- Requires target warehouse?
+
+    -- AUDIT (Kept yours)
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    flg_elm boolean NOT NULL DEFAULT FALSE,
+    usr_elm int,
+    fyh_elm timestamptz,
+    
+    UNIQUE(codigo_canon)
+);
+
+-- (Triggers omitted for brevity, assume they are included as you wrote them)
+CREATE TRIGGER trg_bi_item_movimiento_tipo
+BEFORE INSERT ON inventario.item_movimiento_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+CREATE TRIGGER trg_bu_item_movimiento_tipo
+BEFORE UPDATE ON inventario.item_movimiento_tipo    
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+CREATE TRIGGER trg_bu_item_movimiento_tipo_elm
+BEFORE UPDATE ON inventario.item_movimiento_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_elm_fields();
+
+INSERT INTO inventario.item_movimiento_tipo
+(codigo, nombre, categoria, factor, flg_afecta_stock, flg_valorizable, flg_recalcula_costo, req_partner, req_origen, req_destino, descripcion)
+VALUES
+
+-- =====================
+-- COMPRAS (Adds stock, Updates Cost, Needs Provider)
+-- =====================
+('COMPRA_ING', 'Compra – Recepción', 'COMPRA', 1, 
+ true, true, true, true, false, true, 
+ 'Ingreso por compra local o importación'),
+
+-- =====================
+-- VENTAS (Removes stock, No Cost Recalc, Needs Client)
+-- =====================
+('VENTA_EGR', 'Venta – Despacho', 'VENTA', -1, 
+ true, true, false, true, true, false, 
+ 'Salida por venta a cliente'),
+
+-- =====================
+-- PRODUCCIÓN
+-- =====================
+('PROD_CONSUMO', 'Producción – Consumo MP', 'PRODUCCION', -1, 
+ true, true, false, false, true, false, 
+ 'Consumo de materia prima hacia orden de producción'),
+
+('PROD_ING', 'Producción – Ingreso PT', 'PRODUCCION', 1, 
+ true, true, true, false, false, true, 
+ 'Ingreso de producto terminado (Recalcula costo base en recursos usados)'),
+
+-- =====================
+-- PROCESO EXTERNO (Tolling)
+-- =====================
+-- Note: Often "Sending to a 3rd party" is just a transfer to a "3rd Party Warehouse" 
+-- but if you track it logically:
+('EXT_ENVIO', 'Proceso Ext. – Envío', 'PROCESO_EXTERNO', -1, 
+ true, false, false, true, true, false, 
+ 'Salida a maquilador (sigue siendo propiedad nuestra)'),
+
+('EXT_RETORNO', 'Proceso Ext. – Retorno', 'PROCESO_EXTERNO', 1, 
+ true, true, true, true, false, true, 
+ 'Retorno con valor agregado (servicio maquila)'),
+
+-- =====================
+-- TRANSFERENCIAS (Atomic)
+-- =====================
+-- Factor is 0 because the Company Total Stock doesn't change.
+-- The transaction logic handles: -1 from Origin, +1 to Destination.
+('INT_TRANSFER_ING', 'Transferencia Interna', 'TRANSFERENCIA', 1, 
+ true, true, false, false, true, true, 
+ 'Movimiento entre almacenes propios'),
+('INT_TRANSFER_EGR', 'Transferencia Interna', 'TRANSFERENCIA', -1, 
+ true, true, false, false, true, true, 
+ 'Movimiento entre almacenes propios'),
+
+-- =====================
+-- DEVOLUCIONES
+-- =====================
+('DEV_CLI_ING', 'Devolución Cliente', 'DEVOLUCION', 1, 
+ true, true, false, true, false, true, 
+ 'Cliente devuelve. Entra al costo original o actual (no promedia)'),
+
+('DEV_PROV_EGR', 'Devolución Proveedor', 'DEVOLUCION', -1, 
+ true, true, false, true, true, false, 
+ 'Salida por devolución a proveedor'),
+
+-- =====================
+-- AJUSTES
+-- =====================
+('AJUSTE_POS', 'Ajuste Inventario (+)', 'AJUSTE', 1, 
+ true, true, true, false, false, true, 
+ 'Sobrante físico (puede recalcular costo si entra con costo 0 o específico)'),
+
+('AJUSTE_NEG', 'Ajuste Inventario (-)', 'AJUSTE', -1, 
+ true, true, false, false, true, false, 
+ 'Faltante físico / Merma');
 
 CREATE TABLE insumo_tipo(
     id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -323,7 +487,7 @@ CREATE TABLE insumo_tipo(
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
     fyh_mod TIMESTAMPTZ,
-    UNIQUE (codigo)
+    UNIQUE (codigo_canon)
 
 );
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
@@ -356,7 +520,7 @@ CREATE TABLE colorante_tipo(
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
     fyh_mod TIMESTAMPTZ,
-    UNIQUE (codigo)
+    UNIQUE (codigo_canon)
 );
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
 ON colorante_tipo
@@ -755,7 +919,7 @@ CREATE TABLE inventario.item_movimientos (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     item_id INT NOT NULL REFERENCES item(id),           -- rollo crudo, rib, terminado
     lote_id int references lote(id),
-    movimiento_tipo movimiento_tipo_enum  NOT NULL,
+    movimiento_tipo_id references item_movimientos_tipo(id) NOT NULL,
     -- movimiento_tipo TEXT NOT NULL CHECK (movimiento_tipo IN (
     --     'INGRESO',
     --     'EGRESO',
@@ -763,7 +927,7 @@ CREATE TABLE inventario.item_movimientos (
     origen_ubicacion_id INT NULL REFERENCES ubicacion(id),
     destino_ubicacion_id INT NULL REFERENCES ubicacion(id),
     cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
-
+    owner_id int,
     fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     documento_tipo TEXT,          -- 'GUIA', 'LOTE', 'AJUSTE', etc. DOCUMENT CAUSING THE MOVEMENT
@@ -994,14 +1158,15 @@ CREATE SCHEMA mes;
 
 -- Production Order Status (ISA-95 Standard States)
 CREATE TYPE partida_estado_enum AS ENUM (
-  'creado',---shoudl i Include this?
-    'programado',   -- Scheduled
-    'configuracion',-- Setup/Loading
-    'en_proceso',   -- Running
-    'en_pausa',     -- Held (waiting for lab approval, etc.)
-    'control_calidad', -- QC Check
-    'completado',   -- Finished
-    'cancelado'     -- Aborted
+ 'CREADA',        -- exists, not yet planned
+  'PLANIFICADA',   -- routing/steps defined, not yet started
+  'EN_PROCESO',    -- at least one paso started
+  'PAUSADA',       -- temporarily stopped (optional but useful)
+  'TECO',          -- technically completed (manual decision)
+  'CERRADA',       -- financially / logistically closed
+  'ENTREGADA',
+  'ENTREGA_PARCIAL'
+  'CANCELADA'      -- aborted
 );
 
 -- Machine Status (For OEE calculation)

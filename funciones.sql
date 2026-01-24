@@ -729,10 +729,6 @@ END;
 $function$;
 
 
-
-
-
-
 CREATE FUNCTION doc.crear_guia(p_guia json)
 RETURNS text
 LANGUAGE plpgsql
