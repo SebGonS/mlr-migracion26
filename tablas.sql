@@ -400,6 +400,24 @@ CREATE TABLE inventario.ubicacion (
     UNIQUE (almacen_id, codigo_canon)
 );
 CREATE SCHEMA doc;
+CREATE TYPE partida_estado_produccion_enum AS ENUM (
+  'CREADA',        -- order exists, not routed
+  'PLANIFICADA',   -- routing + resources assigned
+  'EN_PROCESO',    -- at least one paso started
+  'PAUSADA',       -- execution stopped
+  'TECO',          -- technically completed (SAP-style)
+  'CERRADA',       -- no more postings allowed
+  'CANCELADA'      -- aborted
+);
+CREATE TYPE partida_estado_comercial_enum AS ENUM (
+  'CREADA',            -- exists, not yet accepted
+  'CONFIRMADA',        -- approved for execution
+  'EN_PRODUCCION',     -- linked to an active production order
+  'ENTREGA_PARCIAL',   -- partially delivered
+  'ENTREGADA',         -- fully delivered
+  'FACTURADA',         -- financially closed
+  'CANCELADA'          -- voided before completion
+);
 
 CREATE TABLE doc.partida(  --production order table ¿MES TABLE?
 id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -412,12 +430,12 @@ previo_id int references previo(id),
 malla text,
 rendimiento text,
 -- Execution State
-    estado partida_estado_enum NOT NULL DEFAULT 'creado',
-    
+estado_produccion partida_estado_produccion_enum NOT NULL DEFAULT 'CREADA',
+estado_comercial partida_estado_comercial_enum NOT NULL DEFAULT 'CREADA',
     -- Timestamps
-    fyh_programacion timestamptz,
-    fyh_inicio timestamptz,
-    fyh_fin timestamptz,
+fyh_programacion timestamptz,
+fyh_inicio timestamptz,
+fyh_fin timestamptz,
 usr_cre int,
   fyh_cre TIMESTAMPTZ DEFAULT NOW(),
   usr_mod int,
