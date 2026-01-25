@@ -730,6 +730,7 @@ END;
 $function$;
 
 
+
 CREATE FUNCTION doc.crear_guia(p_guia json)
 RETURNS text
 LANGUAGE plpgsql
@@ -908,3 +909,25 @@ WITH nuevos_lotes AS(
     LEFT JOIN nuevos_lotes nl ON nl.item_id = (item->>'item_id')::INT
     ;
 END IF;
+
+INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
+SELECT ur.user_id,'Nueva Guia y movimientos', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva guía de remisión y generó movimientos de inventario', 'info',jsonb_build_object('objeto_tipo','guia_remision','guia_remision_id',v_guia_id)
+FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+LEFT JOIN iam.rol r ON ur.rol_id=r.id
+WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
+   RETURN format('Guía de remisión con ID %s creada correctamente.', v_guia_id);
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
+        VALUES ('crear_guia', v_usr_id, p_guia::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE;
+END;
+$function$;
+
