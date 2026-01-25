@@ -393,6 +393,7 @@ $function$;
 
 
 CREATE OR REPLACE FUNCTION doc.crear_partida(p_partida jsonb)
+
  RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -475,14 +476,14 @@ WITH partida_rollos AS (
      SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT
      FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
 
-     INSERT INTO mes.partida_rollo(partida_id, lote_id, ubicacion_id,cantidad, peso_kg)
-     SELECT v_partida_id, (u->>'lote_id')::INT, (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT,(SELECT (u->>'cantidad')::int*l.peso/l.cantidad FROM inventario.lotes l WHERE l.id=(u->>'lote_id')::INT)::numeric(8,2)
-     FROM jsonb_array_elements(p_partida->'partida_rollos') AS u;
+     INSERT INTO mes.partida_item(partida_id, lote_id, ubicacion_id,cantidad, peso_kg)
+     SELECT v_partida_id, (u->>'lote_id')::INT, (u->>'ubicacion_id')::INT, (u->>'cantidad')::numeric,(SELECT (u->>'cantidad')::numeric*(l.detalle->>'peso')::numeric/l.cantidad 
+     FROM inventario.lote l WHERE l.id=(u->>'lote_id')::INT)::numeric
+     FROM jsonb_array_elements(p_partida->'partida_items') AS u;
 
     INSERT INTO inventario.item_movimientos(item_id,lote_id,movimiento_tipo,origen_ubicacion_id,cantidad,documento_tipo,documento_id)
-    SELECT (u->>'item_id')::INT, (u->>'lote_id')::INT, 'EGRESO', (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT, 'PARTIDA', v_partida_id
-    FROM jsonb_array_elements(p_partida->'partida_rollos') AS u;
-
+    SELECT (u->>'item_id')::INT, (u->>'lote_id')::INT, 'EGRESO', (u->>'ubicacion_id')::INT, (u->>'cantidad')::numeric, 'PARTIDA', v_partida_id
+    FROM jsonb_array_elements(p_partida->'partida_items') AS u;
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
 SELECT ur.user_id,'Nueva Partida Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva partida', 'info',jsonb_build_object('objeto_tipo','partida','partida_id',v_partida_id)
 FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
@@ -589,7 +590,7 @@ WITH partida_rollos AS (
      FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
 
      INSERT INTO mes.partida_rollo(partida_id, lote_id, ubicacion_id,cantidad, peso_kg)
-     SELECT v_partida_id, (u->>'lote_id')::INT, (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT,(SELECT (u->>'cantidad')::int*l.peso/l.cantidad FROM inventario.lotes l WHERE l.id=(u->>'lote_id')::INT)::numeric(8,2)
+     SELECT v_partida_id, (u->>'lote_id')::INT, (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT,(SELECT (u->>'cantidad')::int*l.peso/l.cantidad FROM inventario.lote l WHERE l.id=(u->>'lote_id')::INT)::numeric(8,2)
      FROM jsonb_array_elements(p_partida->'partida_rollos') AS u;
 
     INSERT INTO inventario.item_movimientos(item_id,lote_id,movimiento_tipo,origen_ubicacion_id,cantidad,documento_tipo,documento_id)
