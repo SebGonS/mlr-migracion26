@@ -83,7 +83,7 @@ JOIN base b USING (codigo);
 
 WITH base AS (
    SELECT  UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C') codigo,
-'Rollo Rib' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo' nombre,
+'Rollo Rib ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo' nombre,
 u.id unidad_id,
 it.id item_tipo_id,
 articulo_id,
@@ -94,8 +94,8 @@ JOIN item_tipo it ON it.codigo='ROLLO'
 JOIN unidad u ON u.codigo = 'UN'
 WHERE rib>0
 GROUP BY 
-UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C'),
-'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo',
+UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C'),
+'Rollo Rib ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo',
 u.id,
 it.id,
 articulo_id,
@@ -123,64 +123,174 @@ INSERT INTO item_rollo_detalle (
     item_id,
     articulo_id,
     fibra,
+    flg_rib,
     fyh_cre)
 SELECT
     i.id,
     b.articulo_id,
     b.fibra,
+    true,
     NOW()
 FROM ins_item i
 JOIN base b USING (codigo);
 
-
-
-
-
--- ============================================================================
--- 2. INVENTORY MIGRATION - Inventario Schema
--- ============================================================================
-
--- Migrate warehouses (almacen)
-INSERT INTO inventario.almacen (codigo, descripcion, ubicacion, usr_cre, fyh_cre)
-SELECT 
-    alm.codigo,
-    alm.descripcion,
-    COALESCE(alm.ubicacion, 'No especificada'),
-    'migration_admin',
+--------------------INSERTAR ITEM ROLLO teñido
+WITH base AS (
+   SELECT  UPPER('R-' || a.articulo||'-'|| COALESCE(fibra, '1')||'-T') codigo,
+'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Teñido' nombre,
+u.id unidad_id,
+it.id item_tipo_id,
+articulo_id,
+COALESCE(fibra, '1') fibra 
+FROM partida
+JOIN articulo  a ON a.id = partida.articulo_id
+JOIN item_tipo it ON it.codigo='ROLLO'
+JOIN unidad u ON u.codigo = 'UN'
+GROUP BY 
+UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-T'),
+'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Teñido',
+u.id,
+it.id,
+articulo_id,
+COALESCE(fibra, '1')
+),
+ins_item AS (
+    INSERT INTO item (
+        codigo,
+        nombre,
+        item_tipo_id,
+        unidad_id,
+        fyh_cre
+    )
+    SELECT
+        b.codigo,
+        b.nombre,
+        b.item_tipo_id,
+        b.unidad_id,
+        NOW()
+    FROM base b
+    -- ON CONFLICT (codigo_canon) DO NOTHING
+    RETURNING id, codigo
+)
+INSERT INTO item_rollo_detalle (
+    item_id,
+    articulo_id,
+    fibra,
+    flg_tenido,
+    fyh_cre)
+SELECT
+    i.id,
+    b.articulo_id,
+    b.fibra,
+    true,
     NOW()
-FROM source_almacen alm
-WHERE alm.codigo IS NOT NULL
-ON CONFLICT (codigo_canon) DO NOTHING;
+FROM ins_item i
+JOIN base b USING (codigo);
+---- RIB TEÑIDO
 
--- Migrate warehouse locations (ubicacion)
-INSERT INTO inventario.ubicacion (id_almacen, codigo, descripcion, capacidad, usr_cre, fyh_cre)
-SELECT 
-    a.id,
-    ub.codigo,
-    COALESCE(ub.descripcion, 'Sin descripción'),
-    COALESCE(ub.capacidad, 0),
-    'migration_admin',
+WITH base AS (
+   SELECT  UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-T') codigo,
+'Rollo Rib ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Teñido' nombre,
+u.id unidad_id,
+it.id item_tipo_id,
+articulo_id,
+COALESCE(fibra, '1') fibra 
+FROM partida
+JOIN articulo  a ON a.id = partida.articulo_id
+JOIN item_tipo it ON it.codigo='ROLLO'
+JOIN unidad u ON u.codigo = 'UN'
+WHERE rib>0
+GROUP BY 
+UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-T'),
+'Rollo Rib ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Teñido',
+u.id,
+it.id,
+articulo_id,
+COALESCE(fibra, '1')
+),
+ins_item AS (
+    INSERT INTO item (
+        codigo,
+        nombre,
+        item_tipo_id,
+        unidad_id,
+        fyh_cre
+    )
+    SELECT
+        b.codigo,
+        b.nombre,
+        b.item_tipo_id,
+        b.unidad_id,
+        NOW()
+    FROM base b
+    -- ON CONFLICT (codigo_canon) DO NOTHING
+    RETURNING id, codigo
+)
+INSERT INTO item_rollo_detalle (
+    item_id,
+    articulo_id,
+    fibra,
+    flg_rib,
+    flg_tenido,
+    fyh_cre)
+SELECT
+    i.id,
+    b.articulo_id,
+    b.fibra,
+    true,
+    true,
     NOW()
-FROM source_ubicacion ub
-LEFT JOIN inventario.almacen a ON LOWER(UNACCENT(ub.almacen_codigo)) = a.codigo_canon
-WHERE ub.codigo IS NOT NULL
-ON CONFLICT (codigo_canon) DO NOTHING;
-
--- Migrate item movement types (item_movimiento_tipo)
-INSERT INTO inventario.item_movimiento_tipo (codigo, descripcion, tipo_movimiento, usr_cre, fyh_cre)
-SELECT DISTINCT 
-    LOWER(imt.codigo),
-    imt.descripcion,
-    COALESCE(imt.tipo, 'ENTRADA'),
-    'migration_admin',
-    NOW()
-FROM source_item_movimiento_tipo imt
-WHERE imt.codigo IS NOT NULL
-ON CONFLICT (codigo_canon) DO NOTHING;
+FROM ins_item i
+JOIN base b USING (codigo);
 
 -- ============================================================================
--- 3. DOCUMENT MIGRATION - Doc Schema
+-- MIGRAR INSUMOS
 -- ============================================================================
+SELECT * FROM insumo
+
+SELECT 'I-' ||
+CASE tipo WHEN 'directo' THEN 'COL' WHEN 'reactivo' THEN 'COL' WHEN 'disperso' THEN 'COL' WHEN 'auxiliar' THEN 'AUX' WHEN 'quimico' THEN 'QUIM' END || '-' ||
+CASE tipo WHEN 'directo' THEN 'DIR-' WHEN 'reactivo' THEN 'RX-' WHEN 'disperso' THEN 'DIS-' ELSE '' END ||
+UPPER(trim(both '-' from regexp_replace(regexp_replace(i.insumo COLLATE "C", '\s+', ' ', 'g'), '[^A-Z0-9]+', '-', 'g'))) codigo,
+i.insumo nombre,
+u.id unidad_id,
+i.medida,
+it.id item_tipo_id,
+it2.id insumo_tipo_id,
+ct.id colorante_tipo_id
+FROM insumo i
+LEFT JOIN item_tipo it ON it.codigo = 'INSUMO'
+LEFT JOIN unidad u ON u.codigo = 'kg'
+LEFT JOIN insumo_tipo it2 ON it2.nombre = i.tipo::text ---case when diperso,reactivo or directo then colorante
+LEFT JOIN colorante_tipo ct ON ct.nombre=i.tipo::text
+
+SELECT DISTINCT tipo FROM insumo;
+SELECT * FROM insumo_tipo;
+
+-- ============================================================================
+-- CREAR ALMACENES
+-- ============================================================================
+
+INSERT INTO inventario.almacen(codigo,nombre,fyh_cre)
+VALUES ('ALM-INS', 'Almacén de Insumos', NOW()),
+       ('ALM-CRU', 'Almacén de Crudo', NOW());
+
+INSERT INTO inventario.ubicacion(almacen_id,codigo,nombre,fyh_cre)
+SELECT a.id, 'UBI-01', 'Ubicación 1',NOW()
+FROM inventario.almacen a
+WHERE a.codigo = 'ALM-INS'
+UNION ALL
+SELECT a.id, 'UBI-01', 'Ubicación 1',NOW()
+FROM inventario.almacen a
+WHERE a.codigo = 'ALM-CRU';
+
+
+-- ============================================================================
+-- MIGRAR PARTIDAS
+-- ============================================================================
+SELECT * FROM partida LIMIT 100
+SELECT * FROM partida_estado
+SELECT codigo,prioridad_id,cliente_id,tenido_id,previo_id,articulo_id, malla,rendimiento FROM public.partida pp
 
 -- Migrate production orders (partida)
 INSERT INTO doc.partida (codigo, descripcion, id_cliente, fecha_orden, estado, usr_cre, fyh_cre)

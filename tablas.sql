@@ -182,7 +182,8 @@ CREATE TABLE item (
   flg_elm boolean NOT NULL DEFAULT FALSE,
   usr_elm int,
   fyh_elm timestamptz,
-    UNIQUE(codigo_canon)
+    UNIQUE(codigo_canon),
+    legacy_id int--droppear luego de migracion
 );
 CREATE TRIGGER trg_bi_item_codigo_canon
 BEFORE INSERT OR UPDATE ON item
@@ -433,7 +434,7 @@ EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 CREATE TABLE inventario.ubicacion (
     id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     almacen_id INT NOT NULL REFERENCES inventario.almacen(id),
-    codigo TEXT NOT NULL UNIQUE,
+    codigo TEXT NOT NULL,
     codigo_canon TEXT NOT NULL,
     nombre TEXT NOT NULL,
     usr_cre int,
@@ -442,6 +443,13 @@ CREATE TABLE inventario.ubicacion (
     fyh_mod TIMESTAMPTZ,
     UNIQUE (almacen_id, codigo_canon)
 );
+-- SELECT conname
+-- FROM pg_constraint
+-- WHERE conrelid = 'inventario.ubicacion'::regclass
+--   AND contype = 'u';
+--   ALTER TABLE inventario.ubicacion
+-- DROP CONSTRAINT ubicacion_codigo_key;
+
 CREATE TRIGGER trg_bi_ubicacion_codigo_canon
 BEFORE INSERT OR UPDATE ON inventario.ubicacion
 FOR EACH ROW
@@ -450,6 +458,7 @@ CREATE SCHEMA doc;
 CREATE TYPE partida_estado_produccion_enum AS ENUM (
   'CREADA',        -- order exists, not routed
   'PLANIFICADA',   -- routing + resources assigned
+  'PROGRAMADA',    -- scheduled for execution
   'EN_PROCESO',    -- at least one paso started
   'PAUSADA',       -- execution stopped
   'TECO',          -- technically completed (SAP-style)
@@ -474,6 +483,7 @@ prioridad_id int references prioridad(id),
 cliente_id int references cliente(id),
 tenido_id int references tenido(id),
 previo_id int references previo(id),
+articulo_id int references articulo(id),
 malla text,
 rendimiento text,
 -- Execution State
@@ -488,6 +498,7 @@ usr_cre int,
   usr_mod int,
   fyh_mod TIMESTAMPTZ
 );
+
 
 
 CREATE TABLE doc.partida_detalle(
