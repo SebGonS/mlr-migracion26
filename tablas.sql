@@ -49,7 +49,7 @@ CREATE OR REPLACE VIEW vw_colores AS
 
 
 
-CREATE EXTENSION IF NOT EXISTS unaccent;
+-- CREATE EXTENSION IF NOT EXISTS unaccent;
 
 CREATE OR REPLACE FUNCTION public.fn_trg_set_codigo_canon()
 RETURNS trigger
@@ -68,7 +68,7 @@ $$;
 CREATE TABLE unidad (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     UNIQUE (codigo_canon),
     nombre TEXT NOT NULL,
     usr_cre int,
@@ -80,7 +80,7 @@ CREATE TABLE unidad (
 CREATE TRIGGER trg_bi_unidad_codigo_canon
 BEFORE INSERT OR UPDATE ON unidad
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 INSERT INTO unidad (codigo, nombre)
 VALUES
  ('kg',  'Kilogramo'),
@@ -89,6 +89,9 @@ VALUES
  ('ton', 'Tonelada'),
  ('L',   'Litro'),
  ('mL',  'Mililitro');
+INSERT INTO unidad (codigo, nombre)
+VALUES
+ ('UN', 'Unidad');
 
 
 -- UoM conversions within a UoM group (all reduce to base_uom) Not needed for now
@@ -143,7 +146,7 @@ VALUES
 CREATE TABLE item_tipo(
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     descripcion TEXT NOT NULL,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
@@ -155,7 +158,7 @@ CREATE TABLE item_tipo(
 CREATE TRIGGER trg_bi_item_tipo_codigo_canon
 BEFORE INSERT OR UPDATE ON item_tipo
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 INSERT INTO item_tipo (codigo, descripcion)
 VALUES
 ('ROLLO',     'Rollo de tela (materia prima o en proceso)'),
@@ -166,7 +169,7 @@ VALUES
 CREATE TABLE item (
   id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   codigo TEXT NOT NULL UNIQUE,
-  codigo_canon TEXT NOT NULL
+  codigo_canon TEXT NOT NULL,
   nombre TEXT NOT NULL,
 
   item_tipo_id integer NOT NULL REFERENCES item_tipo(id),
@@ -184,7 +187,7 @@ CREATE TABLE item (
 CREATE TRIGGER trg_bi_item_codigo_canon
 BEFORE INSERT OR UPDATE ON item
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
 CREATE SCHEMA inventario;
 create TYPE inventario.item_movimiento_tipo_categoria_enum as enum (
@@ -198,8 +201,8 @@ create TYPE inventario.item_movimiento_tipo_categoria_enum as enum (
     );
 CREATE OR REPLACE VIEW inventario.vw_item_movimiento_categoria AS
 SELECT
-    unnest(enum_range(NULL::inventario.item_movimiento_tipo_categoria_enum))::text AS codigo,
-    CASE unnest(enum_range(NULL::inventario.item_movimiento_tipo_categoria_enum))
+    c.codigo::text AS codigo,
+    CASE c.codigo
         WHEN 'COMPRA' THEN 'Compras'
         WHEN 'VENTA' THEN 'Ventas'
         WHEN 'PRODUCCION' THEN 'Producción'
@@ -207,14 +210,15 @@ SELECT
         WHEN 'DEVOLUCION' THEN 'Devoluciones'
         WHEN 'AJUSTE' THEN 'Ajustes'
         WHEN 'TRANSFERENCIA' THEN 'Transferencias'
-    END AS nombre;
+    END AS nombre
+FROM unnest(enum_range(NULL::inventario.item_movimiento_tipo_categoria_enum)) AS c(codigo);
 
 CREATE SCHEMA IF NOT EXISTS inventario;
 
 CREATE TABLE inventario.item_movimiento_tipo(
     id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     nombre text NOT NULL,
     
     categoria inventario.item_movimiento_tipo_categoria_enum NOT NULL,
@@ -253,7 +257,7 @@ CREATE TABLE inventario.item_movimiento_tipo(
 CREATE TRIGGER trg_bi_item_movimiento_tipo_codigo_canon
 BEFORE INSERT OR UPDATE ON inventario.item_movimiento_tipo
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
 INSERT INTO inventario.item_movimiento_tipo
 (codigo, nombre, categoria, factor, flg_afecta_stock, flg_valorizable, flg_recalcula_costo, req_partner, req_origen, req_destino, descripcion)
@@ -338,7 +342,7 @@ VALUES
 CREATE TABLE insumo_tipo(
     id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     
     nombre text,
     descripcion text,
@@ -352,14 +356,14 @@ CREATE TABLE insumo_tipo(
 CREATE TRIGGER trg_bi_insumo_tipo_codigo_canon
 BEFORE INSERT OR UPDATE ON insumo_tipo
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 INSERT INTO insumo_tipo (codigo,nombre)
 VALUES ('QUIM','quimico'),('COLOR','colorante'),('AUX','auxiliar');
 
 CREATE TABLE colorante_tipo(
      id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     nombre text,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
@@ -370,7 +374,7 @@ CREATE TABLE colorante_tipo(
 CREATE TRIGGER trg_bi_unidad_codigo_canon
 BEFORE INSERT OR UPDATE ON colorante_tipo
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 INSERT INTO colorante_tipo (nombre,codigo)
 VALUES ('directo','DIR'),('disperso','DISP'),('reactivo','RX');
 
@@ -390,6 +394,8 @@ CREATE TABLE item_insumo_detalle(
 CREATE TABLE item_rollo_detalle(
    item_id INT PRIMARY KEY REFERENCES item(id),
    articulo_id INT NOT NULL references articulo(id),
+   flg_tenido boolean NOT NULL default false,
+   flg_rib boolean NOT NULL default FALSE,
    fibra smallint NOT NULL,
    usr_cre int,
    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
@@ -399,7 +405,7 @@ CREATE TABLE item_rollo_detalle(
 
 
 CREATE OR REPLACE VIEW vw_items AS
-SELECT i.id item_id, i.codigo item_codigo, i.nombre item_nombre, i.item_tipo_id, i.unidad_id, it.item_tipo_codigo, u.unidad_codigo
+SELECT i.id item_id, i.codigo item_codigo, i.nombre item_nombre, i.item_tipo_id, i.unidad_id, it.codigo item_tipo_codigo, u.codigo unidad_codigo
 FROM public.item i
 JOIN public.item_tipo it ON i.item_tipo_id = it.id
 JOIN public.unidad u ON i.unidad_id = u.id;
@@ -411,7 +417,7 @@ JOIN public.unidad u ON i.unidad_id = u.id;
 CREATE TABLE inventario.almacen (
     id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     nombre TEXT NOT NULL,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
@@ -422,13 +428,13 @@ CREATE TABLE inventario.almacen (
 CREATE TRIGGER trg_bi_almacen_codigo_canon
 BEFORE INSERT OR UPDATE ON inventario.almacen
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
 CREATE TABLE inventario.ubicacion (
     id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    almacen_id INT NOT NULL REFERENCES almacen(id),
+    almacen_id INT NOT NULL REFERENCES inventario.almacen(id),
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     nombre TEXT NOT NULL,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
@@ -439,7 +445,7 @@ CREATE TABLE inventario.ubicacion (
 CREATE TRIGGER trg_bi_ubicacion_codigo_canon
 BEFORE INSERT OR UPDATE ON inventario.ubicacion
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 CREATE SCHEMA doc;
 CREATE TYPE partida_estado_produccion_enum AS ENUM (
   'CREADA',        -- order exists, not routed
@@ -466,7 +472,7 @@ numero int,
 -- fecha_recepcion timestamptz DEFAULT NOW(),
 prioridad_id int references prioridad(id),
 cliente_id int references cliente(id),
-tenido_id int references tipo_tenido(id),
+tenido_id int references tenido(id),
 previo_id int references previo(id),
 malla text,
 rendimiento text,
@@ -496,9 +502,9 @@ CREATE TABLE doc.partida_detalle(
 );
 
 CREATE TABLE doc.guia_remision_tipo(
-    smallint  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     nombre text,
     flg_emitida boolean NOT NULL,
     flg_cliente boolean,
@@ -511,7 +517,7 @@ CREATE TABLE doc.guia_remision_tipo(
 CREATE TRIGGER trg_bi_guia_remision_tipo_codigo_canon
 BEFORE INSERT OR UPDATE ON doc.guia_remision_tipo
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
 INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente)
 VALUES
@@ -534,7 +540,7 @@ VALUES
 
 CREATE TABLE doc.guia_remision (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    guia_remision_tipo_id smallint NOT NULL REFERENCES guia_remision_tipo(id),
+    guia_remision_tipo_id smallint NOT NULL REFERENCES doc.guia_remision_tipo(id),
     serie TEXT NOT NULL,
     correlativo TEXT NOT NULL,
     -- emisor_id INT, --proveedor for compra_recepcion, cliente for recepcion_material_cliente
@@ -549,19 +555,38 @@ CREATE TABLE doc.guia_remision (
     fyh_cre timestamptz DEFAULT NOW(),
     usr_mod int,
     fyh_mod timestamptz,
-    UNIQUE (numero,emisor_proveedor_id),
-    UNIQUE (numero,emisor_cliente_id) -- Removed trailing comma here
+    UNIQUE (serie,correlativo,emisor_proveedor_id),
+    UNIQUE (serie,correlativo,emisor_cliente_id) -- Removed trailing comma here
+);
+
+CREATE TABLE inventario.lote (
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  item_id int REFERENCES item(id),
+--   guia_remision_detalle_id bigint references guia_remision_detalle(id), ---guia_remision_detalle si es ingreso externo
+  documento_tipo TEXT,      -- e.g., 'guia_remision', 'partida', 'cuadre'
+  documento_id BIGINT,      -- ID of the document header
+--   cuadre_detalle_id bigint references cuadre_detalle_id(id), ---cuadre si es ajuste
+--   partida_detalle_id bigint references partida_detalle_id(id), ---partida si es resultado de produccion
+cantidad numeric(10,2),
+--     peso numeric(8,2), --only if roll, nullable otherwise,
+--     color_x_cliente_id int,
+detalles JSONB, --peso, color, ancho,etc
+    propietario_id int NULL references cliente(id),
+  usr_cre int,
+  fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+  usr_mod int,
+  fyh_mod TIMESTAMPTZ
 );
 
 
 CREATE TABLE doc.guia_remision_detalle (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 
-    guia_id BIGINT NOT NULL REFERENCES guia_remision(id),
+    guia_id BIGINT NOT NULL REFERENCES doc.guia_remision(id),
 
     item_id INT NOT NULL REFERENCES item(id),
-    lote_id int references lote(id),
-    ubicacion_id int references ubicacion(id),
+    lote_id int references inventario.lote(id),
+    ubicacion_id int references inventario.ubicacion(id),
     cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
     UNIQUE (guia_id, item_id, lote_id, ubicacion_id)
 );
@@ -584,38 +609,19 @@ CREATE TABLE doc.guia_remision_detalle (
 -- EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 
-CREATE TABLE inventario.lote (
-  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  item_id int REFERENCES item(id),
---   guia_remision_detalle_id bigint references guia_remision_detalle(id), ---guia_remision_detalle si es ingreso externo
-  documento_tipo TEXT,      -- e.g., 'guia_remision', 'partida', 'cuadre'
-  documento_id BIGINT,      -- ID of the document header
---   cuadre_detalle_id bigint references cuadre_detalle_id(id), ---cuadre si es ajuste
---   partida_detalle_id bigint references partida_detalle_id(id), ---partida si es resultado de produccion
-cantidad numeric(10,2),
---     peso numeric(8,2), --only if roll, nullable otherwise,
---     color_x_cliente_id int,
-detalles JSONB, --peso, color, ancho,etc
-    propietario_id int NULL references cliente(id),
-  usr_cre int,
-  fyh_cre TIMESTAMPTZ DEFAULT NOW(),
-  usr_mod int,
-  fyh_mod TIMESTAMPTZ
-);
-
 
 
 CREATE TABLE inventario.item_movimientos (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     item_id INT NOT NULL REFERENCES item(id),           -- rollo crudo, rib, terminado
-    lote_id int references lote(id),
+    lote_id int references inventario.lote(id),
     item_movimiento_tipo_id smallint references inventario.item_movimiento_tipo(id) NOT NULL,
     -- movimiento_tipo TEXT NOT NULL CHECK (movimiento_tipo IN (
     --     'INGRESO',
     --     'EGRESO',
     -- )),
-    origen_ubicacion_id INT NULL REFERENCES ubicacion(id),
-    destino_ubicacion_id INT NULL REFERENCES ubicacion(id),
+    origen_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
+    destino_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
     cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
     owner_id int,
     fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -626,6 +632,8 @@ CREATE TABLE inventario.item_movimientos (
     usr_cre int,
     fyh_cre timestamptz DEFAULT NOW()
 );
+
+
 
 CREATE SCHEMA mes;
 
@@ -655,7 +663,7 @@ CREATE TYPE maquina_estado_enum AS ENUM (
 CREATE TABLE mes.operacion (
     id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     nombre text NOT NULL UNIQUE, -- e.g., 'TEÑIDO', 'RAMA', 'HIDRO', 'PERCHADO'
     requiere_receta boolean DEFAULT false, -- If true, operator must select/verify a chemical recipe
     requiere_maquina boolean DEFAULT true,
@@ -669,22 +677,23 @@ CREATE TABLE mes.operacion (
 CREATE TRIGGER trg_bi_operacion_codigo_canon
 BEFORE INSERT OR UPDATE ON mes.operacion
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 -- Seed data based on your JSON
-INSERT INTO mes.operacion (nombre, requiere_receta) VALUES 
-('TERMOFIJADO', false), -- ID 19
-('TEÑIDO', true),       -- ID 5/6
-('LAVADO_HIDRO', true),-- ID 7
-('SECADO', false),      -- ID 8
-('PLANCHADO', false),   -- ID 9
-('PERCHADO', false);    -- ID 20
+INSERT INTO mes.operacion (codigo, nombre, requiere_receta) VALUES
+('TERMO',  'TERMOFIJADO',  false),
+('TEN',    'TEÑIDO',       true),
+('HIDRO',  'LAVADO_HIDRO', true),
+('SEC',    'SECADO',       false),
+('PLAN',   'PLANCHADO',   false),
+('PERCH',  'PERCHADO',    false);
+
 
 ----items especificos procurados para la partida, NO producto final a ser producido si no items que requieran seguimiento a través del rpoceso de produccion 
 CREATE TABLE mes.partida_item(  --production order table detail ¿MES TABLE or public table? it contains the detail of which roll lot the partida is drawing from
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
    partida_id bigint NOT NULL REFERENCES doc.partida(id),
-    lote_id int NOT NULL REFERENCES lote(id), -- The specific roll of fabric
-    ubicacion_id int NOT NULL REFERENCES ubicacion(id),
+    lote_id int NOT NULL REFERENCES inventario.lote(id), -- The specific roll of fabric
+    ubicacion_id int NOT NULL REFERENCES inventario.ubicacion(id),
     peso_kg numeric(10,2),
     cantidad int,
     usr_cre int,
@@ -698,7 +707,7 @@ CREATE TABLE mes.partida_item(  --production order table detail ¿MES TABLE or p
 CREATE TABLE mes.maquina_tipo(
   id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   codigo TEXT NOT NULL UNIQUE,
-  codigo_canon TEXT NOT NULL
+  codigo_canon TEXT NOT NULL,
   nombre text,
   usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
@@ -710,13 +719,13 @@ CREATE TABLE mes.maquina_tipo(
 CREATE TRIGGER trg_bi_maquina_tipo_codigo_canon
 BEFORE INSERT OR UPDATE ON mes.maquina_tipo
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 CREATE TABLE mes.maquina(
     id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     nombre text NOT NULL,
-    maquina_tipo_id smallint references maquina_tipo(id),
+    maquina_tipo_id smallint references mes.maquina_tipo(id),
     estado_actual maquina_estado_enum NOT NULL DEFAULT 'espera',
     ultimo_mantenimiento timestamptz,
     horas_totales int,
@@ -735,12 +744,12 @@ CREATE TABLE mes.maquina(
 CREATE TRIGGER trg_bi_maquina_codigo_canon
 BEFORE INSERT OR UPDATE ON mes.maquina
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
 CREATE TABLE mes.empleado_rol (
     id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
-    codigo_canon TEXT NOT NULL
+    codigo_canon TEXT NOT NULL,
     nombre text NOT NULL,
     descripcion text,
     usr_cre int,
@@ -752,12 +761,12 @@ CREATE TABLE mes.empleado_rol (
 CREATE TRIGGER trg_bi_empleado_rol_codigo_canon
 BEFORE INSERT OR UPDATE ON mes.empleado_rol
 FOR EACH ROW
-EXECUTE FUNCTION public.trg_set_codigo_canon();
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 CREATE TABLE mes.empleado(
   id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   nombre text,
   apellido text,
-  rol_id smallint NOT NULL references empleado_rol(id),
+  rol_id smallint NOT NULL references mes.empleado_rol(id),
   turno_id smallint references turno(id),
    usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
