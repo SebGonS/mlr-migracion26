@@ -162,8 +162,8 @@ EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 INSERT INTO item_tipo (codigo, descripcion)
 VALUES
 ('ROLLO',     'Rollo de tela (materia prima o en proceso)'),
-('INSUMO',    'Insumo químico / colorante / auxiliar'),
-('ROLLO_TERMINADO',  'Producto terminado (rollo teñido)');
+('INSUMO',    'Insumo químico / colorante / auxiliar');
+-- ('ROLLO_TERMINADO',  'Producto terminado (rollo teñido)');
 
 
 CREATE TABLE item (
@@ -184,7 +184,7 @@ CREATE TABLE item (
   fyh_elm timestamptz,
     UNIQUE(codigo_canon),
     legacy_id int--droppear luego de migracion
-);
+);0
 CREATE TRIGGER trg_bi_item_codigo_canon
 BEFORE INSERT OR UPDATE ON item
 FOR EACH ROW
