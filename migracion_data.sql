@@ -246,8 +246,6 @@ JOIN base b USING (codigo);
 -- ============================================================================
 -- MIGRAR INSUMOS
 -- ============================================================================
-SELECT * FROM insumo
-
 SELECT 'I-' ||
 CASE tipo WHEN 'directo' THEN 'COL' WHEN 'reactivo' THEN 'COL' WHEN 'disperso' THEN 'COL' WHEN 'auxiliar' THEN 'AUX' WHEN 'quimico' THEN 'QUIM' END || '-' ||
 CASE tipo WHEN 'directo' THEN 'DIR-' WHEN 'reactivo' THEN 'RX-' WHEN 'disperso' THEN 'DIS-' ELSE '' END ||
@@ -257,15 +255,68 @@ u.id unidad_id,
 i.medida,
 it.id item_tipo_id,
 it2.id insumo_tipo_id,
-ct.id colorante_tipo_id
+ct.id colorante_tipo_id,
+insumo_id
 FROM insumo i
 LEFT JOIN item_tipo it ON it.codigo = 'INSUMO'
 LEFT JOIN unidad u ON u.codigo = 'kg'
-LEFT JOIN insumo_tipo it2 ON it2.nombre = i.tipo::text ---case when diperso,reactivo or directo then colorante
-LEFT JOIN colorante_tipo ct ON ct.nombre=i.tipo::text
+LEFT JOIN insumo_tipo it2 ON it2.nombre = CASE tipo WHEN 'directo' THEN 'colorante' WHEN 'reactivo' THEN 'colorante' WHEN 'disperso' THEN 'colorante' ELSE i.tipo::text END ---case when diperso,reactivo or directo then colorante
+LEFT JOIN colorante_tipo ct ON ct.nombre=i.tipo::text;
 
-SELECT DISTINCT tipo FROM insumo;
-SELECT * FROM insumo_tipo;
+with base AS(
+    SELECT 'I-' ||
+CASE tipo WHEN 'directo' THEN 'COL' WHEN 'reactivo' THEN 'COL' WHEN 'disperso' THEN 'COL' WHEN 'auxiliar' THEN 'AUX' WHEN 'quimico' THEN 'QUIM' END || '-' ||
+CASE tipo WHEN 'directo' THEN 'DIR-' WHEN 'reactivo' THEN 'RX-' WHEN 'disperso' THEN 'DIS-' ELSE '' END ||
+UPPER(trim(both '-' from regexp_replace(regexp_replace(i.insumo COLLATE "C", '\s+', ' ', 'g'), '[^A-Z0-9]+', '-', 'g'))) codigo,
+i.insumo nombre,
+u.id unidad_id,
+i.medida,
+it.id item_tipo_id,
+it2.id insumo_tipo_id,
+ct.id colorante_tipo_id,
+i.id
+FROM insumo i
+LEFT JOIN item_tipo it ON it.codigo = 'INSUMO'
+LEFT JOIN unidad u ON u.codigo = 'kg'
+LEFT JOIN insumo_tipo it2 ON it2.nombre = CASE tipo WHEN 'directo' THEN 'colorante' WHEN 'reactivo' THEN 'colorante' WHEN 'disperso' THEN 'colorante' ELSE i.tipo::text END ---case when diperso,reactivo or directo then colorante
+LEFT JOIN colorante_tipo ct ON ct.nombre=i.tipo::text
+),
+ins as(
+    INSERT INTO item (
+        codigo,
+        nombre,
+        item_tipo_id,
+        unidad_id,
+        fyh_cre,
+        legacy_id
+    )
+    SELECT
+        b.codigo,
+        b.nombre,
+        b.item_tipo_id,
+        b.unidad_id,
+        NOW(),
+        id
+    FROM base b
+    -- ON CONFLICT (codigo_canon) DO NOTHING
+    RETURNING id, codigo
+)
+INSERT INTO item_insumo_detalle(
+    item_id,
+    medida,
+    insumo_tipo_id,
+    colorante_tipo_id,
+    fyh_cre
+)
+SELECT
+    i.id,
+    b.medida,
+    b.insumo_tipo_id,
+    b.colorante_tipo_id,
+    NOW()
+FROM ins i
+JOIN base b USING (codigo);
+
 
 -- ============================================================================
 -- CREAR ALMACENES
@@ -288,8 +339,51 @@ WHERE a.codigo = 'ALM-CRU';
 -- ============================================================================
 -- MIGRAR PARTIDAS
 -- ============================================================================
+--Mapear Estados existentes
+-- SELECT '''' || estado || '''' AS estado FROM estado
+UPDATE estado
+SET estado_produccion = CASE estado
+    WHEN 'Para Programar' THEN 'CREADA'
+    WHEN 'Programado' THEN 'PROGRAMADO'
+    WHEN 'En Proceso Teñido' THEN 'EN_PROCESO'
+    WHEN 'Teñido' THEN 'EN_PROCESO'
+    WHEN 'Lavado Hidro' THEN 'EN_PROCESO'
+    WHEN 'Secado' THEN 'EN_PROCESO'
+    WHEN 'Para Despachar' THEN 'TECO'
+    WHEN 'Despachado' THEN 'CERRADA'
+    WHEN 'Devolución' THEN 'DEVOLUCION'
+    WHEN 'Observado' THEN 'OBSERVADO'
+    WHEN 'Reprocesado' THEN 'REPROCESADO'
+    WHEN 'En Proceso Reproceso' THEN 'EN_PROCESO_REPROCESO'
+    WHEN 'Planchado' THEN 'PLANCHADO'
+    WHEN 'Replanchado' THEN 'REPLANCHADO'
+    WHEN 'Termofijado' THEN 'TERMOFIJADO'
+    WHEN 'Perchado' THEN ''
+END,
+estado_comercial = CASE estado
+    WHEN '' THEN ''
+END
+'Secado'
+'Para Despachar'
+'Despachado'
+'Devolución'
+'Observado'
+'Reprocesado'
+'En Proceso Reproceso'
+'Planchado'
+'Replanchado'
+'Termofijado'
+'Perchado'
 SELECT * FROM partida LIMIT 100
-SELECT * FROM partida_estado
+SELECT * FROM partida_estado_historial
+
+SELECT ROW_NUMBER() OVER (PARTITION BY peh.partida_id ORDER BY peh.id desc) rw,peh.*,e.estado FROM partida_estado_historial peh
+LEFT JOIN estado e ON e.id=peh.estado_id
+ORDER BY partida_id
+
+WITH estado as(SELECT ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY id desc) rw,* FROM partida_estado_historial)
+
+
 SELECT codigo,prioridad_id,cliente_id,tenido_id,previo_id,articulo_id, malla,rendimiento FROM public.partida pp
 
 -- Migrate production orders (partida)
