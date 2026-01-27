@@ -48,7 +48,13 @@ CREATE OR REPLACE VIEW vw_colores AS
 
 
 
-
+CREATE TYPE calidad_estado_enum AS ENUM (
+  'PENDIENTE',     -- waiting inspection
+  'APROBADO',      -- usable
+  'RECHAZADO',     -- scrap
+  'REPROCESO',     -- must go back to process
+  'CUARENTENA'     -- blocked, decision pending
+);
 
 -- CREATE EXTENSION IF NOT EXISTS unaccent;
 
@@ -586,6 +592,7 @@ cantidad numeric(10,2),
 --     peso numeric(8,2), --only if roll, nullable otherwise,
 --     color_x_cliente_id int,
 detalles JSONB, --peso, color, ancho,etc
+estado_calidad calidad_estado_enum DEFAULT 'PENDIENTE',
     propietario_id int NULL references cliente(id),
   usr_cre int,
   fyh_cre TIMESTAMPTZ DEFAULT NOW(),
@@ -653,17 +660,6 @@ CREATE TABLE inventario.item_movimientos (
 CREATE SCHEMA mes;
 
 -- Production Order Status (ISA-95 Standard States)
-CREATE TYPE partida_estado_enum AS ENUM (
- 'CREADA',        -- exists, not yet planned
-  'PLANIFICADA',   -- routing/steps defined, not yet started
-  'EN_PROCESO',    -- at least one paso started
-  'PAUSADA',       -- temporarily stopped (optional but useful)
-  'TECO',          -- technically completed (manual decision)
-  'CERRADA',       -- financially / logistically closed
-  'ENTREGADA',
-  'ENTREGA_PARCIAL'
-  'CANCELADA'      -- aborted
-);
 
 -- Machine Status (For OEE calculation)
 CREATE TYPE maquina_estado_enum AS ENUM (
@@ -867,17 +863,13 @@ ALTER TABLE mes.partida_paso_item
     ADD COLUMN flg_consumido bool DEFAULT false;
 
 CREATE SCHEMA IF NOT EXISTS calidad;
-CREATE TYPE calidad_estado_enum AS ENUM (
-  'PENDIENTE',     -- waiting inspection
-  'APROBADO',      -- usable
-  'RECHAZADO',     -- scrap
-  'RETRABAJO',     -- must go back to process
-  'CUARENTENA'     -- blocked, decision pending
-);
 
-ALTER TABLE inventario.lote
-ADD COLUMN estado_calidad calidad_estado_enum
-DEFAULT 'PENDIENTE';
+-- ALTER TYPE calidad_estado_enum
+-- RENAME VALUE 'RETRABAJO' TO 'REPROCESO';
+
+-- ALTER TABLE inventario.lote
+-- ADD COLUMN estado_calidad calidad_estado_enum
+-- DEFAULT 'PENDIENTE';
 
 CREATE TABLE calidad.inspeccion (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
