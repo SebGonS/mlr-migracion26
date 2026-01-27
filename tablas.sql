@@ -22,6 +22,7 @@
 ALTER TABLE color
 ADD COLUMN codigo text;
 
+
 UPDATE color
 SET codigo =
     UPPER(
@@ -474,6 +475,9 @@ CREATE TYPE partida_estado_comercial_enum AS ENUM (
   'FACTURADA',         -- financially closed
   'CANCELADA'          -- voided before completion
 );
+ALTER TABLE estado
+ADD COLUMN estado_produccion partida_estado_produccion_enum,
+ADD COLUMN estado_comercial partida_estado_comercial_enum;
 
 CREATE TABLE doc.partida(  --production order table ¿MES TABLE?
 id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -835,6 +839,7 @@ CREATE TABLE mes.partida_paso (
     
     -- Timestamps for OEE
     empleado_id smallint references mes.empleado(id),
+    flg_final bool DEFAULT false,
     fyh_inicio timestamptz,
     fyh_fin timestamptz,
      usr_cre int,
@@ -845,17 +850,43 @@ CREATE TABLE mes.partida_paso (
     UNIQUE (partida_id, secuencia)
 );
 
+
 CREATE TABLE mes.partida_paso_item (
     partida_paso_id bigint NOT NULL REFERENCES mes.partida_paso(id),
     partida_item_id int NOT NULL REFERENCES mes.partida_item(id), -- Must be one of the IDs in partida_rollo
     cantidad numeric(10,2) NOT NULL,
     peso numeric(10,2) NOT NULL,
+    flg_consumido bool DEFAULT false,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
   usr_mod int,
   fyh_mod TIMESTAMPTZ,
     PRIMARY KEY (partida_paso_id, partida_item_id)
 );
+ALTER TABLE mes.partida_paso_item
+    ADD COLUMN flg_consumido bool DEFAULT false;
 
+CREATE SCHEMA IF NOT EXISTS calidad;
+CREATE TYPE calidad_estado_enum AS ENUM (
+  'PENDIENTE',     -- waiting inspection
+  'APROBADO',      -- usable
+  'RECHAZADO',     -- scrap
+  'RETRABAJO',     -- must go back to process
+  'CUARENTENA'     -- blocked, decision pending
+);
 
+ALTER TABLE inventario.lote
+ADD COLUMN estado_calidad calidad_estado_enum
+DEFAULT 'PENDIENTE';
 
+CREATE TABLE calidad.inspeccion (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  lote_id int NOT NULL REFERENCES inventario.lote(id),
+  partida_paso_id bigint REFERENCES mes.partida_paso(id),
+  resultado calidad_estado_enum NOT NULL,
+  observacion text,
+  empleado_id int references mes.empleado(id),
+  fyh_inspeccion timestamptz DEFAULT now(),
+  usr_cre int,
+  fyh_cre TIMESTAMPTZ DEFAULT NOW()
+);
