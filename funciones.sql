@@ -676,7 +676,7 @@ $function$;
 
 
 
-CREATE OR REPLACE FUNCTION mes.planificar_partida(p_partida_pasos jsonb)
+CREATE OR REPLACE FUNCTION mes.planificar_partida(p_orden_produccion_pasos jsonb)
  RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -693,23 +693,23 @@ DECLARE
     v_usr_id int := get_user_id();
 BEGIN
  INSERT INTO logs_api(function_name, user_id, params)
-        VALUES ('planificar_partida', v_usr_id, p_partida_pasos::TEXT);
-    INSERT INTO partida_paso (
+        VALUES ('planificar_partida', v_usr_id, p_orden_produccion_pasos::TEXT);
+    INSERT INTO orden_produccion_paso (
         partida_id,
         secuencia,
         operacion_id
         estado
     )
     VALUES (
-        (p_partida_pasos->>'partida_id')::BIGINT,
-        (p_partida_pasos->>'secuencia')::INT,
-        (p_partida_pasos->>'operacion_id')::smallint,
+        (p_orden_produccion_pasos->>'partida_id')::BIGINT,
+        (p_orden_produccion_pasos->>'secuencia')::INT,
+        (p_orden_produccion_pasos->>'operacion_id')::smallint,
         'PENDIENTE'
     )
     RETURNING id INTO v_item_id;
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Partida Planificada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' planificó la partida' || COALESCE(p_partida_pasos->>'partida_id','error'), 'info',jsonb_build_object('objeto_tipo','partida','partida_id', (p_partida_pasos->>'partida_id')::BIGINT)
+SELECT ur.user_id,'Partida Planificada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' planificó la partida' || COALESCE(p_orden_produccion_pasos->>'partida_id','error'), 'info',jsonb_build_object('objeto_tipo','partida','partida_id', (p_orden_produccion_pasos->>'partida_id')::BIGINT)
 FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;

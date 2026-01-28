@@ -565,44 +565,77 @@ BEFORE INSERT OR UPDATE OR DELETE ON mes.ruta_plantilla_detalle
 FOR EACH ROW
 EXECUTE FUNCTION audit.fn_audit_row();
 
+-----ORDEN DE PRODUCCION
 -----PARTIDA PASO
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
-ON mes.partida_paso
+REVOKE INSERT (usr_cre, fyh_cre)
+ON mes.orden_produccion
 FROM anon, authenticated;
-
 REVOKE UPDATE (usr_cre, fyh_cre)
-ON mes.partida_paso
+ON mes.orden_produccion
 FROM anon, authenticated;
-CREATE TRIGGER trg_biud_partida_paso_audit
-BEFORE INSERT OR UPDATE OR DELETE ON mes.partida_paso
-FOR EACH ROW
-EXECUTE FUNCTION audit.fn_audit_row();
 
-CREATE TRIGGER trg_bi_partida_paso_audit
-BEFORE INSERT ON mes.partida_paso
+CREATE TRIGGER trg_bi_orden_produccion_audit
+BEFORE INSERT ON mes.orden_produccion
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 
-CREATE TRIGGER trg_bu_partida_paso_audit
-BEFORE UPDATE ON mes.partida_paso
+
+
+
+-----PARTIDA PASO
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
+ON mes.orden_produccion_paso
+FROM anon, authenticated;
+
+REVOKE UPDATE (usr_cre, fyh_cre)
+ON mes.orden_produccion_paso
+FROM anon, authenticated;
+CREATE TRIGGER trg_biud_orden_produccion_paso_audit
+BEFORE INSERT OR UPDATE OR DELETE ON mes.orden_produccion_paso
+FOR EACH ROW
+EXECUTE FUNCTION audit.fn_audit_row();
+
+CREATE TRIGGER trg_bi_orden_produccion_paso_audit
+BEFORE INSERT ON mes.orden_produccion_paso
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+CREATE TRIGGER trg_bu_orden_produccion_paso_audit
+BEFORE UPDATE ON mes.orden_produccion_paso
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 -----partida paso item
 
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
-ON mes.partida_paso_item
+ON mes.orden_produccion_paso_item
 FROM anon, authenticated;
 
 REVOKE UPDATE (usr_cre, fyh_cre)
-ON mes.partida_paso_item
+ON mes.orden_produccion_paso_item
 FROM anon, authenticated;
 
-CREATE TRIGGER trg_bi_partida_paso_item_audit
-BEFORE INSERT ON mes.partida_paso_item
+CREATE TRIGGER trg_bi_orden_produccion_paso_item_audit
+BEFORE INSERT ON mes.orden_produccion_paso_item
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_partida_paso_item_audit
-BEFORE UPDATE ON mes.partida_paso_item
+CREATE TRIGGER trg_bu_orden_produccion_paso_item_audit
+BEFORE UPDATE ON mes.orden_produccion_paso_item
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+
+
+---inspeccion
+
+REVOKE INSERT (usr_cre, fyh_cre)
+ON calidad.inspeccion
+FROM anon, authenticated;
+
+REVOKE UPDATE (usr_cre, fyh_cre)
+ON calidad.inspeccion
+FROM anon, authenticated;
+
+CREATE TRIGGER trg_bi_inspeccion_audit
+BEFORE INSERT ON calidad.inspeccion
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();

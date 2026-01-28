@@ -462,28 +462,37 @@ BEFORE INSERT OR UPDATE ON inventario.ubicacion
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 CREATE SCHEMA doc;
-CREATE TYPE partida_estado_produccion_enum AS ENUM (
-  'CREADA',        -- order exists, not routed
-  'PLANIFICADA',   -- routing + resources assigned
-  'PROGRAMADA',    -- scheduled for execution
+DROP TYPE IF EXISTS orden_produccion_estado_enum;
+CREATE TYPE orden_produccion_estado_enum AS ENUM (
+  'CREADA',        -- exists, no routing
+  'PLANIFICADA',   -- route + resources defined
+  'PROGRAMADA',    -- scheduled in time
+  'LIBERADA',      -- allowed to execute (SAP-style)
   'EN_PROCESO',    -- at least one paso started
   'PAUSADA',       -- execution stopped
-  'TECO',          -- technically completed (SAP-style)
-  'CERRADA',       -- no more postings allowed
-  'CANCELADA'      -- aborted
+  'FINALIZADA',    -- physically finished
+  'TECO',          -- technically completed (no more postings)
+  'CERRADA',       -- administratively closed
+  'CANCELADA'
 );
-CREATE TYPE partida_estado_comercial_enum AS ENUM (
-  'CREADA',            -- exists, not yet accepted
-  'CONFIRMADA',        -- approved for execution
-  'EN_PRODUCCION',     -- linked to an active production order
-  'ENTREGA_PARCIAL',   -- partially delivered
+DROP TYPE IF EXISTS partida_estado_enum;
+CREATE TYPE partida_estado_enum AS ENUM (
+  'CREADA',            -- captured, not yet accepted
+  'CONFIRMADA',        -- approved by client
+  'EN_PRODUCCION',     -- at least one active orden_produccion exists
+  'ENTREGA_PARCIAL',   -- some quantities delivered
   'ENTREGADA',         -- fully delivered
+  'DEVUELTA_PARCIAL',  -- client returned part
+  'DEVUELTA_TOTAL',    -- client returned everything
   'FACTURADA',         -- financially closed
+  'CERRADA',
   'CANCELADA'          -- voided before completion
 );
+
+-- ALTER TABLE estado DROP COLUMN estado_produccion, DROP COLUMN estado_comercial;
 ALTER TABLE estado
-ADD COLUMN estado_produccion partida_estado_produccion_enum,
-ADD COLUMN estado_comercial partida_estado_comercial_enum;
+ADD COLUMN estado_produccion partida_estado_enum,
+ADD COLUMN estado_comercial orden_produccion_estado_enum;
 
 CREATE TABLE doc.partida(  --production order table ¿MES TABLE?
 id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -813,9 +822,35 @@ CREATE TABLE mes.ruta_plantilla_detalle (
     UNIQUE (ruta_plantilla_id,secuencia)
 );
 
+CREATE TYPE orden_produccion_tipo_enum as enum ('NORMAL', 'REPROCESO', 'AJUSTE');
+CREATE VIEW vw_orden_produccion_tipo AS
+SELECT unnest(enum_range(NULL::orden_produccion_tipo_enum)) AS tipo;
+
+
+CREATE TABLE mes.orden_produccion (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+  partida_id bigint NOT NULL REFERENCES doc.partida(id),
+
+  tipo orden_produccion_tipo_enum NOT NULL,
+
+  orden_origen_id bigint REFERENCES mes.orden_produccion(id), --Para reprocesos o ajustes
+
+  estado partida_estado_enum NOT NULL DEFAULT 'CREADA',
+
+  fyh_cre timestamptz DEFAULT now(),
+  fyh_inicio timestamptz,
+  fyh_fin timestamptz,
+
+  usr_cre int
+);
 
 -- This table replaces your "States" for tracking physical progress
-CREATE TABLE mes.partida_paso (
+
+CREATE TYPE orden_produccion_paso_estado_enum as ENUM('PENDIENTE', 'EN_PROCESO', 'COMPLETADO', 'OMITIDO');
+
+
+CREATE TABLE mes.orden_produccion_paso (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     partida_id bigint NOT NULL REFERENCES doc.partida(id),
     secuencia smallint NOT NULL, -- Order of execution
@@ -831,7 +866,7 @@ CREATE TABLE mes.partida_paso (
     receta_id int references receta2(id), -- Foreign key to your existing Recipe Header table
     
     -- Status of THIS specific step
-    estado text CHECK (estado IN ('PENDIENTE', 'EN_PROCESO', 'COMPLETADO', 'OMITIDO')),
+    estado orden_produccion_paso_estado_enum DEFAULT 'PENDIENTE',
     
     -- Timestamps for OEE
     empleado_id smallint references mes.empleado(id),
@@ -846,21 +881,19 @@ CREATE TABLE mes.partida_paso (
     UNIQUE (partida_id, secuencia)
 );
 
-
-CREATE TABLE mes.partida_paso_item (
-    partida_paso_id bigint NOT NULL REFERENCES mes.partida_paso(id),
+CREATE TABLE mes.orden_produccion_paso_item (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    orden_produccion_paso_id bigint NOT NULL REFERENCES mes.orden_produccion_paso(id),
     partida_item_id int NOT NULL REFERENCES mes.partida_item(id), -- Must be one of the IDs in partida_rollo
     cantidad numeric(10,2) NOT NULL,
-    peso numeric(10,2) NOT NULL,
     flg_consumido bool DEFAULT false,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
   usr_mod int,
   fyh_mod TIMESTAMPTZ,
-    PRIMARY KEY (partida_paso_id, partida_item_id)
+    UNIQUE (orden_produccion_paso_id, partida_item_id)
 );
-ALTER TABLE mes.partida_paso_item
-    ADD COLUMN flg_consumido bool DEFAULT false;
+
 
 CREATE SCHEMA IF NOT EXISTS calidad;
 
@@ -874,7 +907,7 @@ CREATE SCHEMA IF NOT EXISTS calidad;
 CREATE TABLE calidad.inspeccion (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   lote_id int NOT NULL REFERENCES inventario.lote(id),
-  partida_paso_id bigint REFERENCES mes.partida_paso(id),
+  orden_produccion_paso_id bigint REFERENCES mes.orden_produccion_paso(id),
   resultado calidad_estado_enum NOT NULL,
   observacion text,
   empleado_id int references mes.empleado(id),
