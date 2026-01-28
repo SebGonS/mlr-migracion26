@@ -340,54 +340,130 @@ WHERE a.codigo = 'ALM-CRU';
 -- ============================================================================
 --Mapear Estados existentes
 -- SELECT '''' || estado || '''' AS estado FROM estado
-SELECT * FROm estado
+UPDATE partida
+SET fyh_cre_tz=fyh_cre + INTERVAL '5 hours'
+WHERE fyh_cre_tz='2025-09-11 22:53:28.212517+00';
 UPDATE estado
 SET estado_produccion = CASE estado
-    WHEN 'Para Programar' THEN 'CREADA'
-    WHEN 'Programado' THEN 'PROGRAMADO'
-    WHEN 'En Proceso Teñido' THEN 'EN_PROCESO'
-    WHEN 'Teñido' THEN 'EN_PROCESO'
-    WHEN 'Lavado Hidro' THEN 'EN_PROCESO'
-    WHEN 'Secado' THEN 'EN_PROCESO'
-    WHEN 'Para Despachar' THEN 'TECO'
-    WHEN 'Despachado' THEN 'CERRADA'
-    WHEN 'Devolución' THEN 'CERRADA'
-    WHEN 'Observado' THEN 'TECO'
-    WHEN 'Reprocesado' THEN 'EN_PROCESO'
-    WHEN 'En Proceso Reproceso' THEN 'EN_PROCESO'
-    WHEN 'Planchado' THEN 'EN_PROCESO'
-    WHEN 'Replanchado' THEN 'EN_PROCESO'
-    WHEN 'Termofijado' THEN 'EN_PROCESO'
-    WHEN 'Perchado' THEN 'EN_PROCESO'
+    WHEN 'Para Programar' THEN 'CREADA'::orden_produccion_estado_enum
+    WHEN 'Programado' THEN 'PROGRAMADA'::orden_produccion_estado_enum
+    WHEN 'En Proceso Teñido' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    WHEN 'Teñido' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    WHEN 'Lavado Hidro' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    WHEN 'Secado' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    WHEN 'Para Despachar' THEN 'TECO'::orden_produccion_estado_enum
+    WHEN 'Despachado' THEN 'CERRADA'::orden_produccion_estado_enum
+    WHEN 'Devolución' THEN 'CERRADA'::orden_produccion_estado_enum
+    WHEN 'Observado' THEN 'TECO'::orden_produccion_estado_enum
+    WHEN 'Reprocesado' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    WHEN 'En Proceso Reproceso' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    WHEN 'Planchado' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    WHEN 'Replanchado' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    WHEN 'Termofijado' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    WHEN 'Perchado' THEN 'EN_PROCESO'::orden_produccion_estado_enum
 END,
 estado_comercial = CASE estado
- WHEN 'Para Programar' THEN 'CREADA'
-    WHEN 'Programado' THEN 'CONFIRMADA'
-    WHEN 'En Proceso Teñido' THEN 'EN_PRODUCCION'
-    WHEN 'Teñido' THEN 'EN_PRODUCCION'
-    WHEN 'Lavado Hidro' THEN 'EN_PRODUCCION'
-    WHEN 'Secado' THEN 'EN_PRODUCCION'
-    WHEN 'Para Despachar' THEN 'EN_PRODUCCION'
-    WHEN 'Despachado' THEN 'ENTREGADA'
-    WHEN 'Devolución' THEN 'CERRADA'
-    WHEN 'Observado' THEN 'ENTREGADA'
-    WHEN 'Reprocesado' THEN 'EN_PRODUCCION'
-    WHEN 'En Proceso Reproceso' THEN 'EN_PROCESO_REPROCESO'
-    WHEN 'Planchado' THEN 'PLANCHADO'
-    WHEN 'Replanchado' THEN 'REPLANCHADO'
-    WHEN 'Termofijado' THEN 'TERMOFIJADO'
-    WHEN 'Perchado' THEN 'PERCHADO'
-SELECT * FROM partida LIMIT 100
-SELECT * FROM partida_estado_historial
+ WHEN 'Para Programar' THEN 'CREADA'::partida_estado_enum
+    WHEN 'Programado' THEN 'CONFIRMADA'::partida_estado_enum
+    WHEN 'En Proceso Teñido' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'Teñido' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'Lavado Hidro' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'Secado' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'Para Despachar' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'Despachado' THEN 'ENTREGADA'::partida_estado_enum
+    WHEN 'Devolución' THEN 'DEVUELTA_PARCIAL'::partida_estado_enum
+    WHEN 'Observado' THEN 'ENTREGADA'::partida_estado_enum
+    WHEN 'Reprocesado' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'En Proceso Reproceso' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'Planchado' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'Replanchado' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'Termofijado' THEN 'EN_PRODUCCION'::partida_estado_enum
+    WHEN 'Perchado' THEN 'EN_PRODUCCION'::partida_estado_enum END
+
+-- SELECT * FROM partida LIMIT 100
+-- SELECT * FROM partida_estado_historial
 
 SELECT ROW_NUMBER() OVER (PARTITION BY peh.partida_id ORDER BY peh.id desc) rw,peh.*,e.estado FROM partida_estado_historial peh
 LEFT JOIN estado e ON e.id=peh.estado_id
 ORDER BY partida_id
 
-WITH estado as(SELECT ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY id desc) rw,* FROM partida_estado_historial)
-
-
-SELECT codigo,prioridad_id,cliente_id,tenido_id,previo_id,articulo_id, malla,rendimiento FROM public.partida pp
+WITH ult_estado as(SELECT ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY id desc) rw,* FROM partida_estado_historial)
+,base as(SELECT 
+pp.id,
+pp.codigo,pp.prioridad_id,pp.cliente_id,
+pp.tenido_id,pp.previo_id,
+pp.articulo_id, pp.malla,pp.rendimiento,
+pp.rib
+e.estado,
+e.estado_comercial,
+e.estado_produccion,
+pp.fecha_registro,
+pp.fecha_entrega,
+pp.usr_cre,
+pp.fyh_cre_tz
+FROM public.partida pp
+LEFT JOIN ult_estado ue ON pp.id = ue.partida_id AND rw=1
+LEFT JOIN estado e ON ue.estado_id = e.id)
+,ins_partida as(
+   INSERT INTO doc.partida (
+    id,
+    numero,
+    prioridad_id,
+    cliente_id,
+    tenido_id,
+    previo_id,
+    articulo_id,
+    fibra,
+    malla,
+    rendimiento,
+    estado,
+    fyh_programacion,
+    fyh_inicio,
+    fyh_fin,
+    usr_cre,
+    fyh_cre
+)
+OVERRIDING SYSTEM VALUE
+SELECT
+    p.id,          -- same id as old partida
+    p.codigo,
+    p.prioridad_id,
+    p.cliente_id,
+    p.tenido_id,
+    p.previo_id,
+    p.articulo_id,
+    p.fibra,
+    p.malla,
+    p.rendimiento,
+    p.estado_comercial,
+    p.fecha_registro,
+    p.fecha_registro,
+    p.fecha_entrega,
+    p.usr_cre,
+    p.fyh_cre_tz
+FROM base p
+RETURNING id
+),
+ins_partida_detalle AS (
+    INSERT INTO doc.partida_detalle (
+        id_partida,
+        id_item,
+        cantidad,
+        usr_cre,
+        fyh_cre
+    )
+    SELECT
+        ins_partida.id,
+        i.id,
+        COALESCE(pd.cantidad, 0),
+        COALESCE(pd.observaciones, ''),
+        'migration_admin',
+        NOW()
+    FROM base p
+    LEFT JOIN item_rollo_detalle ird ON ird.articulo_id=p.articulo_id AND flg_tenido=false AND (!flg_rib OR (flg_rib AND p.rib>0))
+    WHERE pd.codigo_partida IS NOT NULL AND pd.codigo_item IS NOT NULL
+    ON CONFLICT (id_partida, id_item) DO NOTHING
+)
 
 -- Migrate production orders (partida)
 INSERT INTO doc.partida (codigo, descripcion, id_cliente, fecha_orden, estado, usr_cre, fyh_cre)

@@ -491,8 +491,10 @@ CREATE TYPE partida_estado_enum AS ENUM (
 
 -- ALTER TABLE estado DROP COLUMN estado_produccion, DROP COLUMN estado_comercial;
 ALTER TABLE estado
-ADD COLUMN estado_produccion partida_estado_enum,
-ADD COLUMN estado_comercial orden_produccion_estado_enum;
+DROP COLUMN IF EXISTS estado_produccion,
+DROP COLUMN IF EXISTS estado_comercial,
+ADD COLUMN estado_produccion orden_produccion_estado_enum,
+ADD COLUMN estado_comercial partida_estado_enum;
 
 CREATE TABLE doc.partida(  --production order table ¿MES TABLE?
 id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
