@@ -506,8 +506,7 @@ articulo_id int references articulo(id),
 malla text,
 rendimiento text,
 -- Execution State
-estado_produccion partida_estado_produccion_enum NOT NULL DEFAULT 'CREADA',
-estado_comercial partida_estado_comercial_enum NOT NULL DEFAULT 'CREADA',
+estado partida_estado_enum DEFAULT 'CREADA',
     -- Timestamps
 fyh_programacion timestamptz,
 fyh_inicio timestamptz,
@@ -517,8 +516,6 @@ usr_cre int,
   usr_mod int,
   fyh_mod TIMESTAMPTZ
 );
-
-
 
 CREATE TABLE doc.partida_detalle(
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

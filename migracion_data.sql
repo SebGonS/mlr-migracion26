@@ -335,14 +335,12 @@ SELECT a.id, 'UBI-01', 'Ubicación 1',NOW()
 FROM inventario.almacen a
 WHERE a.codigo = 'ALM-CRU';
 
-
-SELECT * FROM item
-
 -- ============================================================================
 -- MIGRAR PARTIDAS
 -- ============================================================================
 --Mapear Estados existentes
 -- SELECT '''' || estado || '''' AS estado FROM estado
+SELECT * FROm estado
 UPDATE estado
 SET estado_produccion = CASE estado
     WHEN 'Para Programar' THEN 'CREADA'
