@@ -505,6 +505,7 @@ cliente_id int references cliente(id),
 tenido_id int references tenido(id),
 previo_id int references previo(id),
 articulo_id int references articulo(id),
+fibra smallint,
 malla text,
 rendimiento text,
 -- Execution State
