@@ -445,11 +445,9 @@ SELECT
     p.fyh_cre_tz
 FROM base p
 RETURNING id
-)
--- ,ins_partida_detalle AS (
-    INSERT INTO doc.partida_detalle (
-        id_partida,
-        id_item,
+)    INSERT INTO doc.partida_detalle (
+        partida_id,
+        item_id,
         cantidad,
         usr_cre,
         fyh_cre
@@ -463,13 +461,53 @@ RETURNING id
     FROM base p
     LEFT JOIN item_rollo_detalle ird
     ON ird.articulo_id=p.articulo_id AND flg_tenido=true AND (flg_rib=false OR (flg_rib AND p.rib>0))
-    AND p.fibra=ird.fibra
--- )
+    AND COALESCE(p.fibra,1)=ird.fibra;
 
--- Migrate shipment guides (guia_remision)
+--============================================
+--EJECUTAR ESTA SECCION MANUALMENTE
+--============================================
+SELECT DISTINCT estado FROM doc.partida;
 
--- Migrate shipment guide details (guia_remision_detalle)
 
+INSERT INTO mes.orden_produccion(
+  partida_id,
+  tipo,
+  estado,
+  fyh_cre,
+  fyh_inicio,
+  fyh_fin
+)
+SELECT 
+  p.id partida_id,
+  'NORMAL' tipo,
+  CASE COALESCE(p.estado,'ENTREGADA')
+  WHEN 'CONFIRMADA' THEN 'PLANIFICADA'::orden_produccion_estado_enum
+  WHEN 'ENTREGADA' THEN 'CERRADA'::orden_produccion_estado_enum
+  WHEN 'EN_PRODUCCION' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+  END estado,
+  NOW() fyh_cre,
+  pp.fecha_registro fyh_inicio,
+  pp.fecha_entrega fyh_fin
+FROM doc.partida p
+LEFT JOIN public.partida pp ON pp.id=p.id
+;
 
-
+---INSERTAR REPROCESOS
+INSERT INTO mes.orden_produccion(
+  partida_id,
+  tipo,
+  estado,
+  fyh_cre,
+  fyh_inicio,
+  fyh_fin
+)
+WITH ult_estado as(SELECT ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY id desc) rw,* FROM partida_estado_historial)
+SELECT p.id,'REPROCESO' tipo, 'CERRADA',NOW() fyh_cre,   
+ue.fecha_ejecucion fyh_inicio,
+  ue.fecha_ejecucion fyh_fin
+FROM doc.partida p
+LEFT JOIN public.partida pp ON pp.id=p.id
+LEFT JOIN ult_estado ue ON p.id = ue.partida_id
+LEFT JOIN estado e ON e.id=ue.estado_id
+WHERE e.estado LIKE '%Reprocesado%'
 

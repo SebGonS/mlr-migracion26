@@ -823,7 +823,8 @@ CREATE TABLE mes.ruta_plantilla_detalle (
     UNIQUE (ruta_plantilla_id,secuencia)
 );
 
-CREATE TYPE orden_produccion_tipo_enum as enum ('NORMAL', 'REPROCESO', 'AJUSTE');
+CREATE TYPE orden_produccion_tipo_enum as enum 
+('NORMAL', 'REPROCESO', 'AJUSTE');
 CREATE VIEW vw_orden_produccion_tipo AS
 SELECT unnest(enum_range(NULL::orden_produccion_tipo_enum)) AS tipo;
 
@@ -837,7 +838,7 @@ CREATE TABLE mes.orden_produccion (
 
   orden_origen_id bigint REFERENCES mes.orden_produccion(id), --Para reprocesos o ajustes
 
-  estado partida_estado_enum NOT NULL DEFAULT 'CREADA',
+  estado orden_produccion_estado_enum NOT NULL DEFAULT 'CREADA',
 
   fyh_cre timestamptz DEFAULT now(),
   fyh_inicio timestamptz,
@@ -845,8 +846,6 @@ CREATE TABLE mes.orden_produccion (
 
   usr_cre int
 );
-
--- This table replaces your "States" for tracking physical progress
 
 CREATE TYPE orden_produccion_paso_estado_enum as ENUM('PENDIENTE', 'EN_PROCESO', 'COMPLETADO', 'OMITIDO');
 
@@ -922,4 +921,6 @@ CREATE TABLE doc.compra_guia_remision(
   compra_id int,
   usr_cre int,
   fyh_cre timestamptz
-)
+);
+
+
