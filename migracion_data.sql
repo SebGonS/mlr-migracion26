@@ -393,7 +393,9 @@ pp.id,
 pp.codigo,pp.prioridad_id,pp.cliente_id,
 pp.tenido_id,pp.previo_id,
 pp.articulo_id, pp.malla,pp.rendimiento,
-pp.rib
+pp.rib,
+pp.rollos,
+pp.fibra,
 e.estado,
 e.estado_comercial,
 e.estado_produccion,
@@ -443,8 +445,8 @@ SELECT
     p.fyh_cre_tz
 FROM base p
 RETURNING id
-),
-ins_partida_detalle AS (
+)
+-- ,ins_partida_detalle AS (
     INSERT INTO doc.partida_detalle (
         id_partida,
         id_item,
@@ -453,106 +455,21 @@ ins_partida_detalle AS (
         fyh_cre
     )
     SELECT
-        ins_partida.id,
-        i.id,
-        COALESCE(pd.cantidad, 0),
-        COALESCE(pd.observaciones, ''),
-        'migration_admin',
-        NOW()
+        p.id,
+        ird.item_id,
+        CASE WHEN ird.flg_rib THEN p.rib ELSE p.rollos END,
+        p.usr_cre,
+        p.fyh_cre_tz
     FROM base p
-    LEFT JOIN item_rollo_detalle ird ON ird.articulo_id=p.articulo_id AND flg_tenido=false AND (!flg_rib OR (flg_rib AND p.rib>0))
-    WHERE pd.codigo_partida IS NOT NULL AND pd.codigo_item IS NOT NULL
-    ON CONFLICT (id_partida, id_item) DO NOTHING
-)
-
--- Migrate production orders (partida)
-INSERT INTO doc.partida (codigo, descripcion, id_cliente, fecha_orden, estado, usr_cre, fyh_cre)
-SELECT 
-    p.codigo,
-    COALESCE(p.descripcion, ''),
-    COALESCE(c.id, 1), -- Default cliente if not found
-    COALESCE(p.fecha_orden, NOW()),
-    COALESCE(p.estado, 'creado'),
-    'migration_admin',
-    NOW()
-FROM source_partida p
-LEFT JOIN source_cliente c ON p.id_cliente = c.id
-WHERE p.codigo IS NOT NULL
-ON CONFLICT (codigo_canon) DO NOTHING;
-
--- Migrate production order details (partida_detalle)
-INSERT INTO doc.partida_detalle (id_partida, id_item, cantidad, observaciones, usr_cre, fyh_cre)
-SELECT 
-    par.id,
-    i.id,
-    COALESCE(pd.cantidad, 0),
-    COALESCE(pd.observaciones, ''),
-    'migration_admin',
-    NOW()
-FROM source_partida_detalle pd
-LEFT JOIN doc.partida par ON LOWER(UNACCENT(pd.codigo_partida)) = par.codigo_canon
-LEFT JOIN public.item i ON LOWER(UNACCENT(pd.codigo_item)) = i.codigo_canon
-WHERE pd.codigo_partida IS NOT NULL AND pd.codigo_item IS NOT NULL
-ON CONFLICT (id_partida, id_item) DO NOTHING;
+    LEFT JOIN item_rollo_detalle ird
+    ON ird.articulo_id=p.articulo_id AND flg_tenido=true AND (flg_rib=false OR (flg_rib AND p.rib>0))
+    AND p.fibra=ird.fibra
+-- )
 
 -- Migrate shipment guides (guia_remision)
-INSERT INTO doc.guia_remision (codigo, id_partida, tipo_movimiento, fecha_movimiento, estado, usr_cre, fyh_cre)
-SELECT 
-    gr.codigo,
-    COALESCE(par.id, 1), -- Default if not found
-    COALESCE(gr.tipo_movimiento, 'compra_ingreso'),
-    COALESCE(gr.fecha_movimiento, NOW()),
-    COALESCE(gr.estado, 'pendiente'),
-    'migration_admin',
-    NOW()
-FROM source_guia_remision gr
-LEFT JOIN doc.partida par ON LOWER(UNACCENT(gr.codigo_partida)) = par.codigo_canon
-WHERE gr.codigo IS NOT NULL
-ON CONFLICT (codigo_canon) DO NOTHING;
 
 -- Migrate shipment guide details (guia_remision_detalle)
-INSERT INTO doc.guia_remision_detalle (id_guia_remision, id_item, id_ubicacion, lote, cantidad, usr_cre, fyh_cre)
-SELECT 
-    gr.id,
-    i.id,
-    COALESCE(u.id, 1), -- Default location if not found
-    COALESCE(grd.lote, 'SIN_LOTE'),
-    COALESCE(grd.cantidad, 0),
-    'migration_admin',
-    NOW()
-FROM source_guia_remision_detalle grd
-LEFT JOIN doc.guia_remision gr ON LOWER(UNACCENT(grd.codigo_guia)) = gr.codigo_canon
-LEFT JOIN public.item i ON LOWER(UNACCENT(grd.codigo_item)) = i.codigo_canon
-LEFT JOIN inventario.ubicacion u ON LOWER(UNACCENT(grd.ubicacion)) = u.codigo_canon
-WHERE grd.codigo_guia IS NOT NULL AND grd.codigo_item IS NOT NULL
-ON CONFLICT (id_guia_remision, id_item) DO NOTHING;
 
--- ============================================================================
--- 4. MANUFACTURING EXECUTION MIGRATION - MES Schema
--- ============================================================================
 
--- Migrate production templates (if applicable to your MES)
--- INSERT INTO mes.plantilla_produccion ...
 
--- ============================================================================
--- 5. VERIFICATION & CLEANUP
--- ============================================================================
 
--- Verify migration counts
-SELECT 'Items migrated' as entity, COUNT(*) as total FROM public.item
-UNION ALL
-SELECT 'Production orders', COUNT(*) FROM doc.partida
-UNION ALL
-SELECT 'Warehouses', COUNT(*) FROM inventario.almacen
-UNION ALL
-SELECT 'Shipment guides', COUNT(*) FROM doc.guia_remision;
-
--- Check for NULL foreign keys (potential issues)
-SELECT 'Partida with NULL cliente' as issue, COUNT(*) as count 
-FROM doc.partida WHERE id_cliente IS NULL
-UNION ALL
-SELECT 'Partida_detalle with NULL item', COUNT(*) FROM doc.partida_detalle WHERE id_item IS NULL
-UNION ALL
-SELECT 'Guia_remision_detalle with NULL ubicacion', COUNT(*) FROM doc.guia_remision_detalle WHERE id_ubicacion IS NULL;
-
-COMMIT;

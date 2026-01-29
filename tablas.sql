@@ -410,7 +410,8 @@ CREATE TABLE item_rollo_detalle(
    usr_mod int,
    fyh_mod TIMESTAMPTZ
 );
-
+SELECT * FROM item_rollo_detalle
+WHERE articulo_id=5 and fibra=2
 
 CREATE OR REPLACE VIEW vw_items AS
 SELECT i.id item_id, i.codigo item_codigo, i.nombre item_nombre, i.item_tipo_id, i.unidad_id, it.codigo item_tipo_codigo, u.codigo unidad_codigo
@@ -915,3 +916,10 @@ CREATE TABLE calidad.inspeccion (
   usr_cre int,
   fyh_cre TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE doc.compra_guia_remision(
+  guia_remision_id int,
+  compra_id int,
+  usr_cre int,
+  fyh_cre timestamptz
+)
