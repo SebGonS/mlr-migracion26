@@ -619,45 +619,144 @@ $function$;
 
 CREATE OR REPLACE FUNCTION doc.get_partida(p_partida_id INT)
  RETURNS jsonb
-LANGUAGE plpgsql
+LANGUAGE SQL
  SECURITY DEFINER
  SET search_path TO 'iam', 'notification', 'public','inventario','doc','mes'
 AS $function$
 DECLARE
     v_partida JSONB;
 BEGIN
-    SELECT jsonb_build_object(
+    SELECT jsonb_build_object( --CUERPO PRINCIPAL, atributos de PARTIDA
         'id', p.id,
+        'numero', p.numero,
+        'codigo', EXTRACT(YEAR FROM p.fecha_creacion) || '-' || p.numero,
         'prioridad_id', p.prioridad_id,
+        'prioridad', pri.prioridad,
         'cliente_id', p.cliente_id,
+        'cliente', c.cliente,
         'tenido_id', p.tenido_id,
+        'tenido', tenido.tenido,
         'previo_id', p.previo_id,
+        'previo', previo.previo,
+        'fibra', p.fibra,
         'malla', p.malla,
         'rendimiento', p.rendimiento,
-        'partida_detalles', (
+        'estado', p.estado,
+        'fyh_inicio',p.fyh_inicio,
+        'fyh_fin',p.fyh_fin,
+        'fyh_cre',p.fyh_cre,
+        'partida_detalles', (--DETALLES DE PARTIDE line-item de la orden, lo que se tiene que producir/output final
             SELECT jsonb_agg(jsonb_build_object(
                 'item_id', pd.item_id,
-                'cantidad', pd.cantidad
+                'item_tipo_codigo', vi.item_tipo_codigo,
+                'item_codigo', vi.item_codigo,
+                'item_nombre', vi.item_nombre,
+                'cantidad', pd.cantidad,
+                'unidad',vi.unidad_codigo
             ))
-            FROM doc.partida_detalle pd
+            FROM doc.partida_detalle pd ---tabla con los line-items de partida
+            LEFT JOIN vw_items vi ON vi.id = pd.item_id --vw que hace join a la table de items con la de unidades y la de tipo
             WHERE pd.partida_id = p.id
         ),
-        'partida_rollos', (
+        'orden_produccion', ( --los runs de produccion asociados a la partida
             SELECT jsonb_agg(jsonb_build_object(
-                'lote_id', pr.lote_id,
-                'ubicacion_id', pr.ubicacion_id,
-                'cantidad', pr.cantidad,
-                'peso_kg', pr.peso_kg
+                'id', op.id,
+                'tipo', op.lote_id,
+                'estado', op.estado,
+                'orden_origen_id', op.orden_origen_id,
+                'fyh_cre', op.fyh_cre,
+                'fyh_inicio', op.fyh_inicio,
+                'fyh_fin', op.fyh_fin,
+                'pasos', (---pasos individuales ejecutados o por ejecutar de cada orden
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'secuencia', opp.secuencia,
+                        'id', opp.id,
+                        'operacion_id', opp.operacion_id,
+                        'operacion_codigo', o.codigo,
+                        'operacion_nombre', o.nombre,
+                        'secuencia', opp.secuencia,
+                        'tiempo_estandar', opp.tiempo_estandar,
+                        'maquina_asignada_id', opp.maquina_asignada_id,
+                        'maquina_nombre', maquina.nombre,
+                        'relacion_bano', opp.relacion_bano,
+                        'temperatura', opp.temperatura,
+                        'tiempo_estandar', opp.tiempo_estandar,
+                        'estado', opp.estado,
+                        'empleado_id', opp.empleado_id,
+                        'flg_final',opp.flg_final,
+                        'fyh_inicio',opp.fyh_inicio,
+                        'fyh_fin',opp.fyh_fin,
+                        'receta_id', opp.receta_id,
+                        'item_movimientos', (--moviemientos (egresos o ingresos en caso de ser un paso finalizador) generados por el paso
+                            SELECT jsonb_agg(jsonb_build_object(
+                                'id', m.id,
+                                'item_id', m.item_id,
+                                'lote_id', m.lote_id,
+                                'origen_ubicacion_id', m.origen_ubicacion_id,
+                                'origen_ubicacion_nombre', ubi.nombre,
+                                'origen_almacen_id', al.id,
+                                'origen_almacen_nombre', al.nombre,
+                                'item_codigo', vi.item_codigo,
+                                'item_nombre', vi.item_nombre,
+                                'cantidad', m.cantidad,
+                                'unidad', vi.unidad_codigo
+                            ))
+                            FROM inventario.item_movimientos m
+                            LEFT JOIN vw_items vi ON vi.id = m.item_id
+                            LEFT JOIN inventario.ubicacion ubi ON ubi.id=m.origen_ubicacion_id
+                            LEFT JOIN inventario.almacen al ON al.id=ubi.almacen_id
+                            WHERE m.documento_tipo='orden_produccion_paso' AND m.documento_id = opp.id
+                        ),
+                        'items', (----consumo o tracking de materia prima asignada a la orden 
+                            SELECT jsonb_agg(jsonb_build_object(
+                                'id', opi.id,
+                                'item_id', opi.item_id,
+                                'item_codigo', vi.item_codigo,
+                                'item_nombre', vi.item_nombre,
+                                'cantidad', oppi.cantidad,
+                                'unidad', vi.unidad_codigo,
+                                'flg_consumido', oppi.flg_consumido
+                            ))
+                            FROM mes.orden_produccion_paso_item oppi
+                            LEFT JOIN mes.orden_produccion_item opi ON opi.id=oppi.orden_produccion_paso_id
+                            LEFT JOIN vw_items vi ON vi.id = oppi.item_id
+                            WHERE oppi.orden_produccion_paso_id = opp.id
+                        )
+                    ))
+                    FROM mes.orden_produccion_paso opp
+                    LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
+                    LEFT JOIN mes.maquina ON maquina.id = opp.maquina_asignada_id
+                    WHERE opp.orden_produccion_id = op.id
+                ),
+                'items', (----items o materia prima asignada/reservada para la orden
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'id', opi.id,
+                        'lote_id', opi.lote_id,
+                        'item_id', opi.item_id,
+                        'item_codigo', vi.item_codigo,
+                        'item_nombre', vi.item_nombre,
+                        'cantidad', opi.cantidad,
+                        'peso_kg', opi.peso_kg,
+                        'unidad', vi.unidad_codigo,
+                        'detalles',l.detalles ---columna jsonb con detalles adicionales del lote
+                    ))
+                    FROM mes.orden_produccion_item opi ---tabla de los items reservados para la orden
+                    LEFT JOIN inventario.lote l ON opi.lote_id = l.id
+                    LEFT JOIN vw_items vi ON vi.id = l.item_id
+                    WHERE opi.orden_produccion_paso_id = opp.id
+                )
             ))
-            FROM mes.partida_rollo pr
-            WHERE pr.partida_id = p.id
+            FROM mes.orden_produccion op
+            WHERE op.partida_id = p.id
         )
     )
-    INTO v_partida
     FROM doc.partida p
+    LEFT JOIN prioridad pri ON pri.id = p.prioridad_id
+    LEFT JOIN cliente c ON c.id = p.cliente_id
+    LEFT JOIN tenido ON tenido.id = p.tenido_id
+    LEFT JOIN previo ON previo.id = p.previo_id
     WHERE p.id = p_partida_id;
 
-    RETURN v_partida;
 END;
 $function$;
 

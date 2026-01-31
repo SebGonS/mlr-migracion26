@@ -846,7 +846,7 @@ CREATE TABLE mes.orden_produccion_paso (
     ph numeric(4,2),
     temperatura numeric(5,2),
     tiempo_estandar int,
-
+    relacion_bano numeric(5,2),
     -- The specific recipe for THIS step (Solves "multiple recipes" issue)
     receta_id int references receta2(id), -- Foreign key to your existing Recipe Header table
     
