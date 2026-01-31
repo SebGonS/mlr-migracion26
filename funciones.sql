@@ -623,13 +623,11 @@ LANGUAGE SQL
  SECURITY DEFINER
  SET search_path TO 'iam', 'notification', 'public','inventario','doc','mes'
 AS $function$
-DECLARE
-    v_partida JSONB;
 BEGIN
     SELECT jsonb_build_object( --CUERPO PRINCIPAL, atributos de PARTIDA
         'id', p.id,
         'numero', p.numero,
-        'codigo', EXTRACT(YEAR FROM p.fecha_creacion) || '-' || p.numero,
+        'codigo', EXTRACT(YEAR FROM p.fyh_cre) || '-' || p.numero,
         'prioridad_id', p.prioridad_id,
         'prioridad', pri.prioridad,
         'cliente_id', p.cliente_id,
@@ -661,7 +659,7 @@ BEGIN
         'orden_produccion', ( --los runs de produccion asociados a la partida
             SELECT jsonb_agg(jsonb_build_object(
                 'id', op.id,
-                'tipo', op.lote_id,
+                'tipo', op.tipo,
                 'estado', op.estado,
                 'orden_origen_id', op.orden_origen_id,
                 'fyh_cre', op.fyh_cre,
@@ -744,11 +742,17 @@ BEGIN
                     LEFT JOIN inventario.lote l ON opi.lote_id = l.id
                     LEFT JOIN vw_items vi ON vi.id = l.item_id
                     WHERE opi.orden_produccion_paso_id = opp.id
+                ),
+                'produccion',(
+                    SELECT jsonb_agg(jsonb_build_object())
+                    FROM lote l
+                    WHERE codigo='PROD_ING'
                 )
             ))
             FROM mes.orden_produccion op
             WHERE op.partida_id = p.id
         )
+
     )
     FROM doc.partida p
     LEFT JOIN prioridad pri ON pri.id = p.prioridad_id
