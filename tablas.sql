@@ -709,21 +709,6 @@ INSERT INTO mes.operacion (codigo, nombre, requiere_receta) VALUES
 ('PERCH',  'PERCHADO',    false);
 
 
-----items especificos procurados para la partida, NO producto final a ser producido si no items que requieran seguimiento a través del rpoceso de produccion 
-CREATE TABLE mes.partida_item(  --production order table detail ¿MES TABLE or public table? it contains the detail of which roll lot the partida is drawing from
-    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-   partida_id bigint NOT NULL REFERENCES doc.partida(id),
-    lote_id int NOT NULL REFERENCES inventario.lote(id), -- The specific roll of fabric
-    ubicacion_id int NOT NULL REFERENCES inventario.ubicacion(id),
-    peso_kg numeric(10,2),
-    cantidad int,
-    usr_cre int,
-    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
-  usr_mod int,
-  fyh_mod TIMESTAMPTZ,
-    UNIQUE(partida_id, lote_id, ubicacion_id) -- Prevent adding same roll twice
-);
-
 
 CREATE TABLE mes.maquina_tipo(
   id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -881,17 +866,32 @@ CREATE TABLE mes.orden_produccion_paso (
     UNIQUE (partida_id, secuencia)
 );
 
+----items especificos procurados para la partida, NO producto final a ser producido si no items que requieran seguimiento a través del rpoceso de produccion 
+CREATE TABLE mes.orden_produccion_item(  --production order table detail ¿MES TABLE or public table? it contains the detail of which roll lot the partida is drawing from
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+   partida_id bigint NOT NULL REFERENCES doc.partida(id),
+    lote_id int NOT NULL REFERENCES inventario.lote(id), -- The specific roll of fabric
+    ubicacion_id int NOT NULL REFERENCES inventario.ubicacion(id),
+    peso_kg numeric(10,2),
+    cantidad int,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+  usr_mod int,
+  fyh_mod TIMESTAMPTZ,
+    UNIQUE(partida_id, lote_id, ubicacion_id) -- Prevent adding same roll twice
+);
+DROP TABLE IF EXISTS mes.orden_produccion_paso_item;
 CREATE TABLE mes.orden_produccion_paso_item (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     orden_produccion_paso_id bigint NOT NULL REFERENCES mes.orden_produccion_paso(id),
-    partida_item_id int NOT NULL REFERENCES mes.partida_item(id), -- Must be one of the IDs in partida_rollo
+    orden_produccion_item_id int NOT NULL REFERENCES mes.orden_produccion_item(id), -- Must be one of the IDs in partida_rollo
     cantidad numeric(10,2) NOT NULL,
     flg_consumido bool DEFAULT false,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
   usr_mod int,
   fyh_mod TIMESTAMPTZ,
-    UNIQUE (orden_produccion_paso_id, partida_item_id)
+    UNIQUE (orden_produccion_paso_id, orden_produccion_item_id)
 );
 
 

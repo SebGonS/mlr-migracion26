@@ -476,14 +476,14 @@ WITH partida_rollos AS (
      SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT
      FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
 
-     INSERT INTO mes.partida_item(partida_id, lote_id, ubicacion_id,cantidad, peso_kg)
+     INSERT INTO mes.orden_produccion_item(partida_id, lote_id, ubicacion_id,cantidad, peso_kg)
      SELECT v_partida_id, (u->>'lote_id')::INT, (u->>'ubicacion_id')::INT, (u->>'cantidad')::numeric,(SELECT (u->>'cantidad')::numeric*(l.detalle->>'peso')::numeric/l.cantidad 
      FROM inventario.lote l WHERE l.id=(u->>'lote_id')::INT)::numeric
-     FROM jsonb_array_elements(p_partida->'partida_items') AS u;
+     FROM jsonb_array_elements(p_partida->'orden_produccion_items') AS u;
 
     INSERT INTO inventario.item_movimientos(item_id,lote_id,movimiento_tipo,origen_ubicacion_id,cantidad,documento_tipo,documento_id)
     SELECT (u->>'item_id')::INT, (u->>'lote_id')::INT, 'EGRESO', (u->>'ubicacion_id')::INT, (u->>'cantidad')::numeric, 'PARTIDA', v_partida_id
-    FROM jsonb_array_elements(p_partida->'partida_items') AS u;
+    FROM jsonb_array_elements(p_partida->'orden_produccion_items') AS u;
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
 SELECT ur.user_id,'Nueva Partida Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva partida', 'info',jsonb_build_object('objeto_tipo','partida','partida_id',v_partida_id)
 FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
@@ -504,7 +504,6 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
         RAISE;
 END;
 $function$;
-
 
 CREATE OR REPLACE FUNCTION doc.modificar_partida(p_partida jsonb)
  RETURNS text
@@ -618,7 +617,49 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
 END;
 $function$;
 
+CREATE OR REPLACE FUNCTION doc.get_partida(p_partida_id INT)
+ RETURNS jsonb
+LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public','inventario','doc','mes'
+AS $function$
+DECLARE
+    v_partida JSONB;
+BEGIN
+    SELECT jsonb_build_object(
+        'id', p.id,
+        'prioridad_id', p.prioridad_id,
+        'cliente_id', p.cliente_id,
+        'tenido_id', p.tenido_id,
+        'previo_id', p.previo_id,
+        'malla', p.malla,
+        'rendimiento', p.rendimiento,
+        'partida_detalles', (
+            SELECT jsonb_agg(jsonb_build_object(
+                'item_id', pd.item_id,
+                'cantidad', pd.cantidad
+            ))
+            FROM doc.partida_detalle pd
+            WHERE pd.partida_id = p.id
+        ),
+        'partida_rollos', (
+            SELECT jsonb_agg(jsonb_build_object(
+                'lote_id', pr.lote_id,
+                'ubicacion_id', pr.ubicacion_id,
+                'cantidad', pr.cantidad,
+                'peso_kg', pr.peso_kg
+            ))
+            FROM mes.partida_rollo pr
+            WHERE pr.partida_id = p.id
+        )
+    )
+    INTO v_partida
+    FROM doc.partida p
+    WHERE p.id = p_partida_id;
 
+    RETURN v_partida;
+END;
+$function$;
 
 CREATE OR REPLACE FUNCTION mes.crear_plantilla(p_plantilla jsonb)
  RETURNS text

@@ -437,19 +437,19 @@ EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 -----PARTIDA ITEM
 
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
-ON mes.partida_item
+ON mes.orden_produccion_item
 FROM anon, authenticated;
 
 REVOKE UPDATE (usr_cre, fyh_cre)
-ON mes.partida_item
+ON mes.orden_produccion_item
 FROM anon, authenticated;
 
-CREATE TRIGGER trg_bi_partida_item_audit
-BEFORE INSERT ON mes.partida_item
+CREATE TRIGGER trg_bi_orden_produccion_item_audit
+BEFORE INSERT ON mes.orden_produccion_item
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_partida_item_audit
-BEFORE UPDATE ON mes.partida_item
+CREATE TRIGGER trg_bu_orden_produccion_item_audit
+BEFORE UPDATE ON mes.orden_produccion_item
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
