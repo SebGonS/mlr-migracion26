@@ -924,3 +924,7 @@ CREATE TABLE doc.compra_guia_remision(
 );
 
 
+
+GRANT USAGE ON SCHEMA doc TO authenticated;
+
+

@@ -641,8 +641,6 @@ BEGIN
         'cliente', c.cliente,
         'tenido_id', p.tenido_id,
         'tenido', tenido.tenido,
-        'previo_id', p.previo_id,
-        'previo', previo.previo,
         'fibra', p.fibra,
         'malla', p.malla,
         'rendimiento', p.rendimiento,
@@ -899,7 +897,6 @@ BEGIN
     LEFT JOIN cliente c ON c.id = p.cliente_id
     LEFT JOIN articulo a ON a.id = p.articulo_id
     LEFT JOIN tenido ON tenido.id = p.tenido_id
-    LEFT JOIN previo ON previo.id = p.previo_id
     WHERE p.id = p_partida_id;
     
     RETURN v_result;
