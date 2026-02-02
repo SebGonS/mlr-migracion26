@@ -504,7 +504,6 @@ numero int,
 prioridad_id int references prioridad(id),
 cliente_id int references cliente(id),
 tenido_id int references tenido(id),
-previo_id int references previo(id),
 articulo_id int references articulo(id),
 fibra smallint,
 malla text,
@@ -869,7 +868,7 @@ CREATE TABLE mes.orden_produccion_paso (
 ----items especificos procurados para la partida, NO producto final a ser producido si no items que requieran seguimiento a través del rpoceso de produccion 
 CREATE TABLE mes.orden_produccion_item(  --production order table detail ¿MES TABLE or public table? it contains the detail of which roll lot the partida is drawing from
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-   partida_id bigint NOT NULL REFERENCES doc.partida(id),
+   orden_produccion_id bigint NOT NULL REFERENCES mes.orden_produccion(id),
     lote_id int NOT NULL REFERENCES inventario.lote(id), -- The specific roll of fabric
     ubicacion_id int NOT NULL REFERENCES inventario.ubicacion(id),
     peso_kg numeric(10,2),
@@ -880,6 +879,7 @@ CREATE TABLE mes.orden_produccion_item(  --production order table detail ¿MES T
   fyh_mod TIMESTAMPTZ,
     UNIQUE(partida_id, lote_id, ubicacion_id) -- Prevent adding same roll twice
 );
+
 DROP TABLE IF EXISTS mes.orden_produccion_paso_item;
 CREATE TABLE mes.orden_produccion_paso_item (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

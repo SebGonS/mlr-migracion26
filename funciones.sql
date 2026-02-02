@@ -462,12 +462,11 @@ WITH partida_rollos AS (
     END IF;
 
 -------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,previo_id,malla,rendimiento)
+    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento)
     VALUES (
         p_partida->>'prioridad_id',
         p_partida->>'cliente_id',
         (p_partida->>'tenido_id')::INT,
-        (p_partida->>'previo_id')::INT,
         p_partida->>'malla',
         p_partida->>'rendimiento'
     )
@@ -574,12 +573,11 @@ WITH partida_rollos AS (
     END IF;
 
 -------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,previo_id,malla,rendimiento)
+    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento)
     VALUES (
         p_partida->>'prioridad_id',
         p_partida->>'cliente_id',
         (p_partida->>'tenido_id')::INT,
-        (p_partida->>'previo_id')::INT,
         p_partida->>'malla',
         p_partida->>'rendimiento'
     )
@@ -617,19 +615,28 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
 END;
 $function$;
 
-CREATE OR REPLACE FUNCTION doc.get_partida(p_partida_id INT)
- RETURNS jsonb
-LANGUAGE SQL
- SECURITY DEFINER
- SET search_path TO 'iam', 'notification', 'public','inventario','doc','mes'
+CREATE OR REPLACE FUNCTION doc.get_partida(p_partida_id BIGINT)
+RETURNS jsonb
+LANGUAGE plpgsql  -- ✅ FIXED
+SECURITY DEFINER
+SET search_path TO 'iam', 'notification', 'public','inventario','doc','mes','calidad'
 AS $function$
+DECLARE
+    v_result JSONB;
 BEGIN
-    SELECT jsonb_build_object( --CUERPO PRINCIPAL, atributos de PARTIDA
+    SELECT jsonb_build_object(
+        -- ═══════════════════════════════════════
+        -- PARTIDA HEADER
+        -- ═══════════════════════════════════════
         'id', p.id,
         'numero', p.numero,
-        'codigo', EXTRACT(YEAR FROM p.fyh_cre) || '-' || p.numero,
+        'codigo', EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
+        
+        -- Cliente & Especificaciones
         'prioridad_id', p.prioridad_id,
         'prioridad', pri.prioridad,
+        'articulo_id', p.articulo_id,
+        'articulo', a.articulo,
         'cliente_id', p.cliente_id,
         'cliente', c.cliente,
         'tenido_id', p.tenido_id,
@@ -639,130 +646,286 @@ BEGIN
         'fibra', p.fibra,
         'malla', p.malla,
         'rendimiento', p.rendimiento,
+        
+        -- Estado y fechas
         'estado', p.estado,
-        'fyh_inicio',p.fyh_inicio,
-        'fyh_fin',p.fyh_fin,
-        'fyh_cre',p.fyh_cre,
-        'partida_detalles', (--DETALLES DE PARTIDE line-item de la orden, lo que se tiene que producir/output final
+        'fyh_inicio', p.fyh_inicio,
+        'fyh_fin', p.fyh_fin,
+        'fyh_cre', p.fyh_cre,
+        
+        -- ═══════════════════════════════════════
+        -- PARTIDA DETALLES (Output esperado)
+        -- ═══════════════════════════════════════
+        'partida_detalles', COALESCE((
             SELECT jsonb_agg(jsonb_build_object(
+                'id', pd.id,
                 'item_id', pd.item_id,
                 'item_tipo_codigo', vi.item_tipo_codigo,
                 'item_codigo', vi.item_codigo,
                 'item_nombre', vi.item_nombre,
                 'cantidad', pd.cantidad,
-                'unidad',vi.unidad_codigo
-            ))
-            FROM doc.partida_detalle pd ---tabla con los line-items de partida
-            LEFT JOIN vw_items vi ON vi.id = pd.item_id --vw que hace join a la table de items con la de unidades y la de tipo
+                'unidad', vi.unidad_codigo
+            ) ORDER BY pd.id)
+            FROM doc.partida_detalle pd
+            LEFT JOIN vw_items vi ON vi.item_id = pd.item_id  -- ✅ FIXED
             WHERE pd.partida_id = p.id
-        ),
-        'orden_produccion', ( --los runs de produccion asociados a la partida
-            SELECT jsonb_agg(jsonb_build_object(
-                'id', op.id,
-                'tipo', op.tipo,
-                'estado', op.estado,
-                'orden_origen_id', op.orden_origen_id,
-                'fyh_cre', op.fyh_cre,
-                'fyh_inicio', op.fyh_inicio,
-                'fyh_fin', op.fyh_fin,
-                'pasos', (---pasos individuales ejecutados o por ejecutar de cada orden
-                    SELECT jsonb_agg(jsonb_build_object(
-                        'secuencia', opp.secuencia,
-                        'id', opp.id,
-                        'operacion_id', opp.operacion_id,
-                        'operacion_codigo', o.codigo,
-                        'operacion_nombre', o.nombre,
-                        'secuencia', opp.secuencia,
-                        'tiempo_estandar', opp.tiempo_estandar,
-                        'maquina_asignada_id', opp.maquina_asignada_id,
-                        'maquina_nombre', maquina.nombre,
-                        'relacion_bano', opp.relacion_bano,
-                        'temperatura', opp.temperatura,
-                        'tiempo_estandar', opp.tiempo_estandar,
-                        'estado', opp.estado,
-                        'empleado_id', opp.empleado_id,
-                        'flg_final',opp.flg_final,
-                        'fyh_inicio',opp.fyh_inicio,
-                        'fyh_fin',opp.fyh_fin,
-                        'receta_id', opp.receta_id,
-                        'item_movimientos', (--moviemientos (egresos o ingresos en caso de ser un paso finalizador) generados por el paso
-                            SELECT jsonb_agg(jsonb_build_object(
-                                'id', m.id,
-                                'item_id', m.item_id,
-                                'lote_id', m.lote_id,
-                                'origen_ubicacion_id', m.origen_ubicacion_id,
-                                'origen_ubicacion_nombre', ubi.nombre,
-                                'origen_almacen_id', al.id,
-                                'origen_almacen_nombre', al.nombre,
-                                'item_codigo', vi.item_codigo,
-                                'item_nombre', vi.item_nombre,
-                                'cantidad', m.cantidad,
-                                'unidad', vi.unidad_codigo
-                            ))
-                            FROM inventario.item_movimientos m
-                            LEFT JOIN vw_items vi ON vi.id = m.item_id
-                            LEFT JOIN inventario.ubicacion ubi ON ubi.id=m.origen_ubicacion_id
-                            LEFT JOIN inventario.almacen al ON al.id=ubi.almacen_id
-                            WHERE m.documento_tipo='orden_produccion_paso' AND m.documento_id = opp.id
-                        ),
-                        'items', (----consumo o tracking de materia prima asignada a la orden 
-                            SELECT jsonb_agg(jsonb_build_object(
-                                'id', opi.id,
-                                'item_id', opi.item_id,
-                                'item_codigo', vi.item_codigo,
-                                'item_nombre', vi.item_nombre,
-                                'cantidad', oppi.cantidad,
-                                'unidad', vi.unidad_codigo,
-                                'flg_consumido', oppi.flg_consumido
-                            ))
-                            FROM mes.orden_produccion_paso_item oppi
-                            LEFT JOIN mes.orden_produccion_item opi ON opi.id=oppi.orden_produccion_paso_id
-                            LEFT JOIN vw_items vi ON vi.id = oppi.item_id
-                            WHERE oppi.orden_produccion_paso_id = opp.id
-                        )
-                    ))
-                    FROM mes.orden_produccion_paso opp
-                    LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
-                    LEFT JOIN mes.maquina ON maquina.id = opp.maquina_asignada_id
-                    WHERE opp.orden_produccion_id = op.id
-                ),
-                'items', (----items o materia prima asignada/reservada para la orden
-                    SELECT jsonb_agg(jsonb_build_object(
-                        'id', opi.id,
-                        'lote_id', opi.lote_id,
-                        'item_id', opi.item_id,
-                        'item_codigo', vi.item_codigo,
-                        'item_nombre', vi.item_nombre,
-                        'cantidad', opi.cantidad,
-                        'peso_kg', opi.peso_kg,
-                        'unidad', vi.unidad_codigo,
-                        'detalles',l.detalles ---columna jsonb con detalles adicionales del lote
-                    ))
-                    FROM mes.orden_produccion_item opi ---tabla de los items reservados para la orden
-                    LEFT JOIN inventario.lote l ON opi.lote_id = l.id
-                    LEFT JOIN vw_items vi ON vi.id = l.item_id
-                    WHERE opi.orden_produccion_paso_id = opp.id
-                ),
-                'produccion',(
-                    SELECT jsonb_agg(jsonb_build_object())
-                    FROM lote l
-                    WHERE codigo='PROD_ING'
-                )
-            ))
-            FROM mes.orden_produccion op
+        ), '[]'::jsonb),
+        'resumen_progreso', jsonb_build_object(
+    'total_ordenes', (SELECT COUNT(*) FROM mes.orden_produccion WHERE partida_id = p.id),
+    'ordenes_completadas', (SELECT COUNT(*) FROM mes.orden_produccion WHERE partida_id = p.id AND estado = 'FINALIZADA'),
+    'total_pasos', (
+        SELECT COUNT(*) 
+        FROM mes.orden_produccion_paso opp
+        JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+        WHERE op.partida_id = p.id
+    ),
+    'pasos_completados', (
+        SELECT COUNT(*) 
+        FROM mes.orden_produccion_paso opp
+        JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+        WHERE op.partida_id = p.id AND opp.estado = 'COMPLETADO'
+    ),
+    'porcentaje_completado', (
+        SELECT ROUND(
+            COUNT(*) FILTER (WHERE opp.estado = 'COMPLETADO')::NUMERIC / 
+            NULLIF(COUNT(*), 0) * 100, 
+            2
+        )
+        FROM mes.orden_produccion_paso opp
+        JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+        WHERE op.partida_id = p.id
+    )
+),
+'resumen_consumo_total', COALESCE((
+    SELECT jsonb_agg(
+        jsonb_build_object(
+            'item_id', subq.item_id,
+            'item_codigo', subq.item_codigo,
+            'item_nombre', subq.item_nombre,
+            'cantidad_total', subq.cantidad_total,
+            'unidad', subq.unidad
+        )
+    )
+    FROM (
+        SELECT 
+            m.item_id,
+            vi.item_codigo,
+            vi.item_nombre,
+            vi.unidad_codigo as unidad,
+            SUM(m.cantidad) as cantidad_total
+        FROM inventario.item_movimientos m
+        JOIN vw_items vi ON vi.item_id = m.item_id
+        WHERE m.documento_tipo = 'orden_produccion_paso'
+        AND m.documento_id IN (
+            SELECT opp.id 
+            FROM mes.orden_produccion_paso opp
+            JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
             WHERE op.partida_id = p.id
         )
-
-    )
+        GROUP BY m.item_id, vi.item_codigo, vi.item_nombre, vi.unidad_codigo
+    ) subq
+), '[]'::jsonb),
+        -- ═══════════════════════════════════════
+        -- ORDENES DE PRODUCCION
+        -- ═══════════════════════════════════════
+        'ordenes_produccion', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'id', op.id,
+                    'tipo', op.tipo,  -- ✅ FIXED (was op.lote_id)
+                    'estado', op.estado,
+                    'orden_origen_id', op.orden_origen_id,
+                    'fyh_cre', op.fyh_cre,
+                    'fyh_inicio', op.fyh_inicio,
+                    'fyh_fin', op.fyh_fin,
+                    
+                    -- ───────────────────────────────────
+                    -- PASOS DE PRODUCCION
+                    -- ───────────────────────────────────
+                    'pasos', COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id', opp.id,
+                                'secuencia', opp.secuencia,
+                                
+                                -- Operación
+                                'operacion_id', opp.operacion_id,
+                                'operacion_codigo', o.codigo,
+                                'operacion_nombre', o.nombre,
+                                
+                                -- Recursos
+                                'maquina_asignada_id', opp.maquina_asignada_id,
+                                'maquina_nombre', maquina.nombre,
+                                'empleado_id', opp.empleado_id,
+                                
+                                -- Parámetros
+                                'ph', opp.ph,
+                                'relacion_bano', opp.relacion_bano,
+                                'temperatura', opp.temperatura,
+                                'tiempo_estandar', opp.tiempo_estandar,
+                                'receta_id', opp.receta_id,
+                                
+                                -- Estado
+                                'estado', opp.estado,
+                                'flg_final', opp.flg_final,
+                                'fyh_inicio', opp.fyh_inicio,
+                                'fyh_fin', opp.fyh_fin,
+                                
+                                -- ───────────────────────────────
+                                -- CONSUMO (chemicals/auxiliaries)
+                                -- ───────────────────────────────
+                                'consumo', COALESCE((
+                                    SELECT jsonb_agg(
+                                        jsonb_build_object(
+                                            'id', m.id,
+                                            'item_id', m.item_id,
+                                            'item_codigo', vi_mov.item_codigo,
+                                            'item_nombre', vi_mov.item_nombre,
+                                            'lote_id', m.lote_id,
+                                            'cantidad', m.cantidad,
+                                            'unidad', vi_mov.unidad_codigo,
+                                            'origen_ubicacion_id', m.origen_ubicacion_id,
+                                            'origen_ubicacion', ubi.nombre,
+                                            'origen_almacen', al.nombre
+                                        ) ORDER BY m.fyh_cre
+                                    )
+                                    FROM inventario.item_movimientos m
+                                    LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
+                                    LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
+                                    LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
+                                    WHERE m.documento_tipo = 'orden_produccion_paso' 
+                                    AND m.documento_id = opp.id
+                                ), '[]'::jsonb),
+                                
+                                -- ───────────────────────────────
+                                -- TRACKING (roll progression)
+                                -- ───────────────────────────────
+                                'items_procesados', COALESCE((
+                                    SELECT jsonb_agg(
+                                        jsonb_build_object(
+                                            'id', oppi.id,
+                                            'orden_produccion_item_id', oppi.orden_produccion_item_id,
+                                            'cantidad', oppi.cantidad,
+                                            'flg_consumido', oppi.flg_consumido
+                                        ) ORDER BY oppi.id
+                                    )
+                                    FROM mes.orden_produccion_paso_item oppi
+                                    WHERE oppi.orden_produccion_paso_id = opp.id
+                                ), '[]'::jsonb)
+                                
+                            ) ORDER BY opp.secuencia
+                        )
+                        FROM mes.orden_produccion_paso opp
+                        LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
+                        LEFT JOIN mes.maquina ON maquina.id = opp.maquina_asignada_id
+                        WHERE opp.orden_produccion_id = op.id
+                    ), '[]'::jsonb),
+                    
+                    -- ───────────────────────────────────
+                    -- MATERIALS RESERVED (rolls)
+                    -- ───────────────────────────────────
+                    'materiales_reservados', COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id', opi.id,
+                                'lote_id', opi.lote_id,
+                                'item_id', l.item_id,
+                                'item_codigo', vi_mat.item_codigo,
+                                'item_nombre', vi_mat.item_nombre,
+                                'cantidad', opi.cantidad,
+                                'peso_kg', opi.peso_kg,
+                                'unidad', vi_mat.unidad_codigo,
+                                'detalles', l.detalles,
+                                'estado_calidad', l.estado_calidad
+                            ) ORDER BY opi.id
+                        )
+                        FROM mes.orden_produccion_item opi
+                        LEFT JOIN inventario.lote l ON l.id = opi.lote_id
+                        LEFT JOIN vw_items vi_mat ON vi_mat.item_id = l.item_id
+                        WHERE opi.orden_produccion_id = op.id  -- ✅ FIXED
+                    ), '[]'::jsonb),
+                    
+                    -- ───────────────────────────────────
+                    -- PRODUCTION OUTPUT (finished goods)
+                    -- ───────────────────────────────────
+                    'produccion', COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id', l.id,
+                                'item_id', l.item_id,
+                                'item_codigo', vi_prod.item_codigo,
+                                'item_nombre', vi_prod.item_nombre,
+                                'cantidad', l.cantidad,
+                                'unidad', vi_prod.unidad_codigo,
+                                'detalles', l.detalles,
+                                'estado_calidad', l.estado_calidad,
+                                'fyh_cre', l.fyh_cre,
+                                
+                                -- ═══════════════════════════════
+                                -- INSPECTIONS (QC history)
+                                -- ═══════════════════════════════
+                                'inspecciones', COALESCE((
+                                    SELECT jsonb_agg(
+                                        jsonb_build_object(
+                                            'id', insp.id,
+                                            'resultado', insp.resultado,
+                                            'observacion', insp.observacion,
+                                            'empleado_id', insp.empleado_id,
+                                            'empleado_nombre', CONCAT(emp.nombre, ' ', emp.apellido),
+                                            'fyh_inspeccion', insp.fyh_inspeccion
+                                        ) ORDER BY insp.fyh_inspeccion DESC
+                                    )
+                                    FROM calidad.inspeccion insp
+                                    LEFT JOIN mes.empleado emp ON emp.id = insp.empleado_id
+                                    WHERE insp.lote_id = l.id
+                                ), '[]'::jsonb)
+                            ) ORDER BY l.fyh_cre
+                        )
+                        FROM inventario.lote l
+                        LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
+                        WHERE l.documento_tipo = 'orden_produccion'
+                        AND l.documento_id = op.id
+                    ), '[]'::jsonb)
+                    
+                ) ORDER BY op.id
+            )
+            FROM mes.orden_produccion op
+            WHERE op.partida_id = p.id
+        ), '[]'::jsonb)
+        
+    ) INTO v_result
     FROM doc.partida p
     LEFT JOIN prioridad pri ON pri.id = p.prioridad_id
     LEFT JOIN cliente c ON c.id = p.cliente_id
+    LEFT JOIN articulo a ON a.id = p.articulo_id
     LEFT JOIN tenido ON tenido.id = p.tenido_id
     LEFT JOIN previo ON previo.id = p.previo_id
     WHERE p.id = p_partida_id;
-
+    
+    RETURN v_result;
 END;
 $function$;
+
+-- ══════════════════════════════════════════════════════════
+-- NOTES ON STRUCTURE:
+-- ══════════════════════════════════════════════════════════
+/*
+partida
+├─ partida_detalles (what client ordered)
+└─ ordenes_produccion[]
+   ├─ pasos[]
+   │  ├─ consumo[] (chemicals used)
+   │  └─ items_procesados[] (which rolls went through this step)
+   ├─ materiales_reservados[] (rolls assigned to this order)
+   └─ produccion[] (finished goods)
+      └─ inspecciones[] (QC history per lote) ← ADDED!
+
+BENEFITS OF INCLUDING INSPECTIONS:
+- Traceability: Know when/why/who rejected
+- Compliance: Required for ISO/quality audits
+- Analytics: Track inspector accuracy, rejection rates
+- Debugging: Understand reproceso flow
+*/
 
 CREATE OR REPLACE FUNCTION mes.crear_plantilla(p_plantilla jsonb)
  RETURNS text
