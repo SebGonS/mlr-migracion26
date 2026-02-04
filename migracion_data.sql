@@ -4,6 +4,364 @@
 
 BEGIN;
 
+-- Update colors with hex values
+UPDATE color SET hex = '#0066CC' WHERE color = 'A. Brasil';
+UPDATE color SET hex = '#002F5F' WHERE color = 'A. Marino';
+UPDATE color SET hex = '#1A3A52' WHERE color = 'A. Marino Jas';
+UPDATE color SET hex = '#6B8E23' WHERE color = 'Aceituna';
+UPDATE color SET hex = '#708090' WHERE color = 'Acero';
+UPDATE color SET hex = '#B0C4DE' WHERE color = 'Acero Claro';
+UPDATE color SET hex = '#4F5A65' WHERE color = 'Acero Oscuro';
+UPDATE color SET hex = '#8B7355' WHERE color = 'Antique';
+UPDATE color SET hex = '#9B8565' WHERE color = 'Antique 001';
+UPDATE color SET hex = '#A89575' WHERE color = 'Antique 002';
+UPDATE color SET hex = '#00FFFF' WHERE color = 'Aqua';
+UPDATE color SET hex = '#7FFFD4' WHERE color = 'Aqua Piero';
+UPDATE color SET hex = '#F4E4C1' WHERE color = 'Arena';
+UPDATE color SET hex = '#5F7F8F' WHERE color = 'Azul Acero';
+UPDATE color SET hex = '#8FA9BA' WHERE color = 'Azul Acero Claro';
+UPDATE color SET hex = '#000080' WHERE color = 'Azul Navy';
+UPDATE color SET hex = '#191970' WHERE color = 'Azul Noche';
+UPDATE color SET hex = '#87CEEB' WHERE color = 'Azulino';
+UPDATE color SET hex = '#87CEEB' WHERE color = 'Azulino (Sky)';
+UPDATE color SET hex = '#F5F5DC' WHERE color = 'Beige';
+UPDATE color SET hex = '#EDE9E3' WHERE color = 'Beige Entero';
+UPDATE color SET hex = '#D3C5B8' WHERE color = 'Beige Humo';
+UPDATE color SET hex = '#1C1C1C' WHERE color = 'Black Camote';
+UPDATE color SET hex = '#FFFFFF' WHERE color = 'Blanco';
+UPDATE color SET hex = '#FFF8DC' WHERE color = 'Blanco Cremoso';
+UPDATE color SET hex = '#FFB6C1' WHERE color = 'Blom';
+UPDATE color SET hex = '#4682B4' WHERE color = 'Blue Cal';
+UPDATE color SET hex = '#800020' WHERE color = 'Borgoña';
+UPDATE color SET hex = '#6B1F3D' WHERE color = 'Borgoña Jas';
+UPDATE color SET hex = '#FFC0CB' WHERE color = 'Bubble';
+UPDATE color SET hex = '#4A7C59' WHERE color = 'Cactus';
+UPDATE color SET hex = '#6F4E37' WHERE color = 'Café';
+UPDATE color SET hex = '#C19A6B' WHERE color = 'Camello';
+UPDATE color SET hex = '#997A5E' WHERE color = 'Capuchino';
+UPDATE color SET hex = '#1AC1DD' WHERE color = 'Caribean';
+UPDATE color SET hex = '#87CEEB' WHERE color = 'Celeste';
+UPDATE color SET hex = '#ADD8E6' WHERE color = 'Celeste BB';
+UPDATE color SET hex = '#A68B6B' WHERE color = 'Camell Osc';
+UPDATE color SET hex = '#6CA6CD' WHERE color = 'Celeste Int';
+UPDATE color SET hex = '#5DADE2' WHERE color = 'Celeste Mego';
+UPDATE color SET hex = '#A4C9E6' WHERE color = 'Celeste SM';
+UPDATE color SET hex = '#808080' WHERE color = 'Cemento';
+UPDATE color SET hex = '#A9A9A9' WHERE color = 'Cemento Claro';
+UPDATE color SET hex = '#FDB462' WHERE color = 'Chicha';
+UPDATE color SET hex = '#FF69B4' WHERE color = 'Chicle';
+UPDATE color SET hex = '#FF1493' WHERE color = 'Chicle Neon';
+UPDATE color SET hex = '#FF77FF' WHERE color = 'Chicle Piero';
+UPDATE color SET hex = '#8B4513' WHERE color = 'Antique Bronze';
+UPDATE color SET hex = '#7B3F00' WHERE color = 'Chocolate';
+UPDATE color SET hex = '#0047AB' WHERE color = 'Cobalto';
+UPDATE color SET hex = '#D2691E' WHERE color = 'Cocoa';
+UPDATE color SET hex = '#722F37' WHERE color = 'Conchevino';
+UPDATE color SET hex = '#FF7F50' WHERE color = 'Coral';
+UPDATE color SET hex = '#FF8C69' WHERE color = 'Coral Piero';
+UPDATE color SET hex = '#FFFDD0' WHERE color = 'Crema';
+UPDATE color SET hex = '#F0F8FF' WHERE color = 'Cristal';
+UPDATE color SET hex = '#1560BD' WHERE color = 'Denin';
+UPDATE color SET hex = '#FF6347' WHERE color = 'Exhuberant';
+UPDATE color SET hex = '#FF3855' WHERE color = 'Fresa';
+UPDATE color SET hex = '#FF00FF' WHERE color = 'Fucsia';
+UPDATE color SET hex = '#8B0000' WHERE color = 'Guinda';
+UPDATE color SET hex = '#663399' WHERE color = 'Hendrix';
+UPDATE color SET hex = '#FF6B6B' WHERE color = 'Hot Coral';
+UPDATE color SET hex = '#0066CC' WHERE color = 'Italiano';
+UPDATE color SET hex = '#8F7E4F' WHERE color = 'Kaki';
+UPDATE color SET hex = '#C41E3A' WHERE color = 'Lacre';
+UPDATE color SET hex = '#C8A2C8' WHERE color = 'Lila';
+UPDATE color SET hex = '#E6E6FA' WHERE color = 'Lila Pastel';
+UPDATE color SET hex = '#DA70D6' WHERE color = 'Lila Piero';
+UPDATE color SET hex = '#2C3539' WHERE color = 'London Osc';
+UPDATE color SET hex = '#FBEC5D' WHERE color = 'Maiz';
+UPDATE color SET hex = '#FF8C00' WHERE color = 'Mandarina';
+UPDATE color SET hex = '#800000' WHERE color = 'Marron';
+UPDATE color SET hex = '#E5E5E5' WHERE color = 'Melange';
+UPDATE color SET hex = '#F7F7F7' WHERE color = 'Melange 1%';
+UPDATE color SET hex = '#ECECEC' WHERE color = 'Melange 10%';
+UPDATE color SET hex = '#F3F3F3' WHERE color = 'Melange 2%';
+UPDATE color SET hex = '#FDBCB4' WHERE color = 'Melon';
+UPDATE color SET hex = '#98FF98' WHERE color = 'Menta';
+UPDATE color SET hex = '#4A5F7A' WHERE color = 'Faded Denin';
+UPDATE color SET hex = '#B0E0E6' WHERE color = 'Mentol';
+UPDATE color SET hex = '#B8D4E8' WHERE color = 'Celeste Panda';
+UPDATE color SET hex = '#FFDB58' WHERE color = 'Mostaza Entero';
+UPDATE color SET hex = '#000080' WHERE color = 'Navy';
+UPDATE color SET hex = '#FFA500' WHERE color = 'Naranja';
+UPDATE color SET hex = '#000000' WHERE color = 'Negro';
+UPDATE color SET hex = '#2C2C2C' WHERE color = 'Negro Grafito';
+UPDATE color SET hex = '#1A1A1A' WHERE color = 'Negro Jas';
+UPDATE color SET hex = '#E3BC9A' WHERE color = 'Nude';
+UPDATE color SET hex = '#CC7722' WHERE color = 'Ocre';
+UPDATE color SET hex = '#808000' WHERE color = 'Olive';
+UPDATE color SET hex = '#E7C6A5' WHERE color = 'Palo Rosa';
+UPDATE color SET hex = '#C8A882' WHERE color = 'Palo Rosa Oscuro';
+UPDATE color SET hex = '#FFEFD5' WHERE color = 'Papaya';
+UPDATE color SET hex = '#F5E6D3' WHERE color = 'Papiro';
+UPDATE color SET hex = '#FFB6C1' WHERE color = 'Rosado Claro';
+UPDATE color SET hex = '#EAE6CA' WHERE color = 'Perla';
+UPDATE color SET hex = '#93C572' WHERE color = 'Pistacho';
+UPDATE color SET hex = '#5B9BD5' WHERE color = 'Pitufo';
+UPDATE color SET hex = '#4A5568' WHERE color = 'Plomo Colegial';
+UPDATE color SET hex = '#708090' WHERE color = 'Plomo Pizarra';
+UPDATE color SET hex = '#C0C0C0' WHERE color = 'Plomo Plata';
+UPDATE color SET hex = '#8B8589' WHERE color = 'Rata';
+UPDATE color SET hex = '#FF0000' WHERE color = 'Rojo';
+UPDATE color SET hex = '#DC143C' WHERE color = 'Rojo Bandera';
+UPDATE color SET hex = '#B22222' WHERE color = 'Rojo Deep';
+UPDATE color SET hex = '#E63946' WHERE color = 'Rojo Piero';
+UPDATE color SET hex = '#BC8F8F' WHERE color = 'Rosa Vieja';
+UPDATE color SET hex = '#FFC0CB' WHERE color = 'Rosado';
+UPDATE color SET hex = '#87CEEB' WHERE color = 'Celeste Piero';
+UPDATE color SET hex = '#E2725B' WHERE color = 'Terracota';
+UPDATE color SET hex = '#5C4033' WHERE color = 'Topo';
+UPDATE color SET hex = '#48D1CC' WHERE color = 'Turqueza BB';
+UPDATE color SET hex = '#008080' WHERE color = 'Turqueza Osc';
+UPDATE color SET hex = '#8F00FF' WHERE color = 'Uva Piero';
+UPDATE color SET hex = '#7FFFD4' WHERE color = 'V. Agua';
+UPDATE color SET hex = '#006A4E' WHERE color = 'V. Botella';
+UPDATE color SET hex = '#0047AB' WHERE color = 'V. Cobalto';
+UPDATE color SET hex = '#228B22' WHERE color = 'V. Hoja';
+UPDATE color SET hex = '#00A86B' WHERE color = 'V. Jade';
+UPDATE color SET hex = '#8DB600' WHERE color = 'V. Manzana';
+UPDATE color SET hex = '#4B5320' WHERE color = 'V. Militar';
+UPDATE color SET hex = '#50C878' WHERE color = 'V. Monina';
+UPDATE color SET hex = '#6B8E23' WHERE color = 'V. Olivo';
+UPDATE color SET hex = '#7FFF00' WHERE color = 'V. Perico';
+UPDATE color SET hex = '#722F37' WHERE color = 'Vino';
+UPDATE color SET hex = '#8B00FF' WHERE color = 'Viola';
+UPDATE color SET hex = '#F4E87C' WHERE color = 'Yellow Mist';
+UPDATE color SET hex = '#001F3F' WHERE color = 'A. Marino Oscuro';
+UPDATE color SET hex = '#C41E3A' WHERE color = 'Rojo Navidad';
+UPDATE color SET hex = '#3A4F5F' WHERE color = 'London (Escolar)';
+UPDATE color SET hex = '#FFE5B4' WHERE color = 'ppt';
+UPDATE color SET hex = '#003366' WHERE color = 'Nautica';
+UPDATE color SET hex = '#E0115F' WHERE color = 'Ruby';
+UPDATE color SET hex = '#A4C9E6' WHERE color = 'Celeste Voxu';
+UPDATE color SET hex = '#FFB6D9' WHERE color = 'Rosado BB';
+UPDATE color SET hex = '#7C5940' WHERE color = 'Tabaco';
+UPDATE color SET hex = '#556B8C' WHERE color = 'Acero Navy';
+UPDATE color SET hex = '#E8D5C4' WHERE color = 'Beige Piero';
+UPDATE color SET hex = '#6A8CAF' WHERE color = 'Acero Boys';
+UPDATE color SET hex = '#FF1DCE' WHERE color = 'Fucsia Intenso';
+UPDATE color SET hex = '#FFD700' WHERE color = 'Amarillo Tp';
+UPDATE color SET hex = '#8B008B' WHERE color = 'Morado';
+UPDATE color SET hex = '#B0C4DE' WHERE color = 'Acero Pastel';
+UPDATE color SET hex = '#614051' WHERE color = 'Ciruela';
+UPDATE color SET hex = '#0000FF' WHERE color = 'Azul';
+UPDATE color SET hex = '#D4B896' WHERE color = 'Beige Oscuro';
+UPDATE color SET hex = '#FFD1A4' WHERE color = 'Melon BB';
+UPDATE color SET hex = '#C19A6B' WHERE color = 'Camell';
+UPDATE color SET hex = '#FF4444' WHERE color = 'Rojo G';
+UPDATE color SET hex = '#6495ED' WHERE color = 'Dusty Blue';
+UPDATE color SET hex = '#C4E4FF' WHERE color = 'Country Air';
+UPDATE color SET hex = '#E6C3E6' WHERE color = 'Orchid Tint';
+UPDATE color SET hex = '#FFD5E5' WHERE color = 'Cloud Pink';
+UPDATE color SET hex = '#FFBFD3' WHERE color = 'Heavenly Pink';
+UPDATE color SET hex = '#87CEEB' WHERE color = 'Illucion Blue';
+UPDATE color SET hex = '#40E0D0' WHERE color = 'Turqueza';
+UPDATE color SET hex = '#01796F' WHERE color = 'V. Pino';
+UPDATE color SET hex = '#FFB3D9' WHERE color = 'Chicle Claro';
+UPDATE color SET hex = '#D4AF88' WHERE color = 'Camello Polo';
+UPDATE color SET hex = '#004D40' WHERE color = 'V. Botella Osc';
+UPDATE color SET hex = '#A4BCE6' WHERE color = 'Celeste Ciruelo';
+UPDATE color SET hex = '#8FA99C' WHERE color = 'V. Cemento';
+UPDATE color SET hex = '#B0E0E6' WHERE color = 'Celeste Claro';
+UPDATE color SET hex = '#FF90B3' WHERE color = 'Chicle Fte';
+UPDATE color SET hex = '#6F2DA8' WHERE color = 'Grapeade';
+UPDATE color SET hex = '#FFB6D9' WHERE color = 'Misi';
+UPDATE color SET hex = '#6B7C8C' WHERE color = 'Acero 03';
+UPDATE color SET hex = '#4A90E2' WHERE color = 'Bahia';
+UPDATE color SET hex = '#D4B896' WHERE color = 'Camello Claro';
+UPDATE color SET hex = '#EFEFEF' WHERE color = 'Melange 3%';
+UPDATE color SET hex = '#F0D5C4' WHERE color = 'Palo Rosa Claro';
+UPDATE color SET hex = '#DDA0DD' WHERE color = 'Orchid Ami';
+UPDATE color SET hex = '#E5C4B4' WHERE color = 'Palo Rosa Ami';
+UPDATE color SET hex = '#9ACD32' WHERE color = 'Manzanilla';
+UPDATE color SET hex = '#FADADD' WHERE color = 'Dawn Pink';
+UPDATE color SET hex = '#FF69B4' WHERE color = 'Rosado Intenso';
+UPDATE color SET hex = '#D8BFD8' WHERE color = 'Lila 2';
+UPDATE color SET hex = '#36454F' WHERE color = 'Charcoal';
+UPDATE color SET hex = '#E5E4E2' WHERE color = 'Chalk';
+UPDATE color SET hex = '#F0E68C' WHERE color = 'Arena 1';
+UPDATE color SET hex = '#556B2F' WHERE color = 'Olivo Osc';
+UPDATE color SET hex = '#A0522D' WHERE color = 'Cocoa Osc';
+UPDATE color SET hex = '#5F7F8F' WHERE color = 'A. Acero Jasp';
+UPDATE color SET hex = '#4A5568' WHERE color = 'P.Colegial Jasp';
+UPDATE color SET hex = '#3C4E5F' WHERE color = 'Acero Osc 2';
+UPDATE color SET hex = '#9ACD32' WHERE color = 'Olivo Claro';
+UPDATE color SET hex = '#FFC0CB' WHERE color = 'Rosado Pink';
+UPDATE color SET hex = '#3A4F5F' WHERE color = 'Diesel';
+UPDATE color SET hex = '#5F7F8F' WHERE color = 'Acero JMR';
+UPDATE color SET hex = '#C08762' WHERE color = 'Cocoa 1002';
+UPDATE color SET hex = '#D8BFE8' WHERE color = 'Lila BB';
+UPDATE color SET hex = '#AFEEEE' WHERE color = 'V. Agua BB';
+UPDATE color SET hex = '#A68B6B' WHERE color = 'Camello Osc';
+UPDATE color SET hex = '#7C8C5C' WHERE color = 'V. Palta';
+UPDATE color SET hex = '#87CEEB' WHERE color = 'Sky';
+UPDATE color SET hex = '#4682B4' WHERE color = 'Steel Blue';
+UPDATE color SET hex = '#8B0000' WHERE color = 'Bordeen';
+UPDATE color SET hex = '#9B8565' WHERE color = 'Antique Entero';
+UPDATE color SET hex = '#4B0082' WHERE color = 'Indigo';
+UPDATE color SET hex = '#5C0120' WHERE color = 'Guinda Oscuro';
+UPDATE color SET hex = '#78184A' WHERE color = 'Pansy';
+UPDATE color SET hex = '#F0E6D8' WHERE color = 'Beige 02';
+UPDATE color SET hex = '#6A8CAF' WHERE color = 'Acero Blue';
+UPDATE color SET hex = '#B0E0E6' WHERE color = 'V. Agua 2';
+UPDATE color SET hex = '#CC99CC' WHERE color = 'Agatha';
+UPDATE color SET hex = '#6F4E37' WHERE color = 'Habano';
+UPDATE color SET hex = '#D2122E' WHERE color = 'rojo 19-1662 tcx';
+UPDATE color SET hex = '#9CAF88' WHERE color = 'Sage Green';
+UPDATE color SET hex = '#228B22' WHERE color = 'New Green';
+UPDATE color SET hex = '#E6E6FA' WHERE color = 'Lavanda';
+UPDATE color SET hex = '#E8D5B7' WHERE color = 'Soya';
+UPDATE color SET hex = '#3A4F5F' WHERE color = 'London';
+UPDATE color SET hex = '#EDE1D4' WHERE color = 'Tofi';
+UPDATE color SET hex = '#A29587' WHERE color = 'P. Rata';
+UPDATE color SET hex = '#FF007F' WHERE color = 'Rosa';
+UPDATE color SET hex = '#A8E4A0' WHERE color = 'Menta SM';
+UPDATE color SET hex = '#6B8C9C' WHERE color = 'Acero 01';
+UPDATE color SET hex = '#708090' WHERE color = 'Acero 02';
+UPDATE color SET hex = '#4A5F6F' WHERE color = 'Acero Deep';
+UPDATE color SET hex = '#3C4E5F' WHERE color = 'Acero Osc';
+UPDATE color SET hex = '#FFFF00' WHERE color = 'Amarillo';
+UPDATE color SET hex = '#FFD700' WHERE color = 'Amarillo Amy';
+UPDATE color SET hex = '#FFBF00' WHERE color = 'Amarillo Brasil';
+UPDATE color SET hex = '#FFA500' WHERE color = 'Amarillo Brasil 02';
+UPDATE color SET hex = '#FFDB58' WHERE color = 'Amarillo Bte';
+UPDATE color SET hex = '#FFD700' WHERE color = 'Amarillo Oro';
+UPDATE color SET hex = '#FDFD96' WHERE color = 'Amarillo Pato';
+UPDATE color SET hex = '#FF69B4' WHERE color = 'Amy Fresa';
+UPDATE color SET hex = '#8B4513' WHERE color = 'Apache';
+UPDATE color SET hex = '#000080' WHERE color = 'Blue Navy';
+UPDATE color SET hex = '#6B1F3D' WHERE color = 'Borgoña Osc';
+UPDATE color SET hex = '#FF77FF' WHERE color = 'Bubble Gumer';
+UPDATE color SET hex = '#00BFFF' WHERE color = 'Capri';
+UPDATE color SET hex = '#C9A468' WHERE color = 'Carton';
+UPDATE color SET hex = '#8FAABE' WHERE color = 'Celeste Acero';
+UPDATE color SET hex = '#87CEEB' WHERE color = 'Celeste Sky';
+UPDATE color SET hex = '#FF1493' WHERE color = 'Chicle Osc';
+UPDATE color SET hex = '#5C3317' WHERE color = 'Chocolate Osc';
+UPDATE color SET hex = '#FF8C82' WHERE color = 'Coralino';
+UPDATE color SET hex = '#FFE4E1' WHERE color = 'Cristal Pink';
+UPDATE color SET hex = '#1C1C1C' WHERE color = 'Dark';
+UPDATE color SET hex = '#3A7D9A' WHERE color = 'Enfermera';
+UPDATE color SET hex = '#FF00FF' WHERE color = 'Fucsia Virtual';
+UPDATE color SET hex = '#555555' WHERE color = 'Gris Osc';
+UPDATE color SET hex = '#F8F0E3' WHERE color = 'Hueso';
+UPDATE color SET hex = '#4682B4' WHERE color = 'Jean';
+UPDATE color SET hex = '#C8A2C8' WHERE color = 'Lila Fte';
+UPDATE color SET hex = '#FFCC4D' WHERE color = 'Mango';
+UPDATE color SET hex = '#2C2C2C' WHERE color = 'Negro flor';
+UPDATE color SET hex = '#E8E8E8' WHERE color = 'Melange 3% Rata';
+UPDATE color SET hex = '#F5F5F5' WHERE color = 'Melange Blanqueo';
+UPDATE color SET hex = '#FFF8DC' WHERE color = 'Melange Cremoso 1%';
+UPDATE color SET hex = '#E8E8E8' WHERE color = 'Melange Lavado';
+UPDATE color SET hex = '#EFEFEF' WHERE color = 'Melange OP';
+UPDATE color SET hex = '#FFDB58' WHERE color = 'Mostaza';
+UPDATE color SET hex = '#E1AD01' WHERE color = 'Mostaza 01';
+UPDATE color SET hex = '#C49102' WHERE color = 'Mostaza 02';
+UPDATE color SET hex = '#FF8C00' WHERE color = 'Naranja Bte';
+UPDATE color SET hex = '#0073E6' WHERE color = 'Palace Blue';
+UPDATE color SET hex = '#E7C6A5' WHERE color = 'Palo Rosa SM';
+UPDATE color SET hex = '#696969' WHERE color = 'Plomo Gris';
+UPDATE color SET hex = '#006400' WHERE color = 'V. Oscuro';
+UPDATE color SET hex = '#D2691E' WHERE color = 'Rojo Teja';
+UPDATE color SET hex = '#FF007F' WHERE color = 'Rose';
+UPDATE color SET hex = '#C0C0C0' WHERE color = 'Silver';
+UPDATE color SET hex = '#AFEEEE' WHERE color = 'Turqueza Claro';
+UPDATE color SET hex = '#1A4D2E' WHERE color = 'V. Botella Jas';
+UPDATE color SET hex = '#8FA99C' WHERE color = 'V. Cemento BB';
+UPDATE color SET hex = '#90EE90' WHERE color = 'V. Claro';
+UPDATE color SET hex = '#50C878' WHERE color = 'V. Esmeralda';
+UPDATE color SET hex = '#007BA7' WHERE color = 'V. Galapagos';
+UPDATE color SET hex = '#7CFC00' WHERE color = 'V. Gras';
+UPDATE color SET hex = '#00613C' WHERE color = 'V. Gucci';
+UPDATE color SET hex = '#BFFF00' WHERE color = 'V. Limon';
+UPDATE color SET hex = '#979797' WHERE color = 'Cemento Bajo';
+UPDATE color SET hex = '#8F00FF' WHERE color = 'Uva';
+UPDATE color SET hex = '#F0C4A5' WHERE color = 'Palo Rosa Bajo';
+UPDATE color SET hex = '#8B9370' WHERE color = 'Aceituna Bajo';
+UPDATE color SET hex = '#FFB76B' WHERE color = 'Chicha Bajo';
+UPDATE color SET hex = '#E3CDA4' WHERE color = 'Duna';
+UPDATE color SET hex = '#009B7D' WHERE color = 'V. Brasil';
+UPDATE color SET hex = '#7FFF00' WHERE color = 'V. Perico G';
+UPDATE color SET hex = '#5C9FCC' WHERE color = 'Azulejo';
+UPDATE color SET hex = '#FA8072' WHERE color = 'Salmon';
+UPDATE color SET hex = '#FFF0F5' WHERE color = 'Yogurt';
+UPDATE color SET hex = '#800080' WHERE color = 'Barny';
+UPDATE color SET hex = '#708090' WHERE color = 'ACERO POLY';
+UPDATE color SET hex = '#F3E5AB' WHERE color = 'Vainilla';
+UPDATE color SET hex = '#FFB6D9' WHERE color = 'Rosa BB';
+UPDATE color SET hex = '#FFE4E1' WHERE color = 'Pink mist';
+UPDATE color SET hex = '#967969' WHERE color = 'Moka';
+UPDATE color SET hex = '#4A4A4A' WHERE color = 'Dark Melange';
+UPDATE color SET hex = '#1C3A3A' WHERE color = 'V. Petroleo';
+UPDATE color SET hex = '#FFFAFA' WHERE color = 'Snowwhite';
+UPDATE color SET hex = '#808080' WHERE color = 'Plomo Inter';
+UPDATE color SET hex = '#4A5F6F' WHERE color = 'Gargoli';
+UPDATE color SET hex = '#DE3163' WHERE color = 'Cereza';
+UPDATE color SET hex = '#B565D8' WHERE color = 'Uva claro';
+UPDATE color SET hex = '#F0D5C4' WHERE color = 'Palo Rosa BB';
+UPDATE color SET hex = '#8A9A5B' WHERE color = 'V. Musgo';
+UPDATE color SET hex = '#4B5F8F' WHERE color = 'Azulino indigo';
+UPDATE color SET hex = '#6495ED' WHERE color = 'Azul bajo';
+UPDATE color SET hex = '#6B8E23' WHERE color = 'Laurel';
+UPDATE color SET hex = '#FF77AA' WHERE color = 'Chicle 1';
+UPDATE color SET hex = '#B0E0E6' WHERE color = 'V. Agua bb 1';
+UPDATE color SET hex = '#FFD700' WHERE color = 'Seguimiento';
+UPDATE color SET hex = '#DCA57D' WHERE color = 'Beige Intenso';
+UPDATE color SET hex = '#3C4E5F' WHERE color = 'Acero Osc 1';
+UPDATE color SET hex = '#FF0033' WHERE color = 'Rojo Brillante';
+UPDATE color SET hex = '#B0D8E8' WHERE color = 'Celeste BB 2';
+UPDATE color SET hex = '#FF4466' WHERE color = 'Fresa int';
+UPDATE color SET hex = '#FFCBA4' WHERE color = 'Durazno';
+UPDATE color SET hex = '#A0A0A0' WHERE color = 'Cemento New';
+UPDATE color SET hex = '#8B3A62' WHERE color = 'Conchevino 2';
+UPDATE color SET hex = '#FFC0D9' WHERE color = 'Rosado BB 2';
+UPDATE color SET hex = '#9ACD32' WHERE color = 'V. Amarillento';
+UPDATE color SET hex = '#9C6B4E' WHERE color = 'Avellana';
+UPDATE color SET hex = '#E0B0FF' WHERE color = 'Malva';
+UPDATE color SET hex = '#F5DEB3' WHERE color = 'Beige Carne';
+UPDATE color SET hex = '#DC143C' WHERE color = 'ROJO NV R';
+UPDATE color SET hex = '#800020' WHERE color = 'Borgoña Piero';
+UPDATE color SET hex = '#E8D5C4' WHERE color = 'Beige Intermedio';
+UPDATE color SET hex = '#A68862' WHERE color = 'Avellana 2';
+UPDATE color SET hex = '#6A8CAF' WHERE color = 'Gargoli Claro';
+UPDATE color SET hex = '#9B9B9B' WHERE color = 'Humo';
+UPDATE color SET hex = '#6B8E23' WHERE color = 'Olivo';
+UPDATE color SET hex = '#F5F0E8' WHERE color = 'Beige Claro';
+UPDATE color SET hex = '#722F37' WHERE color = 'Red Wine';
+UPDATE color SET hex = '#E63946' WHERE color = 'Samba (Rojo)';
+UPDATE color SET hex = '#8B00FF' WHERE color = 'Purple Piero';
+UPDATE color SET hex = '#FFFF00' WHERE color = 'Amarillo Piero';
+UPDATE color SET hex = '#FF69B4' WHERE color = 'Pink Piero';
+UPDATE color SET hex = '#FFCBA4' WHERE color = 'Melon Piero';
+UPDATE color SET hex = '#E6B8D0' WHERE color = 'Endenisse';
+UPDATE color SET hex = '#E0B0FF' WHERE color = 'Mauve';
+UPDATE color SET hex = '#F0F8FF' WHERE color = 'Crystal';
+UPDATE color SET hex = '#FF0000' WHERE color = 'rojo rx';
+UPDATE color SET hex = '#3A4F68' WHERE color = 'jetty blue';
+UPDATE color SET hex = '#2C5E8C' WHERE color = 'Italiano 2';
+UPDATE color SET hex = '#F0C4B4' WHERE color = 'Palo Rosa 2';
+UPDATE color SET hex = '#00A86B' WHERE color = 'Jade';
+UPDATE color SET hex = '#D32F2F' WHERE color = 'mission red';
+UPDATE color SET hex = '#6B8E23' WHERE color = 'elm green';
+UPDATE color SET hex = '#FFD700' WHERE color = 'gold finch';
+UPDATE color SET hex = '#4A90E2' WHERE color = 'gulf blue';
+UPDATE color SET hex = '#FF5722' WHERE color = 'signal orange';
+UPDATE color SET hex = '#1C1C1C' WHERE color = 'flint black';
+UPDATE color SET hex = '#4A5859' WHERE color = 'Basalt';
+UPDATE color SET hex = '#E9C893' WHERE color = 'Sahara';
+UPDATE color SET hex = '#E0F2F7' WHERE color = 'Hielo';
+UPDATE color SET hex = '#98FF98' WHERE color = 'V. Menta';
+
+UPDATE color_x_cliente
+SET hex=c.hex
+FROM color c
+WHERE color_x_cliente.color_id = c.id;
 
 -- ============================================================================
 -- 1. MASTER DATA MIGRATION - Public Schema
@@ -361,6 +719,8 @@ SET estado_produccion = CASE estado
     WHEN 'Replanchado' THEN 'EN_PROCESO'::orden_produccion_estado_enum
     WHEN 'Termofijado' THEN 'EN_PROCESO'::orden_produccion_estado_enum
     WHEN 'Perchado' THEN 'EN_PROCESO'::orden_produccion_estado_enum
+    ELSE
+    'CERRADA'::orden_produccion_estado_enum
 END,
 estado_comercial = CASE estado
  WHEN 'Para Programar' THEN 'CREADA'::partida_estado_enum
@@ -378,7 +738,9 @@ estado_comercial = CASE estado
     WHEN 'Planchado' THEN 'EN_PRODUCCION'::partida_estado_enum
     WHEN 'Replanchado' THEN 'EN_PRODUCCION'::partida_estado_enum
     WHEN 'Termofijado' THEN 'EN_PRODUCCION'::partida_estado_enum
-    WHEN 'Perchado' THEN 'EN_PRODUCCION'::partida_estado_enum END
+    WHEN 'Perchado' THEN 'EN_PRODUCCION'::partida_estado_enum
+    ELSE 'CERRADA'::partida_estado_enum
+     END
 
 -- SELECT * FROM partida LIMIT 100
 -- SELECT * FROM partida_estado_historial
@@ -412,6 +774,7 @@ LEFT JOIN estado e ON ue.estado_id = e.id)
     numero,
     prioridad_id,
     cliente_id,
+    color_x_cliente_id,
     tenido_id,
     articulo_id,
     fibra,
@@ -430,6 +793,7 @@ SELECT
     p.codigo,
     p.prioridad_id,
     p.cliente_id,
+    p.color_x_cliente_id,
     p.tenido_id,
     p.articulo_id,
     p.fibra,
@@ -460,11 +824,20 @@ RETURNING id
     LEFT JOIN item_rollo_detalle ird
     ON ird.articulo_id=p.articulo_id AND flg_tenido=true AND (flg_rib=false OR (flg_rib AND p.rib>0))
     AND COALESCE(p.fibra,1)=ird.fibra;
+SELECT setval(
+  pg_get_serial_sequence('doc.partida', 'id'),
+  (SELECT MAX(id) FROM doc.partida)
+);
+SELECT setval(
+  pg_get_serial_sequence('doc.partida', 'numero'),
+  (SELECT MAX(numero) FROM doc.partida)
+);
+
 
 --============================================
 --EJECUTAR ESTA SECCION MANUALMENTE
 --============================================
-SELECT DISTINCT estado FROM doc.partida;
+
 
 
 INSERT INTO mes.orden_produccion(

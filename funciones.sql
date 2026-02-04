@@ -106,8 +106,8 @@ BEGIN
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('crear_item_insumo', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in crear_item_insumo - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_item::TEXT, v_message, v_detail;
         RAISE;
         END;
     ELSE
@@ -149,8 +149,8 @@ BEGIN
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('crear_item_rollo', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in crear_item_rollo - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_item::TEXT, v_message, v_detail;
         RAISE;
         END;
     ELSE
@@ -209,8 +209,8 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in crear_item - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_item::TEXT, v_message, v_detail;
         RAISE;
 END;
 $function$;
@@ -282,8 +282,8 @@ EXCEPTION
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('crear_almacen', v_usr_id, p_almacen::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in crear_almacen - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_almacen::TEXT, v_message, v_detail;
         RAISE;
 END;
 $function$;
@@ -338,8 +338,8 @@ EXCEPTION
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('modificar_almacen', v_usr_id, p_almacen::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in modificar_almacen - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_almacen::TEXT, v_message, v_detail;
         RAISE;
 END;
 $function$;
@@ -385,15 +385,67 @@ EXCEPTION
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('eliminar_almacen', v_usr_id, p_almacen::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in eliminar_almacen - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_almacen_id, v_message, v_detail;
         RAISE;
 END;
 $function$;
+
+
+----LOGICA PARA VALIDAR ROLLOS A RESERVAR
+-- --------------------------------------------------
+-- ---VALIDAR DISPONIBILIDAD DE ROLLOS RESERVADOS
+-- --------------------------------------------------
+-- WITH partida_rollos AS (
+--         SELECT
+--             (i->>'item_id')::int        AS item_id,
+--             (i->>'lote_id')::int        AS lote_id,
+--             (i->>'ubicacion_id')::int  AS ubicacion_id,
+--             SUM((i->>'cantidad')::numeric)  AS cantidad
+--         FROM jsonb_array_elements(p_partida->'partida_rollos') i
+--         GROUP BY 1,2,3
+--     ),errores as(  SELECT
+--             im.item_id,
+--             im.lote_id,
+--             COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+--             items.cantidad,
+--             SUM(
+--                 CASE
+--                     WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+--                     WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+--                 END
+--             ) AS saldo
+--         FROM inventario.item_movimientos im
+--         JOIN partida_rollos AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
+--         GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
+--         HAVING SUM(
+--                 CASE
+--                     WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+--                     WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+--                 END
+--             )< items.cantidad
+--     ) SELECT jsonb_agg(
+--         jsonb_build_object(
+--             'item_id', item_id,
+--             'lote_id', lote_id,
+--             'ubicacion_id', ubicacion_id,
+--             'saldo_disponible', saldo,
+--             'cantidad_requerida', cantidad
+--         )
+--     )
+--     INTO v_error_payload
+--     FROM errores;
+--     IF v_error_payload IS NOT NULL THEN 
+--         RAISE EXCEPTION
+--             'Stock insuficiente para emitir la guía'
+--             USING
+--                 DETAIL  = v_error_payload::text;
+--     END IF;
+
+
 
 
 CREATE OR REPLACE FUNCTION doc.crear_partida(p_partida jsonb)
-
  RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -408,191 +460,26 @@ DECLARE
     v_partida_id   INT;
     v_tipo_codigo text;
     v_usr_id int := get_user_id();
+
 BEGIN
  INSERT INTO logs_api(function_name, user_id, params)
-        VALUES ('crear_partida', v_usr_id, p_partida::TEXT);
-
---------------------------------------------------
----VALIDAR DISPONIBILIDAD DE ROLLOS RESERVADOS
---------------------------------------------------
-WITH partida_rollos AS (
-        SELECT
-            (i->>'item_id')::int        AS item_id,
-            (i->>'lote_id')::int        AS lote_id,
-            (i->>'ubicacion_id')::int  AS ubicacion_id,
-            SUM((i->>'cantidad')::numeric)  AS cantidad
-        FROM jsonb_array_elements(p_partida->'partida_rollos') i
-        GROUP BY 1,2,3
-    ),errores as(  SELECT
-            im.item_id,
-            im.lote_id,
-            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
-            items.cantidad,
-            SUM(
-                CASE
-                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
-                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
-                END
-            ) AS saldo
-        FROM inventario.item_movimientos im
-        JOIN partida_rollos AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
-        GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
-        HAVING SUM(
-                CASE
-                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
-                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
-                END
-            )< items.cantidad
-    ) SELECT jsonb_agg(
-        jsonb_build_object(
-            'item_id', item_id,
-            'lote_id', lote_id,
-            'ubicacion_id', ubicacion_id,
-            'saldo_disponible', saldo,
-            'cantidad_requerida', cantidad
-        )
-    )
-    INTO v_error_payload
-    FROM errores;
-    IF v_error_payload IS NOT NULL THEN
-        RAISE EXCEPTION
-            'Stock insuficiente para emitir la guía'
-            USING
-                DETAIL  = v_error_payload::text;
-    END IF;
+        VALUES ('crear_partida', v_usr_id, p_partida);
 
 -------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento)
+    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento,color_x_cliente_id)
     VALUES (
-        p_partida->>'prioridad_id',
-        p_partida->>'cliente_id',
+       ( p_partida->>'prioridad_id')::INT,
+        (p_partida->>'cliente_id')::INT,
         (p_partida->>'tenido_id')::INT,
-        p_partida->>'malla',
-        p_partida->>'rendimiento'
+        (p_partida->>'malla')::TEXT,
+        p_partida->>'rendimiento',
+        (p_partida->>'color_x_cliente_id')::INT
     )
     RETURNING id INTO v_partida_id;
      INSERT INTO doc.partida_detalle(partida_id, item_id,cantidad)
      SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT
      FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
 
-     INSERT INTO mes.orden_produccion_item(partida_id, lote_id, ubicacion_id,cantidad, peso_kg)
-     SELECT v_partida_id, (u->>'lote_id')::INT, (u->>'ubicacion_id')::INT, (u->>'cantidad')::numeric,(SELECT (u->>'cantidad')::numeric*(l.detalle->>'peso')::numeric/l.cantidad 
-     FROM inventario.lote l WHERE l.id=(u->>'lote_id')::INT)::numeric
-     FROM jsonb_array_elements(p_partida->'orden_produccion_items') AS u;
-
-    INSERT INTO inventario.item_movimientos(item_id,lote_id,movimiento_tipo,origen_ubicacion_id,cantidad,documento_tipo,documento_id)
-    SELECT (u->>'item_id')::INT, (u->>'lote_id')::INT, 'EGRESO', (u->>'ubicacion_id')::INT, (u->>'cantidad')::numeric, 'PARTIDA', v_partida_id
-    FROM jsonb_array_elements(p_partida->'orden_produccion_items') AS u;
-INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Nueva Partida Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva partida', 'info',jsonb_build_object('objeto_tipo','partida','partida_id',v_partida_id)
-FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
-LEFT JOIN iam.rol r ON ur.rol_id=r.id
-WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
-   RETURN format('Partida con ID %s creada correctamente.', v_partida_id);
- EXCEPTION
-    WHEN OTHERS THEN
-        GET STACKED DIAGNOSTICS
-            v_message  = MESSAGE_TEXT,
-            v_detail   = PG_EXCEPTION_DETAIL,
-            v_hint     = PG_EXCEPTION_HINT,
-            v_context  = PG_EXCEPTION_CONTEXT,
-            v_sqlstate = RETURNED_SQLSTATE;
-
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
-        RAISE;
-END;
-$function$;
-
-CREATE OR REPLACE FUNCTION doc.modificar_partida(p_partida jsonb)
- RETURNS text
-LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'iam', 'notification', 'public','doc','mes'
-AS $function$
-DECLARE
-    v_message   text;
-    v_detail    text;
-    v_hint      text;
-    v_context   text;
-    v_sqlstate  text;
-    v_partida_id   INT;
-    v_tipo_codigo text;
-    v_usr_id int := get_user_id();
-BEGIN
- INSERT INTO logs_api(function_name, user_id, params)
-        VALUES ('crear_partida', v_usr_id, p_partida::TEXT);
-
---------------------------------------------------
----VALIDAR DISPONIBILIDAD DE ROLLOS RESERVADOS
---------------------------------------------------
-WITH partida_rollos AS (
-        SELECT
-            (i->>'item_id')::int        AS item_id,
-            (i->>'lote_id')::int        AS lote_id,
-            (i->>'ubicacion_id')::int  AS ubicacion_id,
-            SUM((i->>'cantidad')::numeric)  AS cantidad
-        FROM jsonb_array_elements(p_partida->'partida_rollos') i
-        GROUP BY 1,2,3
-    ),errores as(  SELECT
-            im.item_id,
-            im.lote_id,
-            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
-            items.cantidad,
-            SUM(
-                CASE
-                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
-                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
-                END
-            ) AS saldo
-        FROM inventario.item_movimientos im
-        JOIN partida_rollos AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
-        GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
-        HAVING SUM(
-                CASE
-                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
-                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
-                END
-            )< items.cantidad
-    ) SELECT jsonb_agg(
-        jsonb_build_object(
-            'item_id', item_id,
-            'lote_id', lote_id,
-            'ubicacion_id', ubicacion_id,
-            'saldo_disponible', saldo,
-            'cantidad_requerida', cantidad
-        )
-    )
-    INTO v_error_payload
-    FROM errores;
-    IF v_error_payload IS NOT NULL THEN
-        RAISE EXCEPTION
-            'Stock insuficiente para emitir la guía'
-            USING
-                DETAIL  = v_error_payload::text;
-    END IF;
-
--------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento)
-    VALUES (
-        p_partida->>'prioridad_id',
-        p_partida->>'cliente_id',
-        (p_partida->>'tenido_id')::INT,
-        p_partida->>'malla',
-        p_partida->>'rendimiento'
-    )
-    RETURNING id INTO v_partida_id;
-     INSERT INTO doc.partida_detalle(partida_id, item_id,cantidad)
-     SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT
-     FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
-
-     INSERT INTO mes.partida_rollo(partida_id, lote_id, ubicacion_id,cantidad, peso_kg)
-     SELECT v_partida_id, (u->>'lote_id')::INT, (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT,(SELECT (u->>'cantidad')::int*l.peso/l.cantidad FROM inventario.lote l WHERE l.id=(u->>'lote_id')::INT)::numeric(8,2)
-     FROM jsonb_array_elements(p_partida->'partida_rollos') AS u;
-
-    INSERT INTO inventario.item_movimientos(item_id,lote_id,movimiento_tipo,origen_ubicacion_id,cantidad,documento_tipo,documento_id)
-    SELECT (u->>'item_id')::INT, (u->>'lote_id')::INT, 'EGRESO', (u->>'ubicacion_id')::INT, (u->>'cantidad')::INT, 'PARTIDA', v_partida_id
-    FROM jsonb_array_elements(p_partida->'partida_rollos') AS u;
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
 SELECT ur.user_id,'Nueva Partida Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva partida', 'info',jsonb_build_object('objeto_tipo','partida','partida_id',v_partida_id)
@@ -609,11 +496,128 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in crear_partida - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_partida::TEXT, v_message, v_detail;
         RAISE;
 END;
 $function$;
+
+CREATE OR REPLACE FUNCTION doc.actualizar_partida(p_partida_id INT, p_partida jsonb)
+ RETURNS text
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public', 'doc', 'mes'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_estado    text;
+    v_usr_id    int := get_user_id();
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_partida', v_usr_id, jsonb_build_object('partida_id', p_partida_id, 'partida', p_partida));
+
+    -- Get current state
+    SELECT estado INTO v_estado
+    FROM doc.partida
+    WHERE id = p_partida_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Partida con ID % no encontrada.', p_partida_id;
+    END IF;
+
+    -- Reject if terminal state
+    IF v_estado IN ('CERRADA', 'CANCELADA', 'FACTURADA') THEN
+        RAISE EXCEPTION 'No se puede modificar una partida en estado %.', v_estado;
+    END IF;
+
+    -------------------------------------------------------------------------
+    -- Always editable: prioridad_id
+    -------------------------------------------------------------------------
+    UPDATE doc.partida
+    SET prioridad_id = (p_partida->>'prioridad_id')::INT
+    WHERE id = p_partida_id;
+
+    -------------------------------------------------------------------------
+    -- CREADA or CONFIRMADA: also malla, rendimiento
+    -------------------------------------------------------------------------
+    IF v_estado IN ('CREADA', 'CONFIRMADA') THEN
+        UPDATE doc.partida
+        SET malla       = (p_partida->>'malla')::TEXT,
+            rendimiento = p_partida->>'rendimiento'
+        WHERE id = p_partida_id;
+    END IF;
+
+    -------------------------------------------------------------------------
+    -- CREADA only: cliente, tenido, color, and full detail replace
+    -------------------------------------------------------------------------
+    IF v_estado = 'CREADA' THEN
+        UPDATE doc.partida
+        SET cliente_id          = (p_partida->>'cliente_id')::INT,
+            tenido_id           = (p_partida->>'tenido_id')::INT,
+            color_x_cliente_id  = (p_partida->>'color_x_cliente_id')::INT
+        WHERE id = p_partida_id;
+
+        -- Full replace of detail rows
+       -- Remove rows no longer in the incoming array
+DELETE FROM doc.partida_detalle pd
+WHERE pd.partida_id = p_partida_id
+  AND NOT EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(p_partida->'partida_detalles') u
+      WHERE (u->>'item_id')::INT = pd.item_id
+  );
+
+-- Upsert the rest
+INSERT INTO doc.partida_detalle(partida_id, item_id, cantidad)
+SELECT p_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT
+FROM jsonb_array_elements(p_partida->'partida_detalles') u
+ON CONFLICT (partida_id, item_id) DO UPDATE
+  SET cantidad = EXCLUDED.cantidad;
+
+    END IF;
+
+    -------------------------------------------------------------------------
+    -- Notification
+    -------------------------------------------------------------------------
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id,
+           'Partida Modificada',
+           COALESCE(
+               (SELECT COALESCE(first_name, 'Usuario desconocido') || ' ' || last_name
+                FROM profiles WHERE id_usuario = v_usr_id),
+               'sistema'
+           ) || ' modificó la partida #' || p_partida_id,
+           'info',
+           jsonb_build_object('objeto_tipo', 'partida', 'partida_id', p_partida_id)
+    FROM iam.user_rol ur
+    LEFT JOIN profiles p ON p.id_usuario = ur.user_id
+    LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta', 'compras')
+      AND v_usr_id <> ur.user_id;
+
+    RETURN format('Partida con ID %s actualizada correctamente.', p_partida_id);
+
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        RAISE LOG 'Error en actualizar_partida - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_partida::TEXT, v_message, v_detail;
+        RAISE;
+END;
+$function$;
+
+
+SELECT * FROM logs_api ORDER BY called_at DESC
 
 CREATE OR REPLACE FUNCTION doc.get_partida(p_partida_id BIGINT)
 RETURNS jsonb
@@ -635,13 +639,16 @@ BEGIN
         -- Cliente & Especificaciones
         'prioridad_id', p.prioridad_id,
         'prioridad', pri.prioridad,
-        'articulo_id', p.articulo_id,
-        'articulo', a.articulo,
         'cliente_id', p.cliente_id,
         'cliente', c.cliente,
+        'color_x_cliente_id', p.color_x_cliente_id,
+        'color', vc.color,
+        'color_hex', vc.color_hex,
+        'color_x_cliente_hex', vc.color_x_cliente_hex,
+        'tono', vc.tono,
+        ''
         'tenido_id', p.tenido_id,
         'tenido', tenido.tenido,
-        'fibra', p.fibra,
         'malla', p.malla,
         'rendimiento', p.rendimiento,
         
@@ -670,7 +677,7 @@ BEGIN
         ), '[]'::jsonb),
         'resumen_progreso', jsonb_build_object(
     'total_ordenes', (SELECT COUNT(*) FROM mes.orden_produccion WHERE partida_id = p.id),
-    'ordenes_completadas', (SELECT COUNT(*) FROM mes.orden_produccion WHERE partida_id = p.id AND estado = 'FINALIZADA'),
+    'ordenes_completadas', (SELECT COUNT(*) FROM mes.orden_produccion WHERE partida_id = p.id AND estado IN ('FINALIZADA', 'TECO', 'CERRADA')),
     'total_pasos', (
         SELECT COUNT(*) 
         FROM mes.orden_produccion_paso opp
@@ -895,8 +902,8 @@ BEGIN
     FROM doc.partida p
     LEFT JOIN prioridad pri ON pri.id = p.prioridad_id
     LEFT JOIN cliente c ON c.id = p.cliente_id
-    LEFT JOIN articulo a ON a.id = p.articulo_id
     LEFT JOIN tenido ON tenido.id = p.tenido_id
+    LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
     WHERE p.id = p_partida_id;
     
     RETURN v_result;
@@ -923,6 +930,83 @@ BENEFITS OF INCLUDING INSPECTIONS:
 - Analytics: Track inspector accuracy, rejection rates
 - Debugging: Understand reproceso flow
 */
+
+CREATE OR REPLACE FUNCTION mes.crear_orden_produccion(p_orden jsonb)
+ RETURNS text
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'iam', 'notification', 'public', 'doc', 'mes'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_orden_id  bigint;
+    v_usr_id    int := get_user_id();
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('crear_orden_produccion', v_usr_id, p_orden);
+
+    INSERT INTO mes.orden_produccion(partida_id, tipo, orden_origen_id)
+    VALUES (
+        (p_orden->>'partida_id')::BIGINT,
+        (p_orden->>'tipo')::orden_produccion_tipo_enum,
+        (p_orden->>'orden_origen_id')::BIGINT
+    )
+    RETURNING id INTO v_orden_id;
+
+    INSERT INTO mes.orden_produccion_paso(
+        orden_produccion_id, secuencia, operacion_id,
+        maquina_asignada_id, receta_id, ph,
+        temperatura, tiempo_estandar, relacion_bano
+    )
+    SELECT v_orden_id,
+           (p->>'secuencia')::SMALLINT,
+           (p->>'operacion_id')::SMALLINT,
+           (p->>'maquina_asignada_id')::INT,
+           (p->>'receta_id')::INT,
+           (p->>'ph')::NUMERIC,
+           (p->>'temperatura')::NUMERIC,
+           (p->>'tiempo_estandar')::INT,
+           (p->>'relacion_bano')::NUMERIC
+    FROM jsonb_array_elements(p_orden->'pasos') p;
+
+    -- Notification (before RETURN)
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id,
+           'Nueva Orden de Producción',
+           COALESCE(
+               (SELECT COALESCE(first_name, 'Usuario desconocido') || ' ' || last_name
+                FROM profiles WHERE id_usuario = v_usr_id),
+               'sistema'
+           ) || ' creó la orden de producción #' || v_orden_id,
+           'info',
+           jsonb_build_object('objeto_tipo', 'orden_produccion', 'orden_produccion_id', v_orden_id)
+    FROM iam.user_rol ur
+    LEFT JOIN profiles p ON p.id_usuario = ur.user_id
+    LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta', 'compras')
+      AND v_usr_id <> ur.user_id;
+
+    RETURN format('Orden de producción con ID %s creada correctamente.', v_orden_id);
+
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+
+        RAISE LOG 'Error en crear_orden_produccion - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_orden::TEXT, v_message, v_detail;
+        RAISE;
+END;
+$function$;
+
 
 CREATE OR REPLACE FUNCTION mes.crear_plantilla(p_plantilla jsonb)
  RETURNS text
@@ -972,8 +1056,8 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in crear_plantilla - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_plantilla::TEXT, v_message, v_detail;
         RAISE;
 END;
 $function$;
@@ -1027,8 +1111,8 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('crear_item', v_usr_id, p_item::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in planificar_partida - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_orden_produccion_pasos::TEXT, v_message, v_detail;
         RAISE;
 END;
 $function$;
@@ -1229,8 +1313,8 @@ EXCEPTION
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        INSERT INTO logs_api(function_name, user_id, params,error_message,error_detail,error_context)
-        VALUES ('crear_guia', v_usr_id, p_guia::TEXT, v_message, v_detail || COALESCE(v_hint,''), v_context);
+        RAISE LOG 'Error in crear_guia - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_guia::TEXT, v_message, v_detail;
         RAISE;
 END;
 $function$;
