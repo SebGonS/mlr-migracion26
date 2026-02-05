@@ -466,14 +466,15 @@ BEGIN
         VALUES ('crear_partida', v_usr_id, p_partida);
 
 -------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento,color_x_cliente_id)
+    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento,color_x_cliente_id,flg_antipilling)
     VALUES (
        ( p_partida->>'prioridad_id')::INT,
         (p_partida->>'cliente_id')::INT,
         (p_partida->>'tenido_id')::INT,
         (p_partida->>'malla')::TEXT,
         p_partida->>'rendimiento',
-        (p_partida->>'color_x_cliente_id')::INT
+        (p_partida->>'color_x_cliente_id')::INT,
+        (p_partida->>'flg_antipilling')::BOOLEAN
     )
     RETURNING id INTO v_partida_id;
      INSERT INTO doc.partida_detalle(partida_id, item_id,cantidad)
@@ -558,7 +559,8 @@ BEGIN
         UPDATE doc.partida
         SET cliente_id          = (p_partida->>'cliente_id')::INT,
             tenido_id           = (p_partida->>'tenido_id')::INT,
-            color_x_cliente_id  = (p_partida->>'color_x_cliente_id')::INT
+            color_x_cliente_id  = (p_partida->>'color_x_cliente_id')::INT,
+            flg_antipilling     = (p_partida->>'flg_antipilling')::BOOLEAN
         WHERE id = p_partida_id;
 
         -- Full replace of detail rows
@@ -946,6 +948,55 @@ DECLARE
     v_orden_id  bigint;
     v_usr_id    int := get_user_id();
 BEGIN
+    -- --------------------------------------------------
+-- ---VALIDAR DISPONIBILIDAD DE ROLLOS RESERVADOS
+-- --------------------------------------------------
+WITH orden_rollos AS (
+        SELECT
+            (i->>'lote_id')::int        AS lote_id,
+            (i->>'ubicacion_id')::int  AS ubicacion_id,
+            SUM((i->>'cantidad')::numeric)  AS cantidad
+        FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
+        GROUP BY 1,2,3
+    ),errores as(  SELECT
+            im.item_id,
+            im.lote_id,
+            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+            items.cantidad,
+            SUM(
+                CASE
+                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+                END
+            ) AS saldo
+        FROM inventario.item_movimientos im
+        JOIN partida_rollos AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
+        GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
+        HAVING SUM(
+                CASE
+                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
+                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
+                END
+            )< items.cantidad
+    ) SELECT jsonb_agg(
+        jsonb_build_object(
+            'item_id', item_id,
+            'lote_id', lote_id,
+            'ubicacion_id', ubicacion_id,
+            'saldo_disponible', saldo,
+            'cantidad_requerida', cantidad
+        )
+    )
+    INTO v_error_payload
+    FROM errores;
+    IF v_error_payload IS NOT NULL THEN 
+        RAISE EXCEPTION
+            'Stock insuficiente para emitir la guía'
+            USING
+                DETAIL  = v_error_payload::text;
+    END IF;
+
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('crear_orden_produccion', v_usr_id, p_orden);
 
@@ -1007,6 +1058,223 @@ EXCEPTION
 END;
 $function$;
 
+CREATE OR REPLACE FUNCTION mes.get_orden_produccion(p_orden_produccion_id BIGINT)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','doc','mes','calidad'
+AS $function$
+DECLARE
+    v_result JSONB;
+BEGIN
+    SELECT jsonb_build_object(
+        -- ═══════════════════════════════════════
+        -- HEADER
+        -- ═══════════════════════════════════════
+        'id',              op.id,
+        'tipo',            op.tipo,
+        'estado',          op.estado,
+        'orden_origen_id', op.orden_origen_id,
+        'fyh_cre',         op.fyh_cre,
+        'fyh_inicio',      op.fyh_inicio,
+        'fyh_fin',         op.fyh_fin,
+
+        -- ═══════════════════════════════════════
+        -- PARTIDA CONTEXT (lightweight)
+        -- ═══════════════════════════════════════
+        'partida', jsonb_build_object(
+            'id',                   p.id,
+            'numero',               p.numero,
+            'codigo',               EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
+            'estado',               p.estado,
+            'cliente_id',           p.cliente_id,
+            'cliente',              c.cliente,
+            'color_x_cliente_id',   p.color_x_cliente_id,
+            'color',                vc.color,
+            'tono',                 vc.tono,
+            'color_hex',            vc.color_hex,
+            'color_x_cliente_hex',  vc.color_x_cliente_hex,
+            'tenido_id',            p.tenido_id,
+            'tenido',               tenido.tenido,
+            'malla',                p.malla,
+            'rendimiento',          p.rendimiento
+        ),
+
+        -- ═══════════════════════════════════════
+        -- PASOS DE PRODUCCION
+        -- ═══════════════════════════════════════
+        'pasos', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'id',                   opp.id,
+                    'secuencia',            opp.secuencia,
+
+                    -- Operación
+                    'operacion_id',         opp.operacion_id,
+                    'operacion_codigo',     o.codigo,
+                    'operacion_nombre',     o.nombre,
+
+                    -- Recursos
+                    'maquina_asignada_id',  opp.maquina_asignada_id,
+                    'maquina_nombre',       maq.nombre,
+                    'empleado_id',          opp.empleado_id,
+                    'empleado_nombre',      CONCAT(emp.nombre, ' ', emp.apellido),
+
+                    -- Parámetros
+                    'ph',                   opp.ph,
+                    'temperatura',          opp.temperatura,
+                    'tiempo_estandar',      opp.tiempo_estandar,
+                    'relacion_bano',        opp.relacion_bano,
+                    'receta_id',            opp.receta_id,
+
+                    -- Estado
+                    'estado',               opp.estado,
+                    'flg_final',            opp.flg_final,
+                    'fyh_inicio',           opp.fyh_inicio,
+                    'fyh_fin',              opp.fyh_fin,
+
+                    -- ─── PROGRAMACION ───
+                    'programacion', (
+                        SELECT jsonb_build_object(
+                            'id',        prog.id,
+                            'maquina_id', prog.maquina_id,
+                            'fecha',     prog.fecha,
+                            'secuencia', prog.secuencia,
+                            'nota',      prog.nota
+                        )
+                        FROM mes.programacion prog
+                        WHERE prog.orden_produccion_paso_id = opp.id
+                        LIMIT 1
+                    ),
+
+                    -- ─── CONSUMO (chemicals/auxiliaries) ───
+                    'consumo', COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id',                   m.id,
+                                'item_id',              m.item_id,
+                                'item_codigo',          vi_mov.item_codigo,
+                                'item_nombre',          vi_mov.item_nombre,
+                                'lote_id',              m.lote_id,
+                                'cantidad',             m.cantidad,
+                                'unidad',               vi_mov.unidad_codigo,
+                                'origen_ubicacion_id',  m.origen_ubicacion_id,
+                                'origen_ubicacion',     ubi.nombre,
+                                'origen_almacen',       al.nombre
+                            ) ORDER BY m.fyh_cre
+                        )
+                        FROM inventario.item_movimientos m
+                        LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
+                        LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
+                        LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
+                        WHERE m.documento_tipo = 'orden_produccion_paso'
+                          AND m.documento_id = opp.id
+                    ), '[]'::jsonb),
+
+                    -- ─── ITEMS PROCESADOS (roll tracking) ───
+                    'items_procesados', COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id',                        oppi.id,
+                                'orden_produccion_item_id',  oppi.orden_produccion_item_id,
+                                'cantidad',                  oppi.cantidad,
+                                'flg_consumido',             oppi.flg_consumido
+                            ) ORDER BY oppi.id
+                        )
+                        FROM mes.orden_produccion_paso_item oppi
+                        WHERE oppi.orden_produccion_paso_id = opp.id
+                    ), '[]'::jsonb)
+
+                ) ORDER BY opp.secuencia
+            )
+            FROM mes.orden_produccion_paso opp
+            LEFT JOIN mes.operacion o     ON o.id   = opp.operacion_id
+            LEFT JOIN mes.maquina maq     ON maq.id = opp.maquina_asignada_id
+            LEFT JOIN mes.empleado emp    ON emp.id = opp.empleado_id
+            WHERE opp.orden_produccion_id = op.id
+        ), '[]'::jsonb),
+
+        -- ═══════════════════════════════════════
+        -- MATERIALES RESERVADOS (rolls assigned)
+        -- ═══════════════════════════════════════
+        'materiales_reservados', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'id',              opi.id,
+                    'lote_id',         opi.lote_id,
+                    'item_id',         l.item_id,
+                    'item_codigo',     vi_mat.item_codigo,
+                    'item_nombre',     vi_mat.item_nombre,
+                    'cantidad',        opi.cantidad,
+                    'peso_kg',         opi.peso_kg,
+                    'unidad',          vi_mat.unidad_codigo,
+                    'ubicacion_id',    opi.ubicacion_id,
+                    'ubicacion',       ubic.nombre,
+                    'almacen',         alm.nombre,
+                    'detalles',        l.detalles,
+                    'estado_calidad',  l.estado_calidad
+                ) ORDER BY opi.id
+            )
+            FROM mes.orden_produccion_item opi
+            LEFT JOIN inventario.lote l        ON l.id = opi.lote_id
+            LEFT JOIN vw_items vi_mat          ON vi_mat.item_id = l.item_id
+            LEFT JOIN inventario.ubicacion ubic ON ubic.id = opi.ubicacion_id
+            LEFT JOIN inventario.almacen alm   ON alm.id = ubic.almacen_id
+            WHERE opi.orden_produccion_id = op.id
+        ), '[]'::jsonb),
+
+        -- ═══════════════════════════════════════
+        -- PRODUCCION (output lotes)
+        -- ═══════════════════════════════════════
+        'produccion', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'id',              l.id,
+                    'item_id',         l.item_id,
+                    'item_codigo',     vi_prod.item_codigo,
+                    'item_nombre',     vi_prod.item_nombre,
+                    'cantidad',        l.cantidad,
+                    'unidad',          vi_prod.unidad_codigo,
+                    'detalles',        l.detalles,
+                    'estado_calidad',  l.estado_calidad,
+                    'fyh_cre',         l.fyh_cre,
+
+                    -- ─── INSPECCIONES (QC) ───
+                    'inspecciones', COALESCE((
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id',               insp.id,
+                                'resultado',        insp.resultado,
+                                'observacion',      insp.observacion,
+                                'empleado_id',      insp.empleado_id,
+                                'empleado_nombre',  CONCAT(emp_i.nombre, ' ', emp_i.apellido),
+                                'fyh_inspeccion',   insp.fyh_inspeccion
+                            ) ORDER BY insp.fyh_inspeccion DESC
+                        )
+                        FROM calidad.inspeccion insp
+                        LEFT JOIN mes.empleado emp_i ON emp_i.id = insp.empleado_id
+                        WHERE insp.lote_id = l.id
+                    ), '[]'::jsonb)
+                ) ORDER BY l.fyh_cre
+            )
+            FROM inventario.lote l
+            LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
+            WHERE l.documento_tipo = 'orden_produccion'
+              AND l.documento_id = op.id
+        ), '[]'::jsonb)
+
+    ) INTO v_result
+    FROM mes.orden_produccion op
+    JOIN doc.partida p      ON p.id = op.partida_id
+    LEFT JOIN cliente c     ON c.id = p.cliente_id
+    LEFT JOIN tenido        ON tenido.id = p.tenido_id
+    LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+    WHERE op.id = p_orden_produccion_id;
+
+    RETURN v_result;
+END;
+$function$;
 
 CREATE OR REPLACE FUNCTION mes.crear_plantilla(p_plantilla jsonb)
  RETURNS text
@@ -1038,8 +1306,8 @@ INSERT INTO ruta_plantilla_detalle (ruta_plantilla_id, operacion_id, secuencia, 
            (detalle->>'secuencia')::SMALLINT,
            (detalle->>'ph')::NUMERIC(4,2),
            (detalle->>'temperatura')::NUMERIC(5,2),
-           (detalle->>'tiempo_estandar')::INT;
-           FROM json_array_elements(p_plantilla->'plantilla_detalles') AS detalle;
+           (detalle->>'tiempo_estandar')::INT
+           FROM jsonb_array_elements(p_plantilla->'plantilla_detalles') AS detalle;
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
 SELECT ur.user_id,'Nueva Plantilla Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva plantilla', 'info',jsonb_build_object('objeto_tipo','plantilla','plantilla_id',v_plantilla_id)
@@ -1319,3 +1587,4 @@ EXCEPTION
 END;
 $function$;
 
+GRANT USAGE ON SCHEMA mes to authenticated;

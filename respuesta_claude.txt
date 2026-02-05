@@ -1,0 +1,1560 @@
+Now I have the full picture. Let me analyze what's already built and design everything that's missing.
+
+Existing functions: get_item, crear_item (+rollo/insumo), get_almacen, crear/modificar/eliminar_almacen, crear/actualizar/get_partida, crear/get_orden_produccion, crear_plantilla, planificar_partida (broken), crear_guia
+
+Here are all the remaining functions, organized by schema:
+
+PUBLIC SCHEMA - Item Management
+
+-- ═══════════════════════════════════════════════════════════════
+-- 1. MODIFICAR ITEM
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION public.modificar_item(p_item_id INT, p_item jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id  int := get_user_id();
+    v_tipo_codigo text;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('modificar_item', v_usr_id, p_item::text);
+
+    SELECT it.codigo INTO v_tipo_codigo
+    FROM item i JOIN item_tipo it ON it.id = i.item_tipo_id
+    WHERE i.id = p_item_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Item con ID % no encontrado.', p_item_id;
+    END IF;
+
+    UPDATE item
+    SET codigo   = COALESCE(p_item->>'codigo', codigo),
+        nombre   = COALESCE(p_item->>'nombre', nombre),
+        unidad_id = COALESCE((p_item->>'unidad_id')::INT, unidad_id),
+        usr_mod  = v_usr_id,
+        fyh_mod  = NOW()
+    WHERE id = p_item_id;
+
+    IF v_tipo_codigo = 'INSUMO' THEN
+        UPDATE item_insumo_detalle
+        SET medida            = COALESCE(p_item->>'medida', medida::text)::medida_enum,
+            insumo_tipo_id    = COALESCE((p_item->>'insumo_tipo_id')::SMALLINT, insumo_tipo_id),
+            colorante_tipo_id = CASE
+                                    WHEN p_item ? 'colorante_tipo_id' THEN (p_item->>'colorante_tipo_id')::SMALLINT
+                                    ELSE colorante_tipo_id
+                                END,
+            usr_mod = v_usr_id, fyh_mod = NOW()
+        WHERE item_id = p_item_id;
+    ELSIF v_tipo_codigo = 'ROLLO' THEN
+        UPDATE item_rollo_detalle
+        SET articulo_id       = COALESCE((p_item->>'articulo_id')::INT, articulo_id),
+            fibra             = COALESCE((p_item->>'fibra')::SMALLINT, fibra),
+            color_x_cliente_id = CASE
+                                     WHEN p_item ? 'color_x_cliente_id' THEN (p_item->>'color_x_cliente_id')::INT
+                                     ELSE color_x_cliente_id
+                                 END,
+            usr_mod = v_usr_id, fyh_mod = NOW()
+        WHERE item_id = p_item_id;
+    END IF;
+
+    RETURN format('Item con ID %s modificado correctamente.', p_item_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in modificar_item - User: %, Params: %, Error: %, Detail: %',
+              v_usr_id, p_item::text, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 2. ELIMINAR ITEM (soft delete)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION public.eliminar_item(p_item_id INT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+    v_nombre text;
+BEGIN
+    UPDATE item
+    SET flg_elm = true, usr_elm = v_usr_id, fyh_elm = NOW()
+    WHERE id = p_item_id AND flg_elm = false
+    RETURNING nombre INTO v_nombre;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Item con ID % no encontrado o ya eliminado.', p_item_id;
+    END IF;
+
+    RETURN format('Item "%s" (ID %s) eliminado correctamente.', v_nombre, p_item_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in eliminar_item - User: %, ID: %, Error: %', v_usr_id, p_item_id, v_message;
+    RAISE;
+END;
+$function$;
+INVENTARIO SCHEMA - Stock & Movements
+
+-- ═══════════════════════════════════════════════════════════════
+-- 3. GET STOCK POR UBICACION
+-- Returns all stock at a given location
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION inventario.get_stock_ubicacion(p_ubicacion_id INT)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'public','inventario'
+AS $$
+SELECT COALESCE(jsonb_agg(row_obj), '[]'::jsonb)
+FROM (
+    SELECT jsonb_build_object(
+        'item_id',       m.item_id,
+        'item_codigo',   vi.item_codigo,
+        'item_nombre',   vi.item_nombre,
+        'item_tipo_codigo', vi.item_tipo_codigo,
+        'lote_id',       m.lote_id,
+        'saldo',         SUM(m.cantidad * imt.factor),
+        'unidad',        vi.unidad_codigo
+    ) AS row_obj
+    FROM inventario.item_movimientos m
+    JOIN inventario.item_movimiento_tipo imt ON imt.id = m.item_movimiento_tipo_id
+    LEFT JOIN vw_items vi ON vi.item_id = m.item_id
+    WHERE COALESCE(m.destino_ubicacion_id, m.origen_ubicacion_id) = p_ubicacion_id
+    GROUP BY m.item_id, m.lote_id, vi.item_codigo, vi.item_nombre, vi.item_tipo_codigo, vi.unidad_codigo
+    HAVING SUM(m.cantidad * imt.factor) <> 0
+    ORDER BY vi.item_codigo
+) sub;
+$$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 4. GET STOCK POR ITEM (across all locations)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION inventario.get_stock_item(p_item_id INT)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'public','inventario'
+AS $$
+SELECT COALESCE(jsonb_agg(row_obj), '[]'::jsonb)
+FROM (
+    SELECT jsonb_build_object(
+        'ubicacion_id',  COALESCE(m.destino_ubicacion_id, m.origen_ubicacion_id),
+        'ubicacion',     u.nombre,
+        'almacen_id',    a.id,
+        'almacen',       a.nombre,
+        'lote_id',       m.lote_id,
+        'detalles',      l.detalles,
+        'estado_calidad',l.estado_calidad,
+        'saldo',         SUM(m.cantidad * imt.factor),
+        'unidad',        vi.unidad_codigo
+    ) AS row_obj
+    FROM inventario.item_movimientos m
+    JOIN inventario.item_movimiento_tipo imt ON imt.id = m.item_movimiento_tipo_id
+    LEFT JOIN vw_items vi ON vi.item_id = m.item_id
+    LEFT JOIN inventario.ubicacion u ON u.id = COALESCE(m.destino_ubicacion_id, m.origen_ubicacion_id)
+    LEFT JOIN inventario.almacen a ON a.id = u.almacen_id
+    LEFT JOIN inventario.lote l ON l.id = m.lote_id
+    WHERE m.item_id = p_item_id
+    GROUP BY COALESCE(m.destino_ubicacion_id, m.origen_ubicacion_id),
+             u.nombre, a.id, a.nombre, m.lote_id, l.detalles, l.estado_calidad, vi.unidad_codigo
+    HAVING SUM(m.cantidad * imt.factor) <> 0
+    ORDER BY a.nombre, u.nombre
+) sub;
+$$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 5. GET LOTE
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION inventario.get_lote(p_lote_id INT)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'public','inventario','calidad','mes'
+AS $$
+SELECT jsonb_build_object(
+    'id',             l.id,
+    'item_id',        l.item_id,
+    'item_codigo',    vi.item_codigo,
+    'item_nombre',    vi.item_nombre,
+    'documento_tipo', l.documento_tipo,
+    'documento_id',   l.documento_id,
+    'cantidad',       l.cantidad,
+    'detalles',       l.detalles,
+    'estado_calidad', l.estado_calidad,
+    'propietario_id', l.propietario_id,
+    'fyh_cre',        l.fyh_cre,
+    'stock_actual', (
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'ubicacion_id', sub.ubicacion_id,
+            'ubicacion',    u.nombre,
+            'almacen',      a.nombre,
+            'saldo',        sub.saldo
+        )), '[]'::jsonb)
+        FROM (
+            SELECT COALESCE(m.destino_ubicacion_id, m.origen_ubicacion_id) AS ubicacion_id,
+                   SUM(m.cantidad * imt.factor) AS saldo
+            FROM inventario.item_movimientos m
+            JOIN inventario.item_movimiento_tipo imt ON imt.id = m.item_movimiento_tipo_id
+            WHERE m.lote_id = l.id
+            GROUP BY COALESCE(m.destino_ubicacion_id, m.origen_ubicacion_id)
+            HAVING SUM(m.cantidad * imt.factor) <> 0
+        ) sub
+        LEFT JOIN inventario.ubicacion u ON u.id = sub.ubicacion_id
+        LEFT JOIN inventario.almacen a ON a.id = u.almacen_id
+    ),
+    'movimientos', (
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'id',           m.id,
+            'tipo_codigo',  imt.codigo,
+            'tipo_nombre',  imt.nombre,
+            'factor',       imt.factor,
+            'cantidad',     m.cantidad,
+            'origen',       ou.nombre,
+            'destino',      du.nombre,
+            'documento_tipo', m.documento_tipo,
+            'documento_id', m.documento_id,
+            'observacion',  m.observacion,
+            'fecha_hora',   m.fecha_hora
+        ) ORDER BY m.fecha_hora), '[]'::jsonb)
+        FROM inventario.item_movimientos m
+        JOIN inventario.item_movimiento_tipo imt ON imt.id = m.item_movimiento_tipo_id
+        LEFT JOIN inventario.ubicacion ou ON ou.id = m.origen_ubicacion_id
+        LEFT JOIN inventario.ubicacion du ON du.id = m.destino_ubicacion_id
+        WHERE m.lote_id = l.id
+    ),
+    'inspecciones', (
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'id',             insp.id,
+            'resultado',      insp.resultado,
+            'observacion',    insp.observacion,
+            'empleado_id',    insp.empleado_id,
+            'empleado_nombre', CONCAT(emp.nombre, ' ', emp.apellido),
+            'fyh_inspeccion', insp.fyh_inspeccion
+        ) ORDER BY insp.fyh_inspeccion DESC), '[]'::jsonb)
+        FROM calidad.inspeccion insp
+        LEFT JOIN mes.empleado emp ON emp.id = insp.empleado_id
+        WHERE insp.lote_id = l.id
+    )
+)
+FROM inventario.lote l
+LEFT JOIN vw_items vi ON vi.item_id = l.item_id
+WHERE l.id = p_lote_id;
+$$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 6. REGISTRAR MOVIMIENTO INVENTARIO (generico)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION inventario.registrar_movimiento(p_mov jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','inventario'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id     int := get_user_id();
+    v_mov_id     bigint;
+    v_mov_tipo   inventario.item_movimiento_tipo%ROWTYPE;
+    v_saldo      numeric;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_movimiento', v_usr_id, p_mov::text);
+
+    SELECT * INTO v_mov_tipo
+    FROM inventario.item_movimiento_tipo
+    WHERE id = (p_mov->>'item_movimiento_tipo_id')::SMALLINT;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Tipo de movimiento con ID % no existe.', p_mov->>'item_movimiento_tipo_id';
+    END IF;
+
+    -- Validate required fields based on tipo flags
+    IF v_mov_tipo.req_origen AND (p_mov->>'origen_ubicacion_id') IS NULL THEN
+        RAISE EXCEPTION 'El tipo de movimiento "%" requiere origen_ubicacion_id.', v_mov_tipo.nombre;
+    END IF;
+    IF v_mov_tipo.req_destino AND (p_mov->>'destino_ubicacion_id') IS NULL THEN
+        RAISE EXCEPTION 'El tipo de movimiento "%" requiere destino_ubicacion_id.', v_mov_tipo.nombre;
+    END IF;
+
+    -- Stock check for outgoing movements
+    IF v_mov_tipo.factor = -1 AND (p_mov->>'lote_id') IS NOT NULL THEN
+        SELECT COALESCE(SUM(m.cantidad * t.factor), 0) INTO v_saldo
+        FROM inventario.item_movimientos m
+        JOIN inventario.item_movimiento_tipo t ON t.id = m.item_movimiento_tipo_id
+        WHERE m.lote_id = (p_mov->>'lote_id')::INT
+          AND COALESCE(m.destino_ubicacion_id, m.origen_ubicacion_id) = (p_mov->>'origen_ubicacion_id')::INT;
+
+        IF v_saldo < (p_mov->>'cantidad')::NUMERIC THEN
+            RAISE EXCEPTION 'Stock insuficiente. Saldo: %, Requerido: %', v_saldo, p_mov->>'cantidad';
+        END IF;
+    END IF;
+
+    INSERT INTO inventario.item_movimientos(
+        item_id, lote_id, item_movimiento_tipo_id,
+        origen_ubicacion_id, destino_ubicacion_id,
+        cantidad, owner_id, fecha_hora,
+        documento_tipo, documento_id, observacion, usr_cre
+    ) VALUES (
+        (p_mov->>'item_id')::INT,
+        (p_mov->>'lote_id')::INT,
+        (p_mov->>'item_movimiento_tipo_id')::SMALLINT,
+        (p_mov->>'origen_ubicacion_id')::INT,
+        (p_mov->>'destino_ubicacion_id')::INT,
+        (p_mov->>'cantidad')::NUMERIC(12,2),
+        (p_mov->>'owner_id')::INT,
+        COALESCE((p_mov->>'fecha_hora')::TIMESTAMPTZ, NOW()),
+        p_mov->>'documento_tipo',
+        (p_mov->>'documento_id')::INT,
+        p_mov->>'observacion',
+        v_usr_id
+    )
+    RETURNING id INTO v_mov_id;
+
+    RETURN format('Movimiento ID %s registrado correctamente.', v_mov_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_movimiento - User: %, Params: %, Error: %, Detail: %',
+              v_usr_id, p_mov::text, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 7. TRANSFERIR STOCK (atomic: EGR from origin + ING to dest)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION inventario.transferir_stock(p_transfer jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','inventario'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id       int := get_user_id();
+    v_egr_tipo_id  smallint;
+    v_ing_tipo_id  smallint;
+    v_saldo        numeric;
+    v_item         jsonb;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('transferir_stock', v_usr_id, p_transfer::text);
+
+    SELECT id INTO v_egr_tipo_id FROM inventario.item_movimiento_tipo WHERE codigo = 'INT_TRANSFER_EGR';
+    SELECT id INTO v_ing_tipo_id FROM inventario.item_movimiento_tipo WHERE codigo = 'INT_TRANSFER_ING';
+
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_transfer->'items')
+    LOOP
+        -- Validate stock at origin
+        SELECT COALESCE(SUM(m.cantidad * t.factor), 0) INTO v_saldo
+        FROM inventario.item_movimientos m
+        JOIN inventario.item_movimiento_tipo t ON t.id = m.item_movimiento_tipo_id
+        WHERE m.lote_id = (v_item->>'lote_id')::INT
+          AND COALESCE(m.destino_ubicacion_id, m.origen_ubicacion_id) = (p_transfer->>'origen_ubicacion_id')::INT;
+
+        IF v_saldo < (v_item->>'cantidad')::NUMERIC THEN
+            RAISE EXCEPTION 'Stock insuficiente para lote_id %. Saldo: %, Requerido: %',
+                v_item->>'lote_id', v_saldo, v_item->>'cantidad';
+        END IF;
+
+        -- EGRESO from origin
+        INSERT INTO inventario.item_movimientos(
+            item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, cantidad,
+            documento_tipo, observacion, usr_cre
+        ) VALUES (
+            (v_item->>'item_id')::INT,
+            (v_item->>'lote_id')::INT,
+            v_egr_tipo_id,
+            (p_transfer->>'origen_ubicacion_id')::INT,
+            (v_item->>'cantidad')::NUMERIC(12,2),
+            'transferencia',
+            p_transfer->>'observacion',
+            v_usr_id
+        );
+
+        -- INGRESO to destination
+        INSERT INTO inventario.item_movimientos(
+            item_id, lote_id, item_movimiento_tipo_id,
+            destino_ubicacion_id, cantidad,
+            documento_tipo, observacion, usr_cre
+        ) VALUES (
+            (v_item->>'item_id')::INT,
+            (v_item->>'lote_id')::INT,
+            v_ing_tipo_id,
+            (p_transfer->>'destino_ubicacion_id')::INT,
+            (v_item->>'cantidad')::NUMERIC(12,2),
+            'transferencia',
+            p_transfer->>'observacion',
+            v_usr_id
+        );
+    END LOOP;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Transferencia de Stock',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || ' realizó una transferencia de inventario', 'info',
+           jsonb_build_object('objeto_tipo','transferencia')
+    FROM iam.user_rol ur
+    LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta','inventario') AND v_usr_id <> ur.user_id;
+
+    RETURN 'Transferencia completada correctamente.';
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in transferir_stock - User: %, Params: %, Error: %, Detail: %',
+              v_usr_id, p_transfer::text, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+DOC SCHEMA - Guia & Partida State
+
+-- ═══════════════════════════════════════════════════════════════
+-- 8. GET GUIA REMISION
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION doc.get_guia(p_guia_id BIGINT)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'public','inventario','doc'
+AS $$
+SELECT jsonb_build_object(
+    'id',               g.id,
+    'guia_remision_tipo_id', g.guia_remision_tipo_id,
+    'tipo_codigo',      grt.codigo,
+    'tipo_nombre',      grt.nombre,
+    'flg_emitida',      grt.flg_emitida,
+    'flg_cliente',      grt.flg_cliente,
+    'serie',            g.serie,
+    'correlativo',      g.correlativo,
+    'emisor_cliente_id',    g.emisor_cliente_id,
+    'emisor_proveedor_id',  g.emisor_proveedor_id,
+    'receptor_cliente_id',  g.receptor_cliente_id,
+    'receptor_proveedor_id',g.receptor_proveedor_id,
+    'fecha_emision',    g.fecha_emision,
+    'fecha_recepcion',  g.fecha_recepcion,
+    'fyh_cre',          g.fyh_cre,
+    'detalles', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'id',           gd.id,
+            'item_id',      gd.item_id,
+            'item_codigo',  vi.item_codigo,
+            'item_nombre',  vi.item_nombre,
+            'lote_id',      gd.lote_id,
+            'ubicacion_id', gd.ubicacion_id,
+            'ubicacion',    u.nombre,
+            'cantidad',     gd.cantidad,
+            'unidad',       vi.unidad_codigo
+        ) ORDER BY gd.id)
+        FROM doc.guia_remision_detalle gd
+        LEFT JOIN vw_items vi ON vi.item_id = gd.item_id
+        LEFT JOIN inventario.ubicacion u ON u.id = gd.ubicacion_id
+        WHERE gd.guia_id = g.id
+    ), '[]'::jsonb)
+)
+FROM doc.guia_remision g
+LEFT JOIN doc.guia_remision_tipo grt ON grt.id = g.guia_remision_tipo_id
+WHERE g.id = p_guia_id;
+$$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 9. CAMBIAR ESTADO PARTIDA (generic state machine)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION doc.cambiar_estado_partida(p_partida_id BIGINT, p_estado TEXT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id       int := get_user_id();
+    v_estado_actual partida_estado_enum;
+    v_nuevo_estado  partida_estado_enum;
+BEGIN
+    SELECT estado INTO v_estado_actual FROM doc.partida WHERE id = p_partida_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Partida con ID % no encontrada.', p_partida_id;
+    END IF;
+
+    v_nuevo_estado := p_estado::partida_estado_enum;
+
+    -- Validate transitions
+    IF v_estado_actual IN ('CERRADA','CANCELADA','FACTURADA') THEN
+        RAISE EXCEPTION 'No se puede cambiar estado de una partida en estado %.', v_estado_actual;
+    END IF;
+
+    IF v_nuevo_estado = 'CANCELADA' AND v_estado_actual NOT IN ('CREADA','CONFIRMADA') THEN
+        RAISE EXCEPTION 'Solo se puede cancelar una partida en estado CREADA o CONFIRMADA. Estado actual: %', v_estado_actual;
+    END IF;
+
+    UPDATE doc.partida
+    SET estado  = v_nuevo_estado,
+        usr_mod = v_usr_id,
+        fyh_mod = NOW(),
+        fyh_inicio = CASE WHEN v_nuevo_estado = 'EN_PRODUCCION' AND fyh_inicio IS NULL THEN NOW() ELSE fyh_inicio END,
+        fyh_fin    = CASE WHEN v_nuevo_estado IN ('ENTREGADA','CERRADA','CANCELADA') AND fyh_fin IS NULL THEN NOW() ELSE fyh_fin END
+    WHERE id = p_partida_id;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id,
+           'Partida Estado Actualizado',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' cambió partida #%s de %s a %s', p_partida_id, v_estado_actual, v_nuevo_estado),
+           'info',
+           jsonb_build_object('objeto_tipo','partida','partida_id', p_partida_id)
+    FROM iam.user_rol ur
+    LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta','compras') AND v_usr_id <> ur.user_id;
+
+    RETURN format('Partida #%s cambiada de %s a %s.', p_partida_id, v_estado_actual, v_nuevo_estado);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in cambiar_estado_partida - User: %, ID: %, Error: %, Detail: %',
+              v_usr_id, p_partida_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+MES SCHEMA - Machines
+
+-- ═══════════════════════════════════════════════════════════════
+-- 10. GET MAQUINA
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.get_maquina(p_maquina_id INT)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'mes'
+AS $$
+SELECT jsonb_build_object(
+    'id',                m.id,
+    'codigo',            m.codigo,
+    'nombre',            m.nombre,
+    'maquina_tipo_id',   m.maquina_tipo_id,
+    'maquina_tipo',      mt.nombre,
+    'estado_actual',     m.estado_actual,
+    'capacidad_min_kg',  m.capacidad_min_kg,
+    'capacidad_max_kg',  m.capacidad_max_kg,
+    'relacion_bano',     m.relacion_bano,
+    'ultimo_mantenimiento', m.ultimo_mantenimiento,
+    'horas_totales',     m.horas_totales
+)
+FROM mes.maquina m
+LEFT JOIN mes.maquina_tipo mt ON mt.id = m.maquina_tipo_id
+WHERE m.id = p_maquina_id AND m.flg_elm = false;
+$$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 11. CREAR MAQUINA
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.crear_maquina(p_maquina jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id     int := get_user_id();
+    v_maquina_id int;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('crear_maquina', v_usr_id, p_maquina::text);
+
+    INSERT INTO mes.maquina(codigo, nombre, maquina_tipo_id,
+        capacidad_min_kg, capacidad_max_kg, relacion_bano, usr_cre)
+    VALUES (
+        p_maquina->>'codigo',
+        p_maquina->>'nombre',
+        (p_maquina->>'maquina_tipo_id')::SMALLINT,
+        (p_maquina->>'capacidad_min_kg')::INT,
+        (p_maquina->>'capacidad_max_kg')::INT,
+        (p_maquina->>'relacion_bano')::NUMERIC(5,2),
+        v_usr_id
+    )
+    RETURNING id INTO v_maquina_id;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Nueva Máquina Creada',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || ' creó la máquina ' || (p_maquina->>'nombre'), 'info',
+           jsonb_build_object('objeto_tipo','maquina','maquina_id', v_maquina_id)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta') AND v_usr_id <> ur.user_id;
+
+    RETURN format('Máquina con ID %s creada correctamente.', v_maquina_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in crear_maquina - User: %, Params: %, Error: %', v_usr_id, p_maquina::text, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 12. MODIFICAR MAQUINA
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.modificar_maquina(p_maquina_id INT, p_maquina jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+BEGIN
+    UPDATE mes.maquina
+    SET codigo          = COALESCE(p_maquina->>'codigo', codigo),
+        nombre          = COALESCE(p_maquina->>'nombre', nombre),
+        maquina_tipo_id = COALESCE((p_maquina->>'maquina_tipo_id')::SMALLINT, maquina_tipo_id),
+        capacidad_min_kg = COALESCE((p_maquina->>'capacidad_min_kg')::INT, capacidad_min_kg),
+        capacidad_max_kg = COALESCE((p_maquina->>'capacidad_max_kg')::INT, capacidad_max_kg),
+        relacion_bano   = COALESCE((p_maquina->>'relacion_bano')::NUMERIC, relacion_bano),
+        estado_actual   = COALESCE((p_maquina->>'estado_actual')::maquina_estado_enum, estado_actual),
+        usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE id = p_maquina_id AND flg_elm = false;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Máquina con ID % no encontrada.', p_maquina_id;
+    END IF;
+
+    RETURN format('Máquina con ID %s modificada correctamente.', p_maquina_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in modificar_maquina - User: %, ID: %, Error: %', v_usr_id, p_maquina_id, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 13. ELIMINAR MAQUINA (soft delete)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.eliminar_maquina(p_maquina_id INT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id  int := get_user_id();
+    v_nombre  text;
+BEGIN
+    UPDATE mes.maquina
+    SET flg_elm = true, usr_elm = v_usr_id, fyh_elm = NOW()
+    WHERE id = p_maquina_id AND flg_elm = false
+    RETURNING nombre INTO v_nombre;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Máquina con ID % no encontrada o ya eliminada.', p_maquina_id;
+    END IF;
+
+    RETURN format('Máquina "%s" eliminada correctamente.', v_nombre);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in eliminar_maquina - User: %, ID: %, Error: %', v_usr_id, p_maquina_id, v_message;
+    RAISE;
+END;
+$function$;
+MES SCHEMA - Employees
+
+-- ═══════════════════════════════════════════════════════════════
+-- 14. CREAR EMPLEADO
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.crear_empleado(p_empleado jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id      int := get_user_id();
+    v_empleado_id smallint;
+BEGIN
+    INSERT INTO mes.empleado(nombre, apellido, rol_id, turno_id, usr_cre)
+    VALUES (
+        p_empleado->>'nombre',
+        p_empleado->>'apellido',
+        (p_empleado->>'rol_id')::SMALLINT,
+        (p_empleado->>'turno_id')::SMALLINT
+    )
+    RETURNING id INTO v_empleado_id;
+
+    RETURN format('Empleado con ID %s creado correctamente.', v_empleado_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in crear_empleado - User: %, Params: %, Error: %', v_usr_id, p_empleado::text, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 15. MODIFICAR EMPLEADO
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.modificar_empleado(p_empleado_id SMALLINT, p_empleado jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+BEGIN
+    UPDATE mes.empleado
+    SET nombre   = COALESCE(p_empleado->>'nombre', nombre),
+        apellido = COALESCE(p_empleado->>'apellido', apellido),
+        rol_id   = COALESCE((p_empleado->>'rol_id')::SMALLINT, rol_id),
+        turno_id = COALESCE((p_empleado->>'turno_id')::SMALLINT, turno_id),
+        usr_mod  = v_usr_id, fyh_mod = NOW()
+    WHERE id = p_empleado_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Empleado con ID % no encontrado.', p_empleado_id;
+    END IF;
+
+    RETURN format('Empleado con ID %s modificado correctamente.', p_empleado_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in modificar_empleado - User: %, ID: %, Error: %', v_usr_id, p_empleado_id, v_message;
+    RAISE;
+END;
+$function$;
+MES SCHEMA - Templates (Plantilla)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 16. GET PLANTILLA
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.get_plantilla(p_plantilla_id INT)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'mes'
+AS $$
+SELECT jsonb_build_object(
+    'id',     rp.id,
+    'nombre', rp.nombre,
+    'detalles', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'id',             rpd.id,
+            'secuencia',      rpd.secuencia,
+            'operacion_id',   rpd.operacion_id,
+            'operacion_codigo', o.codigo,
+            'operacion_nombre', o.nombre,
+            'ph',             rpd.ph,
+            'temperatura',    rpd.temperatura,
+            'tiempo_estandar',rpd.tiempo_estandar
+        ) ORDER BY rpd.secuencia)
+        FROM mes.ruta_plantilla_detalle rpd
+        LEFT JOIN mes.operacion o ON o.id = rpd.operacion_id
+        WHERE rpd.ruta_plantilla_id = rp.id
+    ), '[]'::jsonb)
+)
+FROM mes.ruta_plantilla rp
+WHERE rp.id = p_plantilla_id AND rp.flg_elm = false;
+$$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 17. MODIFICAR PLANTILLA
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.modificar_plantilla(p_plantilla_id INT, p_plantilla jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('modificar_plantilla', v_usr_id, p_plantilla::text);
+
+    UPDATE mes.ruta_plantilla
+    SET nombre  = COALESCE(p_plantilla->>'nombre', nombre),
+        usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE id = p_plantilla_id AND flg_elm = false;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Plantilla con ID % no encontrada.', p_plantilla_id;
+    END IF;
+
+    IF p_plantilla ? 'plantilla_detalles' THEN
+        -- Delete removed steps
+        DELETE FROM mes.ruta_plantilla_detalle rpd
+        WHERE rpd.ruta_plantilla_id = p_plantilla_id
+          AND NOT EXISTS (
+              SELECT 1 FROM jsonb_array_elements(p_plantilla->'plantilla_detalles') d
+              WHERE (d->>'secuencia')::SMALLINT = rpd.secuencia
+          );
+
+        -- Upsert steps
+        INSERT INTO mes.ruta_plantilla_detalle(
+            ruta_plantilla_id, operacion_id, secuencia, ph, temperatura, tiempo_estandar
+        )
+        SELECT p_plantilla_id,
+               (d->>'operacion_id')::INT,
+               (d->>'secuencia')::SMALLINT,
+               (d->>'ph')::NUMERIC(4,2),
+               (d->>'temperatura')::NUMERIC(5,2),
+               (d->>'tiempo_estandar')::INT
+        FROM jsonb_array_elements(p_plantilla->'plantilla_detalles') d
+        ON CONFLICT (ruta_plantilla_id, secuencia)
+        DO UPDATE SET
+            operacion_id    = EXCLUDED.operacion_id,
+            ph              = EXCLUDED.ph,
+            temperatura     = EXCLUDED.temperatura,
+            tiempo_estandar = EXCLUDED.tiempo_estandar;
+    END IF;
+
+    RETURN format('Plantilla con ID %s modificada correctamente.', p_plantilla_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in modificar_plantilla - User: %, ID: %, Error: %', v_usr_id, p_plantilla_id, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 18. ELIMINAR PLANTILLA (soft delete)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.eliminar_plantilla(p_plantilla_id INT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id  int := get_user_id();
+    v_nombre  text;
+BEGIN
+    UPDATE mes.ruta_plantilla
+    SET flg_elm = true, usr_elm = v_usr_id, fyh_elm = NOW()
+    WHERE id = p_plantilla_id AND flg_elm = false
+    RETURNING nombre INTO v_nombre;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Plantilla con ID % no encontrada o ya eliminada.', p_plantilla_id;
+    END IF;
+
+    RETURN format('Plantilla "%s" eliminada correctamente.', v_nombre);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in eliminar_plantilla - User: %, ID: %, Error: %', v_usr_id, p_plantilla_id, v_message;
+    RAISE;
+END;
+$function$;
+MES SCHEMA - Production Order Lifecycle
+
+-- ═══════════════════════════════════════════════════════════════
+-- 19. CAMBIAR ESTADO ORDEN PRODUCCION
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.cambiar_estado_orden(p_orden_id BIGINT, p_estado TEXT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes','doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id        int := get_user_id();
+    v_estado_actual orden_produccion_estado_enum;
+    v_nuevo_estado  orden_produccion_estado_enum;
+    v_partida_id    bigint;
+BEGIN
+    SELECT estado, partida_id INTO v_estado_actual, v_partida_id
+    FROM mes.orden_produccion WHERE id = p_orden_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
+    END IF;
+
+    v_nuevo_estado := p_estado::orden_produccion_estado_enum;
+
+    IF v_estado_actual IN ('CERRADA','CANCELADA') THEN
+        RAISE EXCEPTION 'No se puede cambiar estado de una orden en estado %.', v_estado_actual;
+    END IF;
+
+    UPDATE mes.orden_produccion
+    SET estado    = v_nuevo_estado,
+        fyh_inicio = CASE WHEN v_nuevo_estado = 'EN_PROCESO' AND fyh_inicio IS NULL THEN NOW() ELSE fyh_inicio END,
+        fyh_fin    = CASE WHEN v_nuevo_estado IN ('FINALIZADA','TECO','CERRADA','CANCELADA') AND fyh_fin IS NULL THEN NOW() ELSE fyh_fin END
+    WHERE id = p_orden_id;
+
+    -- Auto-update partida to EN_PRODUCCION if first order starts
+    IF v_nuevo_estado = 'EN_PROCESO' THEN
+        UPDATE doc.partida
+        SET estado = 'EN_PRODUCCION', fyh_inicio = COALESCE(fyh_inicio, NOW()), usr_mod = v_usr_id, fyh_mod = NOW()
+        WHERE id = v_partida_id AND estado IN ('CREADA','CONFIRMADA');
+    END IF;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Orden Producción Actualizada',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' cambió orden #%s a %s', p_orden_id, v_nuevo_estado), 'info',
+           jsonb_build_object('objeto_tipo','orden_produccion','orden_produccion_id', p_orden_id)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta','supervisor_produccion') AND v_usr_id <> ur.user_id;
+
+    RETURN format('Orden #%s cambiada de %s a %s.', p_orden_id, v_estado_actual, v_nuevo_estado);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in cambiar_estado_orden - User: %, ID: %, Error: %', v_usr_id, p_orden_id, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 20. AGREGAR MATERIALES A ORDEN (reserve rolls)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.agregar_materiales_orden(p_orden_id BIGINT, p_items jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+    v_count  int;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('agregar_materiales_orden', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'items', p_items)::text);
+
+    INSERT INTO mes.orden_produccion_item(
+        orden_produccion_id, lote_id, ubicacion_id, peso_kg, cantidad, usr_cre
+    )
+    SELECT p_orden_id,
+           (i->>'lote_id')::INT,
+           (i->>'ubicacion_id')::INT,
+           (i->>'peso_kg')::NUMERIC(10,2),
+           (i->>'cantidad')::INT,
+           v_usr_id
+    FROM jsonb_array_elements(p_items) i;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    RETURN format('%s materiales agregados a orden #%s.', v_count, p_orden_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in agregar_materiales_orden - User: %, ID: %, Error: %', v_usr_id, p_orden_id, v_message;
+    RAISE;
+END;
+$function$;
+MES SCHEMA - Step Lifecycle (Paso)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 21. INICIAR PASO
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.iniciar_paso(p_paso_id BIGINT, p_datos jsonb DEFAULT '{}'::jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id       int := get_user_id();
+    v_estado       orden_produccion_paso_estado_enum;
+    v_orden_id     bigint;
+    v_op_nombre    text;
+BEGIN
+    SELECT opp.estado, opp.orden_produccion_id, o.nombre
+    INTO v_estado, v_orden_id, v_op_nombre
+    FROM mes.orden_produccion_paso opp
+    LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
+    WHERE opp.id = p_paso_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Paso con ID % no encontrado.', p_paso_id;
+    END IF;
+    IF v_estado <> 'PENDIENTE' THEN
+        RAISE EXCEPTION 'Solo se puede iniciar un paso en estado PENDIENTE. Estado actual: %', v_estado;
+    END IF;
+
+    UPDATE mes.orden_produccion_paso
+    SET estado      = 'EN_PROCESO',
+        fyh_inicio  = NOW(),
+        empleado_id = COALESCE((p_datos->>'empleado_id')::SMALLINT, empleado_id),
+        maquina_asignada_id = COALESCE((p_datos->>'maquina_asignada_id')::INT, maquina_asignada_id),
+        usr_mod     = v_usr_id,
+        fyh_mod     = NOW()
+    WHERE id = p_paso_id;
+
+    -- Auto-start the parent orden if still CREADA/PLANIFICADA/PROGRAMADA/LIBERADA
+    UPDATE mes.orden_produccion
+    SET estado = 'EN_PROCESO', fyh_inicio = COALESCE(fyh_inicio, NOW())
+    WHERE id = v_orden_id AND estado IN ('CREADA','PLANIFICADA','PROGRAMADA','LIBERADA');
+
+    -- Update machine state
+    IF (p_datos->>'maquina_asignada_id') IS NOT NULL THEN
+        UPDATE mes.maquina SET estado_actual = 'activa'
+        WHERE id = (p_datos->>'maquina_asignada_id')::INT;
+    END IF;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Paso Iniciado',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' inició el paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
+           jsonb_build_object('objeto_tipo','orden_produccion_paso','paso_id', p_paso_id, 'orden_produccion_id', v_orden_id)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta','supervisor_produccion') AND v_usr_id <> ur.user_id;
+
+    RETURN format('Paso %s (#%s) iniciado correctamente.', v_op_nombre, p_paso_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in iniciar_paso - User: %, ID: %, Error: %', v_usr_id, p_paso_id, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 22. FINALIZAR PASO
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.finalizar_paso(p_paso_id BIGINT, p_datos jsonb DEFAULT '{}'::jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id       int := get_user_id();
+    v_estado       orden_produccion_paso_estado_enum;
+    v_orden_id     bigint;
+    v_maquina_id   int;
+    v_op_nombre    text;
+    v_todos_completos boolean;
+BEGIN
+    SELECT opp.estado, opp.orden_produccion_id, opp.maquina_asignada_id, o.nombre
+    INTO v_estado, v_orden_id, v_maquina_id, v_op_nombre
+    FROM mes.orden_produccion_paso opp
+    LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
+    WHERE opp.id = p_paso_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Paso con ID % no encontrado.', p_paso_id;
+    END IF;
+    IF v_estado <> 'EN_PROCESO' THEN
+        RAISE EXCEPTION 'Solo se puede finalizar un paso EN_PROCESO. Estado actual: %', v_estado;
+    END IF;
+
+    UPDATE mes.orden_produccion_paso
+    SET estado  = 'COMPLETADO',
+        fyh_fin = NOW(),
+        usr_mod = v_usr_id,
+        fyh_mod = NOW()
+    WHERE id = p_paso_id;
+
+    -- Release machine
+    IF v_maquina_id IS NOT NULL THEN
+        UPDATE mes.maquina SET estado_actual = 'espera'
+        WHERE id = v_maquina_id;
+    END IF;
+
+    -- Check if ALL pasos are done -> auto-complete orden
+    SELECT NOT EXISTS (
+        SELECT 1 FROM mes.orden_produccion_paso
+        WHERE orden_produccion_id = v_orden_id
+          AND estado NOT IN ('COMPLETADO','OMITIDO')
+    ) INTO v_todos_completos;
+
+    IF v_todos_completos THEN
+        UPDATE mes.orden_produccion
+        SET estado = 'FINALIZADA', fyh_fin = NOW()
+        WHERE id = v_orden_id;
+    END IF;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Paso Completado',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' completó el paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
+           jsonb_build_object('objeto_tipo','orden_produccion_paso','paso_id', p_paso_id, 'orden_produccion_id', v_orden_id)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta','supervisor_produccion') AND v_usr_id <> ur.user_id;
+
+    RETURN format('Paso %s (#%s) completado.%s', v_op_nombre, p_paso_id,
+                  CASE WHEN v_todos_completos THEN ' Orden #' || v_orden_id || ' FINALIZADA.' ELSE '' END);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in finalizar_paso - User: %, ID: %, Error: %', v_usr_id, p_paso_id, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 23. REGISTRAR CONSUMO EN PASO (chemicals/auxiliaries)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.registrar_consumo_paso(p_paso_id BIGINT, p_consumos jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id    int := get_user_id();
+    v_consumo   jsonb;
+    v_saldo     numeric;
+    v_count     int := 0;
+    v_egr_tipo_id smallint;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_consumo_paso', v_usr_id, jsonb_build_object('paso_id', p_paso_id, 'consumos', p_consumos)::text);
+
+    SELECT id INTO v_egr_tipo_id
+    FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
+
+    FOR v_consumo IN SELECT * FROM jsonb_array_elements(p_consumos)
+    LOOP
+        -- Validate stock
+        SELECT COALESCE(SUM(m.cantidad * t.factor), 0) INTO v_saldo
+        FROM inventario.item_movimientos m
+        JOIN inventario.item_movimiento_tipo t ON t.id = m.item_movimiento_tipo_id
+        WHERE m.item_id = (v_consumo->>'item_id')::INT
+          AND m.lote_id = (v_consumo->>'lote_id')::INT
+          AND COALESCE(m.destino_ubicacion_id, m.origen_ubicacion_id) = (v_consumo->>'origen_ubicacion_id')::INT;
+
+        IF v_saldo < (v_consumo->>'cantidad')::NUMERIC THEN
+            RAISE EXCEPTION 'Stock insuficiente para item_id %, lote_id %. Saldo: %, Requerido: %',
+                v_consumo->>'item_id', v_consumo->>'lote_id', v_saldo, v_consumo->>'cantidad';
+        END IF;
+
+        INSERT INTO inventario.item_movimientos(
+            item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, cantidad,
+            documento_tipo, documento_id, observacion, usr_cre
+        ) VALUES (
+            (v_consumo->>'item_id')::INT,
+            (v_consumo->>'lote_id')::INT,
+            v_egr_tipo_id,
+            (v_consumo->>'origen_ubicacion_id')::INT,
+            (v_consumo->>'cantidad')::NUMERIC(12,2),
+            'orden_produccion_paso',
+            p_paso_id,
+            v_consumo->>'observacion',
+            v_usr_id
+        );
+        v_count := v_count + 1;
+    END LOOP;
+
+    RETURN format('%s consumos registrados para paso #%s.', v_count, p_paso_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_consumo_paso - User: %, paso: %, Error: %, Detail: %',
+              v_usr_id, p_paso_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 24. REGISTRAR ITEMS PROCESADOS EN PASO (roll tracking)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.registrar_items_procesados(p_paso_id BIGINT, p_items jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+    v_count  int;
+BEGIN
+    INSERT INTO mes.orden_produccion_paso_item(
+        orden_produccion_paso_id, orden_produccion_item_id, cantidad, usr_cre
+    )
+    SELECT p_paso_id,
+           (i->>'orden_produccion_item_id')::INT,
+           (i->>'cantidad')::NUMERIC(10,2),
+           v_usr_id
+    FROM jsonb_array_elements(p_items) i
+    ON CONFLICT (orden_produccion_paso_id, orden_produccion_item_id)
+    DO UPDATE SET cantidad = EXCLUDED.cantidad, usr_mod = v_usr_id, fyh_mod = NOW();
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    RETURN format('%s items procesados registrados para paso #%s.', v_count, p_paso_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_items_procesados - User: %, paso: %, Error: %', v_usr_id, p_paso_id, v_message;
+    RAISE;
+END;
+$function$;
+MES SCHEMA - Production Output
+
+-- ═══════════════════════════════════════════════════════════════
+-- 25. REGISTRAR PRODUCCION (create output lotes)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.registrar_produccion(p_orden_id BIGINT, p_output jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','inventario','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id      int := get_user_id();
+    v_lote_id     int;
+    v_item        jsonb;
+    v_count       int := 0;
+    v_ing_tipo_id smallint;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_produccion', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'output', p_output)::text);
+
+    SELECT id INTO v_ing_tipo_id
+    FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING';
+
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_output->'lotes')
+    LOOP
+        -- Create output lote
+        INSERT INTO inventario.lote(
+            item_id, documento_tipo, documento_id,
+            cantidad, detalles, propietario_id, usr_cre
+        ) VALUES (
+            (v_item->>'item_id')::INT,
+            'orden_produccion',
+            p_orden_id,
+            (v_item->>'cantidad')::NUMERIC(10,2),
+            v_item->'detalles',
+            (v_item->>'propietario_id')::INT,
+            v_usr_id
+        )
+        RETURNING id INTO v_lote_id;
+
+        -- Create inventory movement to destination
+        INSERT INTO inventario.item_movimientos(
+            item_id, lote_id, item_movimiento_tipo_id,
+            destino_ubicacion_id, cantidad,
+            documento_tipo, documento_id, usr_cre
+        ) VALUES (
+            (v_item->>'item_id')::INT,
+            v_lote_id,
+            v_ing_tipo_id,
+            (p_output->>'destino_ubicacion_id')::INT,
+            (v_item->>'cantidad')::NUMERIC(12,2),
+            'orden_produccion',
+            p_orden_id,
+            v_usr_id
+        );
+
+        v_count := v_count + 1;
+    END LOOP;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Producción Registrada',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' registró %s lotes de producción en orden #%s', v_count, p_orden_id), 'info',
+           jsonb_build_object('objeto_tipo','orden_produccion','orden_produccion_id', p_orden_id)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta','calidad') AND v_usr_id <> ur.user_id;
+
+    RETURN format('%s lotes creados para orden #%s.', v_count, p_orden_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_produccion - User: %, orden: %, Error: %, Detail: %',
+              v_usr_id, p_orden_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+MES SCHEMA - Scheduling (Programacion)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 26. CREAR PROGRAMACION
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.crear_programacion(p_programacion jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+    v_prog_id bigint;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('crear_programacion', v_usr_id, p_programacion::text);
+
+    INSERT INTO mes.programacion(
+        orden_produccion_paso_id, maquina_id, fecha, secuencia, nota, usr_cre
+    ) VALUES (
+        (p_programacion->>'orden_produccion_paso_id')::BIGINT,
+        (p_programacion->>'maquina_id')::INT,
+        (p_programacion->>'fecha')::DATE,
+        (p_programacion->>'secuencia')::SMALLINT,
+        p_programacion->>'nota',
+        v_usr_id
+    )
+    RETURNING id INTO v_prog_id;
+
+    -- Update paso's assigned machine
+    UPDATE mes.orden_produccion_paso
+    SET maquina_asignada_id = (p_programacion->>'maquina_id')::INT,
+        usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE id = (p_programacion->>'orden_produccion_paso_id')::BIGINT;
+
+    RETURN format('Programación ID %s creada correctamente.', v_prog_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in crear_programacion - User: %, Params: %, Error: %', v_usr_id, p_programacion::text, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 27. MODIFICAR PROGRAMACION
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.modificar_programacion(p_programacion_id BIGINT, p_programacion jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+BEGIN
+    UPDATE mes.programacion
+    SET maquina_id  = COALESCE((p_programacion->>'maquina_id')::INT, maquina_id),
+        fecha       = COALESCE((p_programacion->>'fecha')::DATE, fecha),
+        secuencia   = COALESCE((p_programacion->>'secuencia')::SMALLINT, secuencia),
+        nota        = COALESCE(p_programacion->>'nota', nota),
+        usr_mod     = v_usr_id, fyh_mod = NOW()
+    WHERE id = p_programacion_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Programación con ID % no encontrada.', p_programacion_id;
+    END IF;
+
+    RETURN format('Programación con ID %s modificada correctamente.', p_programacion_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in modificar_programacion - User: %, ID: %, Error: %', v_usr_id, p_programacion_id, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 28. ELIMINAR PROGRAMACION
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.eliminar_programacion(p_programacion_id BIGINT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+BEGIN
+    DELETE FROM mes.programacion WHERE id = p_programacion_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Programación con ID % no encontrada.', p_programacion_id;
+    END IF;
+
+    RETURN format('Programación con ID %s eliminada correctamente.', p_programacion_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in eliminar_programacion - User: %, ID: %, Error: %', v_usr_id, p_programacion_id, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 29. GET PROGRAMACION POR FECHA (daily board)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.get_programacion_diaria(p_fecha DATE)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'public','doc','mes','inventario'
+AS $$
+SELECT COALESCE(jsonb_agg(row_obj ORDER BY maquina_nombre, secuencia), '[]'::jsonb)
+FROM (
+    SELECT jsonb_build_object(
+        'id',              prog.id,
+        'maquina_id',      prog.maquina_id,
+        'maquina_nombre',  maq.nombre,
+        'maquina_tipo',    mt.nombre,
+        'secuencia',       prog.secuencia,
+        'nota',            prog.nota,
+        'paso_id',         opp.id,
+        'operacion',       o.nombre,
+        'paso_estado',     opp.estado,
+        'orden_id',        op.id,
+        'partida_id',      op.partida_id,
+        'partida_codigo',  EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
+        'cliente',         c.cliente,
+        'color',           vc.color,
+        'color_hex',       vc.color_hex
+    ) AS row_obj
+    FROM mes.programacion prog
+    JOIN mes.maquina maq ON maq.id = prog.maquina_id
+    LEFT JOIN mes.maquina_tipo mt ON mt.id = maq.maquina_tipo_id
+    JOIN mes.orden_produccion_paso opp ON opp.id = prog.orden_produccion_paso_id
+    JOIN mes.operacion o ON o.id = opp.operacion_id
+    JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+    JOIN doc.partida p ON p.id = op.partida_id
+    LEFT JOIN cliente c ON c.id = p.cliente_id
+    LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+    WHERE prog.fecha = p_fecha
+) sub;
+$$;
+CALIDAD SCHEMA - Inspections
+
+-- ═══════════════════════════════════════════════════════════════
+-- 30. CREAR INSPECCION
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION calidad.crear_inspeccion(p_inspeccion jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','inventario','calidad','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id        int := get_user_id();
+    v_inspeccion_id bigint;
+    v_resultado     calidad_estado_enum;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('crear_inspeccion', v_usr_id, p_inspeccion::text);
+
+    v_resultado := (p_inspeccion->>'resultado')::calidad_estado_enum;
+
+    INSERT INTO calidad.inspeccion(
+        lote_id, orden_produccion_paso_id, resultado,
+        observacion, empleado_id, fyh_inspeccion, usr_cre
+    ) VALUES (
+        (p_inspeccion->>'lote_id')::INT,
+        (p_inspeccion->>'orden_produccion_paso_id')::BIGINT,
+        v_resultado,
+        p_inspeccion->>'observacion',
+        (p_inspeccion->>'empleado_id')::INT,
+        COALESCE((p_inspeccion->>'fyh_inspeccion')::TIMESTAMPTZ, NOW()),
+        v_usr_id
+    )
+    RETURNING id INTO v_inspeccion_id;
+
+    -- Update lote quality status
+    UPDATE inventario.lote
+    SET estado_calidad = v_resultado,
+        usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE id = (p_inspeccion->>'lote_id')::INT;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id,
+           'Inspección de Calidad: ' || v_resultado::text,
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' registró inspección %s para lote #%s', v_resultado, p_inspeccion->>'lote_id'),
+           CASE WHEN v_resultado IN ('RECHAZADO','REPROCESO') THEN 'warning' ELSE 'info' END,
+           jsonb_build_object('objeto_tipo','inspeccion','inspeccion_id', v_inspeccion_id,
+                              'lote_id', (p_inspeccion->>'lote_id')::INT)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta','calidad','supervisor_produccion') AND v_usr_id <> ur.user_id;
+
+    RETURN format('Inspección ID %s creada. Lote actualizado a %s.', v_inspeccion_id, v_resultado);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in crear_inspeccion - User: %, Params: %, Error: %, Detail: %',
+              v_usr_id, p_inspeccion::text, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 31. GET INSPECCIONES POR LOTE
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION calidad.get_inspecciones_lote(p_lote_id INT)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'calidad','mes'
+AS $$
+SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'id',                      insp.id,
+    'resultado',               insp.resultado,
+    'observacion',             insp.observacion,
+    'empleado_id',             insp.empleado_id,
+    'empleado_nombre',         CONCAT(emp.nombre, ' ', emp.apellido),
+    'orden_produccion_paso_id', insp.orden_produccion_paso_id,
+    'fyh_inspeccion',          insp.fyh_inspeccion
+) ORDER BY insp.fyh_inspeccion DESC), '[]'::jsonb)
+FROM calidad.inspeccion insp
+LEFT JOIN mes.empleado emp ON emp.id = insp.empleado_id
+WHERE insp.lote_id = p_lote_id;
+$$;
+Summary: 31 functions covering all entities
+#	Schema	Function	Type
+1	public	modificar_item	UPDATE
+2	public	eliminar_item	SOFT DELETE
+3	inventario	get_stock_ubicacion	READ
+4	inventario	get_stock_item	READ
+5	inventario	get_lote	READ
+6	inventario	registrar_movimiento	CREATE
+7	inventario	transferir_stock	CREATE (atomic)
+8	doc	get_guia	READ
+9	doc	cambiar_estado_partida	UPDATE (state machine)
+10	mes	get_maquina	READ
+11	mes	crear_maquina	CREATE
+12	mes	modificar_maquina	UPDATE
+13	mes	eliminar_maquina	SOFT DELETE
+14	mes	crear_empleado	CREATE
+15	mes	modificar_empleado	UPDATE
+16	mes	get_plantilla	READ
+17	mes	modificar_plantilla	UPDATE (w/ detail upsert)
+18	mes	eliminar_plantilla	SOFT DELETE
+19	mes	cambiar_estado_orden	UPDATE (auto-cascades to partida)
+20	mes	agregar_materiales_orden	CREATE (reserve rolls)
+21	mes	iniciar_paso	UPDATE (starts step + order + machine)
+22	mes	finalizar_paso	UPDATE (auto-completes order if all done)
+23	mes	registrar_consumo_paso	CREATE (inventory egress)
+24	mes	registrar_items_procesados	CREATE/UPDATE (roll tracking)
+25	mes	registrar_produccion	CREATE (output lotes + inventory ingress)
+26	mes	crear_programacion	CREATE
+27	mes	modificar_programacion	UPDATE
+28	mes	eliminar_programacion	DELETE
+29	mes	get_programacion_diaria	READ (daily board)
+30	calidad	crear_inspeccion	CREATE (updates lote quality)
+31	calidad	get_inspecciones_lote	READ
+Key design decisions:
+
+State cascading: iniciar_paso auto-starts the parent orden_produccion, and cambiar_estado_orden auto-updates the partida to EN_PRODUCCION
+Auto-completion: finalizar_paso checks if all steps are done and auto-finalizes the order
+Stock validation: registrar_consumo_paso, registrar_movimiento, and transferir_stock all validate available stock before outgoing movements
+Machine lifecycle: iniciar_paso sets machine to activa, finalizar_paso returns it to espera
+All use item_movimiento_tipo_id (the new schema) instead of the old movimiento_tipo TEXT

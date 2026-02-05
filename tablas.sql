@@ -510,6 +510,7 @@ tenido_id int references tenido(id),
 color_x_cliente_id int references color_x_cliente(id),
 malla text,
 rendimiento text,
+flg_antipilling boolean DEFAULT false,
 -- Execution State
 estado partida_estado_enum DEFAULT 'CREADA',
     -- Timestamps
@@ -521,6 +522,8 @@ usr_cre int,
   usr_mod int,
   fyh_mod TIMESTAMPTZ
 );
+
+
 
 CREATE TABLE doc.partida_detalle(
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

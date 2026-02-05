@@ -747,7 +747,7 @@ estado_comercial = CASE estado
 
 SELECT ROW_NUMBER() OVER (PARTITION BY peh.partida_id ORDER BY peh.id desc) rw,peh.*,e.estado FROM partida_estado_historial peh
 LEFT JOIN estado e ON e.id=peh.estado_id
-ORDER BY partida_id
+ORDER BY partida_id;
 
 WITH ult_estado as(SELECT ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY id desc) rw,* FROM partida_estado_historial)
 ,base as(SELECT 
@@ -837,7 +837,7 @@ SELECT setval(
 --============================================
 --EJECUTAR ESTA SECCION MANUALMENTE
 --============================================
-
+UPDATE doc.partida SET flg_antipilling=(CASE p.adicional_id WHEN 1 THEN true ELSE false END) FROM partida p WHERE p.id=doc.partida.id
 
 
 INSERT INTO mes.orden_produccion(
@@ -882,3 +882,19 @@ LEFT JOIN ult_estado ue ON p.id = ue.partida_id
 LEFT JOIN estado e ON e.id=ue.estado_id
 WHERE e.estado LIKE '%Reprocesado%'
 
+--===========================================
+--Migrar pasos
+--===========================================
+SELECT * FROM tipo_receta
+SELECT * FROM partida_x_recetas;
+SELECT pxr.id,pxr.fecha,pxr.partida_id,pxr.receta_id,tr.tipo_receta,tr.id,maquina_id, fyh_cre,rollos,relacion_bano 
+FROM partida_x_recetas pxr
+LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+ORDER BY pxr.fecha,pxr.partida_id;
+
+SELECT DISTINCT tr.tipo_receta
+FROM partida_x_recetas pxr
+LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+
+SELECT * FROM mes.operacion
+SELECT * FROM vw_tipo
