@@ -339,6 +339,13 @@ VALUES
 ('DEV_PROV_EGR', 'Devolución Proveedor', 'DEVOLUCION', -1, 
  true, true, false, true, true, false, 
  'Salida por devolución a proveedor'),
+-- RECEPCION DE CRUDO
+INSERT INTO inventario.item_movimiento_tipo
+(codigo, nombre, categoria, factor, flg_afecta_stock, flg_valorizable, flg_recalcula_costo, req_partner, req_origen, req_destino, descripcion)
+VALUES
+('SERV_ING', 'Servicio – Recepción Material Cliente', 'PROCESO_EXTERNO', 1, 
+ true, false, false, true, false, true, 
+ 'Recepción de material de cliente para servicio de teñido (maquila)');
 
 -- =====================
 -- AJUSTES
@@ -544,12 +551,15 @@ CREATE TABLE doc.guia_remision_tipo(
     nombre text,
     flg_emitida boolean NOT NULL,
     flg_cliente boolean,
+    item_movimiento_tipo_id SMALLINT REFERENCES inventario.item_movimiento_tipo(id),
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
     fyh_mod TIMESTAMPTZ,
     UNIQUE(codigo_canon)
 );
+
+
 CREATE TRIGGER trg_bi_guia_remision_tipo_codigo_canon
 BEFORE INSERT OR UPDATE ON doc.guia_remision_tipo
 FOR EACH ROW
@@ -563,7 +573,16 @@ VALUES
 ('DESPACHO_CLIENTE',      'Devolución a cliente (producto terminado)', true, true),
 ('DEVOLUCION_CLIENTE_CRUDO', 'Devolución a Cliente (rollos crudos)', true, true),
 ('DEVOLUCION_PROVEEDOR',    'Devolución a proveedor', true, false);
-
+UPDATE doc.guia_remision_tipo grt
+SET item_movimiento_tipo_id = imt.id
+FROM inventario.item_movimiento_tipo imt
+WHERE 
+    (grt.codigo = 'COMPRA_INGRESO'           AND imt.codigo = 'COMPRA_ING')
+ OR (grt.codigo = 'VENTA_EGRESO'             AND imt.codigo = 'VENTA_EGR')
+ OR (grt.codigo = 'CLIENTE_ENVIO_PROCESO'    AND imt.codigo = 'SERV_ING')      -- NEW TYPE
+ OR (grt.codigo = 'DESPACHO_CLIENTE'         AND imt.codigo = 'VENTA_EGR')     -- Service sold
+ OR (grt.codigo = 'DEVOLUCION_CLIENTE_CRUDO' AND imt.codigo = 'DEV_CLI_EGR')
+ OR (grt.codigo = 'DEVOLUCION_PROVEEDOR'     AND imt.codigo = 'DEV_PROV_EGR');
 -- CREATE TYPE guia_operacion_enum AS ENUM (
 --     'COMPRA_INGRESO',          -- supplier → us
 --     'VENTA_EGRESO',            -- us → client

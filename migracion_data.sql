@@ -1127,19 +1127,167 @@ WHERE pxr.receta_id IS not NULL;
 --     HAVING COUNT(*) > 1
 -- )SELECT guia_remision FROM compra WHERE id IN (SELECT compra_id FROM repetidas)
 ----NOTA, terminar de migrar entradas, diseño
----1.guias
----2. lotes
+---1. lotes ---primero lotes con mismo id de inventario, luego updatear los ids de documento
+---2.guias
 ---3. movimientos
 ---LUEGO RECIEN SALIDAS
 
 INSERT INTO inventario.lote(
-    id,item_id,documento_tipo,documento_id,cantidad,usr_cre,fyh_cre
+    id,item_id,cantidad,usr_cre,fyh_cre
 )
-WITH ec as(
-    SELECT DISTINCT ei.id entrada_inventario_id,ci.compra_id FROM entrada_inventario ei
+OVERRIDING SYSTEM VALUE
+SELECT i.id, it.id, i.cantidad, i.usr_cre, i.fyh_cre
+FROM inventario i
+LEFT JOIN insumo_x_proveedor ip ON ip.id=i.insumo_x_proveedor_id
+LEFT JOIN item it ON it.legacy_id=ip.insumo_id
+GROUP BY 1,2,3,4,5;
+
+SELECT setval(
+    pg_get_serial_sequence('inventario.lote', 'id'),
+    (SELECT MAX(id) FROM inventario.lote)
+);
+
+
+WITH 
+ec as(
+    SELECT  DISTINCT inv.id inventario_id,eid.entrada_inventario_id,ci.compra_id,inv.insumo_x_proveedor_id,inv.cantidad FROM entrada_inventario ei
     JOIN entrada_inventario_detalle eid ON ei.id=eid.entrada_inventario_id
     JOIN compra_x_insumo ci ON ci.id=eid.compra_x_insumo_id
+    JOIN inventario inv ON inv.entrada_inventario_detalle_id = eid.id
+)SELECT COUNT(*) FROM ec;
+
+WITH 
+ec as(
+    SELECT  DISTINCT inv.id inventario_id,ci.compra_id,eid.entrada_inventario_id,inv.insumo_x_proveedor_id,inv.cantidad FROM entrada_inventario ei
+    JOIN entrada_inventario_detalle eid ON ei.id=eid.entrada_inventario_id
+    JOIN compra_x_insumo ci ON ci.id=eid.compra_x_insumo_id
+    JOIN inventario inv ON inv.entrada_inventario_detalle_id = eid.id
 )
+, inv as(
+    SELECT 
+    DENSE_RANK() OVER (PARTITION BY compra_id ORDER BY entrada_inventario_id) AS rw,
+        * 
+        FROM ec
+)
+,
+compra_data AS (
+    SELECT 
+        inv.*,
+        c.guia_remision,
+        c.proveedor_id,  -- adjust column name as needed
+        c.fecha_remision,         -- adjust column name as needed
+        c.fyh_cre + INTERVAL '5 hours' fyh_cre,
+        NULLIF(c.usr_cre, 'authenticated')::int AS usr_cre,
+        CASE 
+            WHEN inv.rw = 1 THEN SPLIT_PART(c.guia_remision, '-', 1)
+            ELSE SPLIT_PART(c.guia_remision, '-', 1)  -- same serie?
+        END AS serie,
+        CASE 
+            WHEN inv.rw = 1 THEN SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1)
+            ELSE SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1) || '-' || inv.rw::text
+        END AS correlativo
+    FROM inv
+    JOIN compra c ON c.id = inv.compra_id
+),
+inserted_guias AS (
+    INSERT INTO doc.guia_remision (
+        guia_remision_tipo_id, serie, correlativo, 
+        emisor_proveedor_id, fecha_emision, usr_cre, fyh_cre
+    )
+    SELECT 
+        (SELECT id FROM doc.guia_remision_tipo WHERE codigo = 'COMPRA_INGRESO'),
+        serie,
+        correlativo,
+        proveedor_id,
+        fecha_remision::date,
+        usr_cre,
+        fyh_cre
+    FROM compra_data
+    GROUP BY 1,2,3,4,5,6,7
+    RETURNING id, serie, correlativo
+)
+UPDATE inventario.lote 
+SET documento_tipo = 'GUIA_REMISION',
+documento_id = i.id
+FROM compra_data c 
+JOIN inserted_guias i ON i.serie = c.serie AND i.correlativo = c.correlativo
+WHERE c.inventario_id = inventario.lote.id;
+
+
+-- WITH 
+-- ec as(
+--     SELECT  DISTINCT inv.id inventario_id,ci.compra_id,eid.entrada_inventario_id,inv.insumo_x_proveedor_id,inv.cantidad FROM entrada_inventario ei
+--     JOIN entrada_inventario_detalle eid ON ei.id=eid.entrada_inventario_id
+--     JOIN compra_x_insumo ci ON ci.id=eid.compra_x_insumo_id
+--     JOIN inventario inv ON inv.entrada_inventario_detalle_id = eid.id
+-- )
+-- , inv as(
+--     SELECT 
+--     DENSE_RANK() OVER (PARTITION BY compra_id ORDER BY entrada_inventario_id) AS rw,
+--         * 
+--         FROM ec
+-- )
+-- ,
+-- compra_data AS (
+--     SELECT 
+--         inv.*,
+--         c.guia_remision,
+--         c.proveedor_id,  -- adjust column name as needed
+--         c.fecha_remision,         -- adjust column name as needed
+--         c.fyh_cre + INTERVAL '5 hours' fyh_cre,
+--         c.usr_cre,
+--         CASE 
+--             WHEN inv.rw = 1 THEN SPLIT_PART(c.guia_remision, '-', 1)
+--             ELSE SPLIT_PART(c.guia_remision, '-', 1)  -- same serie?
+--         END AS serie,
+--         CASE 
+--             WHEN inv.rw = 1 THEN SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1)
+--             ELSE SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1) || '-' || inv.rw::text
+--         END AS correlativo
+--     FROM inv
+--     JOIN compra c ON c.id = inv.compra_id
+-- ),
+-- inserted_guias AS (
+--     INSERT INTO doc.guia_remision (
+--         guia_remision_tipo_id, serie, correlativo, 
+--         emisor_proveedor_id, fecha_emision, usr_cre, fyh_cre
+--     )
+--     SELECT 
+--         (SELECT id FROM doc.guia_remision_tipo WHERE codigo = 'COMPRA_INGRESO'),
+--         serie,
+--         correlativo,
+--         proveedor_id,
+--         fecha_remision::date,
+--         usr_cre,
+--         fyh_cre
+--     FROM compra_data
+--     GROUP BY 1,2,3,4,5,6,7
+--     RETURNING id, serie, correlativo
+-- ),
+-- inserted_detalles AS (
+--     INSERT INTO doc.guia_remision_detalle (
+--         guia_remision_id, item_id, cantidad, usr_cre, fyh_cre
+--     )
+--     SELECT 
+--         inserted_guias.id,
+--         ip.item_id,
+--         i.cantidad,
+--         i.usr_cre,
+--         i.fyh_cre
+--     FROM compra_data c
+--     JOIN insumo_x_proveedor ip ON ip.id = c.insumo_x_proveedor_id
+--     JOIN inserted_guias ON inserted_guias.serie = c.serie AND inserted_guias.correlativo = c.correlativo
+--     JOIN item ON item.legacy_id = ip.item_id
+-- )
+-- UPDATE inventario.lote 
+-- SET tipo_documento = 'guia_remision',
+-- documento_id = i.documento_id
+-- FROM compra c 
+-- JOIN inv ON inv.compra_id = c.id
+-- WHERE c.inventario_id = inventario.lote.id;
+
+
+
 SELECT i.id, 
 ip.item_id, 
 CASE WHEN ei.motivo='compra' THEN 'guia_remision' ELSE 'cuadre_inventario' END tipo_documento,
