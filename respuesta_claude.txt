@@ -1558,3 +1558,122 @@ Auto-completion: finalizar_paso checks if all steps are done and auto-finalizes 
 Stock validation: registrar_consumo_paso, registrar_movimiento, and transferir_stock all validate available stock before outgoing movements
 Machine lifecycle: iniciar_paso sets machine to activa, finalizar_paso returns it to espera
 All use item_movimiento_tipo_id (the new schema) instead of the old movimiento_tipo TEXT
+
+
+
+Unified Approach: Single Bulk Function
+
+-- ═══════════════════════════════════════════════════════════════
+-- GUARDAR PROGRAMACION - Full replace for date range or machine
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.guardar_programacion(
+    p_fecha DATE,
+    p_programaciones JSONB,  -- Full schedule: [{"orden_produccion_paso_id": 1, "maquina_id": 5, "secuencia": 1, "nota": ""}, ...]
+    p_maquina_id INT DEFAULT NULL  -- NULL = all machines for date, INT = specific machine only
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_usr_id INT := get_user_id();
+    v_paso RECORD;
+    v_invalid_pasos JSONB := '[]';
+    v_deleted INT;
+    v_inserted INT;
+BEGIN
+    -- 1. VALIDATE paso states
+    FOR v_paso IN 
+        SELECT 
+            (elem->>'orden_produccion_paso_id')::BIGINT AS paso_id,
+            opp.estado
+        FROM jsonb_array_elements(p_programaciones) elem
+        JOIN mes.orden_produccion_paso opp ON opp.id = (elem->>'orden_produccion_paso_id')::BIGINT
+        WHERE opp.estado IN ('COMPLETADO', 'OMITIDO')
+    LOOP
+        v_invalid_pasos := v_invalid_pasos || jsonb_build_object(
+            'paso_id', v_paso.paso_id, 
+            'estado', v_paso.estado
+        );
+    END LOOP;
+    
+    IF jsonb_array_length(v_invalid_pasos) > 0 THEN
+        RAISE EXCEPTION 'Pasos no programables: %', v_invalid_pasos;
+    END IF;
+
+    -- 2. DELETE existing schedule for scope
+    IF p_maquina_id IS NULL THEN
+        DELETE FROM mes.programacion WHERE fecha = p_fecha;
+    ELSE
+        DELETE FROM mes.programacion WHERE fecha = p_fecha AND maquina_id = p_maquina_id;
+    END IF;
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+
+    -- 3. INSERT new schedule
+    INSERT INTO mes.programacion (
+        orden_produccion_paso_id, maquina_id, fecha, secuencia, nota, usr_cre
+    )
+    SELECT 
+        (elem->>'orden_produccion_paso_id')::BIGINT,
+        (elem->>'maquina_id')::INT,
+        p_fecha,
+        (elem->>'secuencia')::SMALLINT,
+        elem->>'nota',
+        v_usr_id
+    FROM jsonb_array_elements(p_programaciones) AS elem;
+    GET DIAGNOSTICS v_inserted = ROW_COUNT;
+
+    -- 4. Sync maquina_asignada_id on pasos
+    UPDATE mes.orden_produccion_paso opp
+    SET maquina_asignada_id = (elem->>'maquina_id')::INT,
+        usr_mod = v_usr_id, fyh_mod = NOW()
+    FROM jsonb_array_elements(p_programaciones) AS elem
+    WHERE opp.id = (elem->>'orden_produccion_paso_id')::BIGINT;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'fecha', p_fecha,
+        'deleted', v_deleted,
+        'inserted', v_inserted
+    );
+END;
+$function$;
+Frontend Flow
+
+┌─────────────────────────────────────────────────────────────┐
+│  TABLERO PROGRAMACION - 2026-02-06                          │
+├──────────────┬──────────────┬──────────────┬───────────────┤
+│  MAQUINA 1   │  MAQUINA 2   │  MAQUINA 3   │ SIN ASIGNAR   │
+├──────────────┼──────────────┼──────────────┼───────────────┤
+│ ┌──────────┐ │ ┌──────────┐ │              │ ┌───────────┐ │
+│ │ Paso #12 │ │ │ Paso #45 │ │              │ │ Paso #78  │ │
+│ │ seq: 1   │ │ │ seq: 1   │ │              │ │ PENDIENTE │ │
+│ └──────────┘ │ └──────────┘ │              │ └───────────┘ │
+│ ┌──────────┐ │ ┌──────────┐ │              │ ┌───────────┐ │
+│ │ Paso #14 │ │ │ Paso #50 │ │              │ │ Paso #80  │ │
+│ │ seq: 2   │ │ │ seq: 2   │ │              │ │ PENDIENTE │ │
+│ └──────────┘ │ └──────────┘ │              │ └───────────┘ │
+└──────────────┴──────────────┴──────────────┴───────────────┘
+                              [ GUARDAR ]
+On save, frontend sends:
+
+
+{
+  "fecha": "2026-02-06",
+  "programaciones": [
+    {"orden_produccion_paso_id": 12, "maquina_id": 1, "secuencia": 1, "nota": null},
+    {"orden_produccion_paso_id": 14, "maquina_id": 1, "secuencia": 2, "nota": null},
+    {"orden_produccion_paso_id": 45, "maquina_id": 2, "secuencia": 1, "nota": null},
+    {"orden_produccion_paso_id": 50, "maquina_id": 2, "secuencia": 2, "nota": null}
+  ]
+}
+Items dragged to "SIN ASIGNAR" are simply not included → deleted on save.
+
+Why Single Function?
+Separate Functions	Single Bulk Function
+Multiple API calls	One API call on save
+Race conditions possible	Atomic transaction
+Complex frontend state sync	Frontend is source of truth
+Need optimistic updates	Simple: save = replace
+Want me to add this to your funciones.sql?

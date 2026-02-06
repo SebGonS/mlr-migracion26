@@ -1213,6 +1213,12 @@ FROM compra_data c
 JOIN inserted_guias i ON i.serie = c.serie AND i.correlativo = c.correlativo
 WHERE c.inventario_id = inventario.lote.id;
 
+INSERT INTO doc.guia_remision_detalle(
+guia_remision_id, item_id, cantidad
+)
+SELECT doc.guia_remision.id, l.item_id, l.cantidad
+FROM inventario.lote l 
+JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_tipo='GUIA_REMISION'
 
 -- WITH 
 -- ec as(
@@ -1286,7 +1292,12 @@ WHERE c.inventario_id = inventario.lote.id;
 -- JOIN inv ON inv.compra_id = c.id
 -- WHERE c.inventario_id = inventario.lote.id;
 
+--REGISTRAR Movimiento inicial
 
+
+
+-------------------MIGRAR ENTRADADAS POR AJUSTES y/o CUADRES
+--pendiente
 
 SELECT i.id, 
 ip.item_id, 

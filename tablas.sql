@@ -638,13 +638,13 @@ estado_calidad calidad_estado_enum DEFAULT 'PENDIENTE',
 CREATE TABLE doc.guia_remision_detalle (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 
-    guia_id BIGINT NOT NULL REFERENCES doc.guia_remision(id),
+    guia_remision_id BIGINT NOT NULL REFERENCES doc.guia_remision(id),
 
     item_id INT NOT NULL REFERENCES item(id),
     lote_id int references inventario.lote(id),
     ubicacion_id int references inventario.ubicacion(id),
     cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
-    UNIQUE (guia_id, item_id, lote_id, ubicacion_id)
+    UNIQUE (guia_remision_id, item_id, lote_id, ubicacion_id)
 );
 
 -- REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
