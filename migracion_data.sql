@@ -1093,11 +1093,67 @@ WHERE pxr.receta_id IS not NULL;
 -- ============================================================================
 -- MIGRAR LOTES Y MOVIMIENTOS INICIALES DE INSUMOS
 -- ============================================================================
+-- SELECT DISTINCT motivo FROM entrada_inventario
 ---TIPOS DE ENTRADA
 --reconteo --NECEISTO DOCUMENTO (si es cuadre) joinear por fecha y hora
 --compra --NECESITA DOCUMENTO
 --ajuste
 ---TIPOS DE SALIDA
+-- otros
+-- desmontado
+-- lavado
+-- matizado
+-- mantenimiento
+-- lavado maquina
+-- receta
+-- ajuste receta
+-- ajuste
+-- reconteo
+----TODOS LOS CUADRES SON RECONTEO, pero no todos los reconteos son cuadres
+    -- SELECT ei.* FROM entrada_inventario ei
+    -- JOIN cuadre_inventario ci ON ei.fyh_solicitud_tz = ci.fecha_cierre;
+    -- SELECT si.* FROM salida_inventario si
+    -- JOIN cuadre_inventario ci ON si.fyh_solicitud_tz = ci.fecha_cierre
+
+--COMRPAS con mas de una guia de remision/ingreso
+-- SELECT c.id FROM compra LEFT JOIN 
+-- WITH ec as(SELECT DISTINCT ei.id entrada_inventario_id,ci.compra_id FROM entrada_inventario ei
+-- JOIN entrada_inventario_detalle eid ON ei.id=eid.entrada_inventario_id
+-- JOIN compra_x_insumo ci ON ci.id=eid.compra_x_insumo_id
+-- ), repetidas as(
+--     SELECT ec.compra_id, COUNT(*) AS cantidad
+--     FROM ec
+--     GROUP BY 1
+--     HAVING COUNT(*) > 1
+-- )SELECT guia_remision FROM compra WHERE id IN (SELECT compra_id FROM repetidas)
+----NOTA, terminar de migrar entradas, diseño
+---1.guias
+---2. lotes
+---3. movimientos
+---LUEGO RECIEN SALIDAS
+
+INSERT INTO inventario.lote(
+    id,item_id,documento_tipo,documento_id,cantidad,usr_cre,fyh_cre
+)
+WITH ec as(
+    SELECT DISTINCT ei.id entrada_inventario_id,ci.compra_id FROM entrada_inventario ei
+    JOIN entrada_inventario_detalle eid ON ei.id=eid.entrada_inventario_id
+    JOIN compra_x_insumo ci ON ci.id=eid.compra_x_insumo_id
+)
+SELECT i.id, 
+ip.item_id, 
+CASE WHEN ei.motivo='compra' THEN 'guia_remision' ELSE 'cuadre_inventario' END tipo_documento,
+CASE WHEN ei.motivo='compra' THEN c.guia ELSE 'cuadre_inventario' END, 
+ i.cantidad, i.usr_cre, i.fyh_cre
+FROM inventario i
+LEFT JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
+LEFT JOIN insumo_x_proveedor ip ON ip.id=eid.insumo_x_proveedor_id
+LEFT JOIN entrada_inventario ei ON ei.id=eid.entrada_inventario_id
+LEFT JOIN cuadre_inventario ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
+LEFT JOIN ec ON ec.entrada_inventario_id = ei.id
+LEFT JOIN compra c ON ec.compra_id = c.id
+
+SELECT * FROM inventario.item_movimiento_tipo
 SELECT DISTINCT motivo FROM entrada_inventario;
 SELECT DISTINCT motivo FROM salida_inventario;
 SELECT * FROM inventario i
