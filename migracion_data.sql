@@ -881,20 +881,230 @@ LEFT JOIN public.partida pp ON pp.id=p.id
 LEFT JOIN ult_estado ue ON p.id = ue.partida_id
 LEFT JOIN estado e ON e.id=ue.estado_id
 WHERE e.estado LIKE '%Reprocesado%'
-
+GROUP BY 1,2,3,4,5
 --===========================================
 --Migrar pasos
 --===========================================
-SELECT * FROM tipo_receta
-SELECT * FROM partida_x_recetas;
-SELECT pxr.id,pxr.fecha,pxr.partida_id,pxr.receta_id,tr.tipo_receta,tr.id,maquina_id, fyh_cre,rollos,relacion_bano 
+SELECT * FROM tipo_receta; 
+-- Add column with FK
+ALTER TABLE tipo_receta ADD COLUMN operacion_id SMALLINT;
+ALTER TABLE tipo_receta ADD CONSTRAINT fk_tipo_receta_operacion 
+    FOREIGN KEY (operacion_id) REFERENCES mes.operacion(id);
+
+-- Update statements
+UPDATE tipo_receta SET operacion_id = (SELECT id FROM mes.operacion WHERE nombre = 'TEÑIDO')
+WHERE tipo_receta IN ('Teñido', 'Reteñido', 'Teñido a Negro', 'Desmontado + Reteñido', 'Reproceso Matizado');
+
+UPDATE tipo_receta SET operacion_id = (SELECT id FROM mes.operacion WHERE nombre = 'LAVADO_HIDRO')
+WHERE tipo_receta IN (
+    'Rebaje', 'Mojar', 'Lavado x Lineas', 'Lavado x Lineas Suavizante',
+    'Lavado x Suavidad', 'Lavado x Manchas', 'Lavado x Migrado',
+    'Lavado x Quebradura', 'Lavado x Fijado', 'Lavado Hidrofilo'
+);
+-----------------TERMINAR DE CONFIGUARAR MAQUINAS ANTES DE MIGRAR PASOS
+-- ============================================================================
+-- MIGRATE MAQUINAS
+-- ============================================================================
+
+-- First, create maquina_tipo entries based on ubicacion values
+INSERT INTO mes.maquina_tipo (codigo, nombre) VALUES
+('MAQ-TEN',    'Maquina de Teñido'),
+('HIDRO',      'Hidroextractora'),
+('COMPACT',    'Compactadora'),
+('PERCH',      'Perchadora'),
+('PREP',       'Preparadora'),
+('SEC',        'Secadora'),
+('TERMO',      'Termofijadora'),
+('VOLT',       'Volteadora'),
+('BOMBA',      'Bomba de Agua'),
+('POZO',       'Pozo de Agua'),
+('ABLAND',     'Ablandador'),
+('COMPR',      'Compresor'),
+('CALDERO',    'Caldero')
+ON CONFLICT (codigo) DO NOTHING;
+
+-- Migrate maquina records with preserved IDs
+INSERT INTO mes.maquina (
+    id,
+    codigo,
+    nombre,
+    maquina_tipo_id,
+    capacidad_min_kg,
+    capacidad_max_kg,
+    relacion_bano,
+    fyh_cre
+)
+OVERRIDING SYSTEM VALUE
+SELECT
+    m.id,
+    'MAQ-' || LPAD(m.id::text, 3, '0') AS codigo,
+    m.nombre,
+    CASE m.ubicacion
+        WHEN 'Maq Teñido'      THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'MAQ-TEN')
+        WHEN 'Hidro'           THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'HIDRO')
+        WHEN 'Compactadora'    THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'COMPACT')
+        WHEN 'Percha'          THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'PERCH')
+        WHEN 'Preparadora'     THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'PREP')
+        WHEN 'Secadora'        THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'SEC')
+        WHEN 'Termofijadora'   THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'TERMO')
+        WHEN 'Volteadora'      THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'VOLT')
+        WHEN 'Bombas de Agua'  THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'BOMBA')
+        WHEN 'Pozo/Falta de Agua' THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'POZO')
+        WHEN 'Ablandador'      THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'ABLAND')
+        WHEN 'Compresor'       THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'COMPR')
+        WHEN 'Caldero'         THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'CALDERO')
+    END AS maquina_tipo_id,
+    -- Estimated capacities based on machine type and RB
+    CASE 
+        WHEN m.ubicacion = 'Maq Teñido' AND m."RB" = 7 THEN 50   -- Larger dyeing machine
+        WHEN m.ubicacion = 'Maq Teñido' AND m."RB" = 5 THEN 30   -- Standard dyeing machine
+        WHEN m.ubicacion = 'Hidro' THEN 50
+        WHEN m.ubicacion = 'Secadora' THEN 40
+        WHEN m.ubicacion = 'Compactadora' THEN 30
+        ELSE 10  -- Default for utility machines
+    END AS capacidad_min_kg,
+    CASE 
+        WHEN m.ubicacion = 'Maq Teñido' AND m."RB" = 7 THEN 200  -- Larger dyeing machine
+        WHEN m.ubicacion = 'Maq Teñido' AND m."RB" = 5 THEN 150  -- Standard dyeing machine
+        WHEN m.ubicacion = 'Hidro' THEN 180
+        WHEN m.ubicacion = 'Secadora' THEN 160
+        WHEN m.ubicacion = 'Compactadora' THEN 120
+        ELSE 50  -- Default for utility machines
+    END AS capacidad_max_kg,
+    m."RB" AS relacion_bano,
+    NOW() AS fyh_cre
+FROM public.maquina m
+ORDER BY m.id;
+
+-- Reset the sequence to continue from the max ID
+SELECT setval(
+    pg_get_serial_sequence('mes.maquina', 'id'),
+    (SELECT MAX(id) FROM mes.maquina)
+);
+
+-- Verify migration
+SELECT 
+    m.id,
+    m.codigo,
+    m.nombre,
+    mt.nombre AS tipo,
+    m.capacidad_min_kg,
+    m.capacidad_max_kg,
+    m.relacion_bano
+FROM mes.maquina m
+LEFT JOIN mes.maquina_tipo mt ON mt.id = m.maquina_tipo_id
+ORDER BY m.id;
+
+-- SELECT * FROM mes.operacion;
+-- SELECT * FROM partida_x_recetas;
+-- SELECT  pxr.partida_id, tr.tipo_receta,pxr.fecha
+-- FROM partida_x_recetas pxr
+-- LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+-- WHERE pxr.partida_id IN (SELECT partida_id FROM partida_x_recetas GROUP BY partida_id HAVING COUNT(*) > 1)
+-- AND flg_elm=false AND tipo_receta_id IS NOT NULL
+-- ORDER BY 1,3;
+
+-- -----VER los ordenes de los tipos de receta y su incidencia
+-- WITH o AS (
+--   SELECT  ROW_NUMBER() OVER (PARTITION BY pxr.partida_id ORDER BY pxr.fecha) rw, tr.tipo_receta
+--   FROM partida_x_recetas pxr
+--   LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+--   WHERE pxr.partida_id IN (SELECT partida_id FROM partida_x_recetas GROUP BY partida_id HAVING COUNT(*) > 1)
+--   AND flg_elm=false AND tipo_receta_id IS NOT NULL
+-- )
+-- SELECT rw, tipo_receta, COUNT(*) FROM o GROUP BY rw, tipo_receta ORDER BY 2,1;
+-- ----Ver los casos en los que los teñidos no son la primera receta ejecutada y la causa (fecha)
+-- WITH o AS (
+--   SELECT  ROW_NUMBER() OVER (PARTITION BY pxr.partida_id ORDER BY pxr.fecha) rw, tr.tipo_receta,pxr.partida_id,fecha, pxr.fyh_cre
+--   FROM partida_x_recetas pxr
+--   LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+--   WHERE pxr.partida_id IN (SELECT partida_id FROM partida_x_recetas GROUP BY partida_id HAVING COUNT(*) > 1)
+--   AND flg_elm=false AND tipo_receta_id IS NOT NULL
+--     )SELECT * FROM o WHERE partida_id IN (SELECT partida_id FROM o WHERE rw=1 AND tipo_receta!='Teñido')
+------Casos que tienen  ejecuciones de receta sin orden de produccion
+-- WITH o AS (
+-- SELECT op.id,pxr.partida_id
+-- FROM partida_x_recetas pxr
+-- LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+-- LEFT JOIN mes.orden_produccion op ON op.partida_id = pxr.partida_id 
+-- AND ((op.tipo = 'NORMAL' AND tipo_receta='Teñido') OR (op.tipo = 'REPROCESO' AND tipo_receta!='Teñido'))
+-- WHERE op.id IS NULL
+-- )SELECT DISTINCT tipo FROM mes.orden_produccion WHERE partida_id IN (SELECT partida_id FROM o)
+
+------- Ver breakdown de los casos/ orden de ejecucion para ver si son parte de la produccion normal o reprocesos no registrados
+-- WITH o AS (
+-- SELECT op.id,pxr.partida_id
+-- FROM partida_x_recetas pxr
+-- LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+-- LEFT JOIN mes.orden_produccion op ON op.partida_id = pxr.partida_id 
+-- AND ((op.tipo = 'NORMAL' AND tipo_receta='Teñido') OR (op.tipo = 'REPROCESO' AND tipo_receta!='Teñido'))
+-- WHERE op.id IS NULL
+-- )SELECT  pxr.partida_id, tr.tipo_receta,pxr.fecha
+-- FROM partida_x_recetas pxr
+-- LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+-- WHERE pxr.partida_id IN (SELECT partida_id FROM partida_x_recetas GROUP BY partida_id HAVING COUNT(*) > 1)
+-- AND flg_elm=false AND tipo_receta_id IS NOT NULL AND partida_id IN (SELECT partida_id FROM o)
+-- ORDER BY 1,3; 
+-----SE CONFIRMA QUE TODOS LOS QUE nO JOINEAN SON PROQUE SON REPROCESOS O AJUSTES NO REGISTRADOS COMO TAL, se procede a INSERTAR LAS ORDENES DE PRODUCCION ADECUADAS
+INSERT INTO mes.orden_produccion(
+  partida_id,
+  tipo,
+  estado,
+  fyh_cre,
+  fyh_inicio,
+  fyh_fin
+)
+WITH o AS (
+SELECT op.id,pxr.partida_id
 FROM partida_x_recetas pxr
 LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
-ORDER BY pxr.fecha,pxr.partida_id;
+LEFT JOIN mes.orden_produccion op ON op.partida_id = pxr.partida_id 
+AND ((op.tipo = 'NORMAL' AND tipo_receta='Teñido') OR (op.tipo = 'REPROCESO' AND tipo_receta!='Teñido'))
+WHERE op.id IS NULL
+)SELECT  pxr.partida_id, 'REPROCESO', 'CERRADA', pxr.fyh_cre, pxr.fecha, pxr.fecha
+FROM partida_x_recetas pxr
+WHERE flg_elm=false AND tipo_receta_id IS NOT NULL AND partida_id IN (SELECT partida_id FROM o)
 
-SELECT DISTINCT tr.tipo_receta
+
+------INSERTAR PRIMERO TEÑIDOS como primer paso de la orden de produccion default de todas las partidas
+INSERT INTO mes.orden_produccion_paso(
+orden_produccion_id,
+secuencia,operacion_id,maquina_asignada_id,relacion_bano,receta_id,fyh_inicio,fyh_fin,
+fyh_cre,
+estado
+)
+SELECT op.id,
+row_NUMBER() OVER (PARTITION BY op.id ORDER BY pxr.fecha,pxr.fyh_cre) AS secuencia,
+tr.operacion_id,
+pxr.maquina_id,
+COALESCE(relacion_bano,m."RB"),
+pxr.receta_id,
+pxr.fecha,
+pxr.fecha,
+pxr.fyh_cre,
+'COMPLETADO'
 FROM partida_x_recetas pxr
 LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+LEFT JOIN public.maquina m ON m.id=pxr.maquina_id
+LEFT JOIN mes.orden_produccion op ON op.partida_id = pxr.partida_id 
+AND ((op.tipo = 'NORMAL' AND tipo_receta='Teñido') OR (op.tipo = 'REPROCESO' AND tipo_receta!='Teñido'))
+WHERE pxr.receta_id IS not NULL;
 
-SELECT * FROM mes.operacion
-SELECT * FROM vw_tipo
+-- ============================================================================
+-- MIGRAR LOTES Y MOVIMIENTOS INICIALES DE INSUMOS
+-- ============================================================================
+---TIPOS DE ENTRADA
+--reconteo --NECEISTO DOCUMENTO (si es cuadre) joinear por fecha y hora
+--compra --NECESITA DOCUMENTO
+--ajuste
+---TIPOS DE SALIDA
+SELECT DISTINCT motivo FROM entrada_inventario;
+SELECT DISTINCT motivo FROM salida_inventario;
+SELECT * FROM inventario i
+LEFT JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
+LEFT JOIN entrada_inventario ei ON ei.id=eid.entrada_inventario_id
+
+
+-- ============================================================================
+-- MIGRAR MOVIMIENTOS DE INVENTARIO Y VINCULARLOS ADECUADAMENTE
+-- ============================================================================

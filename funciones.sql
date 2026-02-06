@@ -648,7 +648,7 @@ BEGIN
         'color_hex', vc.color_hex,
         'color_x_cliente_hex', vc.color_x_cliente_hex,
         'tono', vc.tono,
-        ''
+        'flg_antipilling', p.flg_antipilling,
         'tenido_id', p.tenido_id,
         'tenido', tenido.tenido,
         'malla', p.malla,
@@ -947,12 +947,14 @@ DECLARE
     v_sqlstate  text;
     v_orden_id  bigint;
     v_usr_id    int := get_user_id();
+    v_error_payload jsonb;
 BEGIN
     -- --------------------------------------------------
 -- ---VALIDAR DISPONIBILIDAD DE ROLLOS RESERVADOS
 -- --------------------------------------------------
 WITH orden_rollos AS (
         SELECT
+            (i->>'item_id')::int        AS item_id,
             (i->>'lote_id')::int        AS lote_id,
             (i->>'ubicacion_id')::int  AS ubicacion_id,
             SUM((i->>'cantidad')::numeric)  AS cantidad
@@ -963,21 +965,12 @@ WITH orden_rollos AS (
             im.lote_id,
             COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
             items.cantidad,
-            SUM(
-                CASE
-                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
-                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
-                END
-            ) AS saldo
+            SUM(im.cantidad*imt.factor) AS saldo
         FROM inventario.item_movimientos im
-        JOIN partida_rollos AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
+        JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
+        JOIN orden_rollos AS items ON items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
         GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
-        HAVING SUM(
-                CASE
-                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
-                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
-                END
-            )< items.cantidad
+        HAVING SUM(im.cantidad*imt.factor)< items.cantidad
     ) SELECT jsonb_agg(
         jsonb_build_object(
             'item_id', item_id,
@@ -1007,6 +1000,16 @@ WITH orden_rollos AS (
         (p_orden->>'orden_origen_id')::BIGINT
     )
     RETURNING id INTO v_orden_id;
+
+    INSERT INTO mes.orden_produccion_item(
+        orden_produccion_id, item_id, lote_id, cantidad, ubicacion_id
+    )
+    SELECT v_orden_id,
+           (i->>'item_id')::INT,
+           (i->>'lote_id')::INT,
+           (i->>'cantidad')::NUMERIC,
+           (i->>'ubicacion_id')::INT
+    FROM jsonb_array_elements(p_orden->'orden_produccion_item') i;
 
     INSERT INTO mes.orden_produccion_paso(
         orden_produccion_id, secuencia, operacion_id,
@@ -1093,6 +1096,7 @@ BEGIN
             'color_x_cliente_id',   p.color_x_cliente_id,
             'color',                vc.color,
             'tono',                 vc.tono,
+            'flg_antipilling',      p.flg_antipilling,
             'color_hex',            vc.color_hex,
             'color_x_cliente_hex',  vc.color_x_cliente_hex,
             'tenido_id',            p.tenido_id,

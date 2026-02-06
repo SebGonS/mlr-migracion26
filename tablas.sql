@@ -875,6 +875,7 @@ CREATE TABLE mes.orden_produccion_paso (
 CREATE TABLE mes.orden_produccion_item(  --production order table detail ¿MES TABLE or public table? it contains the detail of which roll lot the partida is drawing from
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
    orden_produccion_id bigint NOT NULL REFERENCES mes.orden_produccion(id),
+   item_id int NOT NULL REFERENCES item(id),
     lote_id int NOT NULL REFERENCES inventario.lote(id), -- The specific roll of fabric
     ubicacion_id int NOT NULL REFERENCES inventario.ubicacion(id),
     peso_kg numeric(10,2),
@@ -883,7 +884,7 @@ CREATE TABLE mes.orden_produccion_item(  --production order table detail ¿MES T
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
   usr_mod int,
   fyh_mod TIMESTAMPTZ,
-    UNIQUE(partida_id, lote_id, ubicacion_id) -- Prevent adding same roll twice
+    UNIQUE(orden_produccion_id, lote_id, ubicacion_id) -- Prevent adding same roll twice
 );
 
 DROP TABLE IF EXISTS mes.orden_produccion_paso_item;
@@ -983,7 +984,7 @@ SELECT
 
     p.malla,
     p.rendimiento,
-    
+    p.flg_antipilling,
     -- ═══════════════════════════════════════
     -- DATES (Commercial timeline)
     -- ═══════════════════════════════════════
