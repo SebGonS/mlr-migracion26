@@ -1065,3 +1065,126 @@ LEFT JOIN LATERAL (
 
 GRANT SELECT ON doc.vw_partidas_lista_comercial TO authenticated;
 
+-- View for listing ordenes de producción with essential information
+-- This view provides a performant way to list orders with related data
+
+CREATE OR REPLACE VIEW mes.vw_ordenes_produccion AS
+SELECT 
+    op.id,
+    op.tipo,
+    op.estado,
+    op.orden_origen_id,
+    op.fyh_cre,
+    op.fyh_inicio,
+    op.fyh_fin,
+    
+    -- Partida info
+    op.partida_id,
+    p.numero AS partida_numero,
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
+    p.estado AS partida_estado,
+    
+    -- Cliente info
+    c.id AS cliente_id,
+    c.cliente,
+    
+    -- Color info
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.color_hex,
+    
+    -- Tenido info
+    t.id AS tenido_id,
+    t.tenido,
+    
+ 
+    
+    -- Progress info (pasos)
+    COALESCE(pasos_stats.total_pasos, 0) AS total_pasos,
+    COALESCE(pasos_stats.pasos_completados, 0) AS pasos_completados,
+    COALESCE(pasos_stats.pasos_en_proceso, 0) AS pasos_en_proceso,
+    COALESCE(pasos_stats.pasos_pendientes, 0) AS pasos_pendientes,
+    
+    -- Calculate progress percentage
+    CASE 
+        WHEN COALESCE(pasos_stats.total_pasos, 0) > 0 THEN
+            ROUND((COALESCE(pasos_stats.pasos_completados, 0)::NUMERIC / pasos_stats.total_pasos::NUMERIC) * 100, 0)
+        ELSE 0
+    END AS progreso_porcentaje,
+    
+    -- Materials info
+    COALESCE(materiales_stats.total_materiales, 0) AS total_materiales,
+    COALESCE(materiales_stats.cantidad_total_kg, 0) AS cantidad_total_kg,
+    
+    -- Production output info
+    COALESCE(produccion_stats.lotes_generados, 0) AS lotes_generados,
+    
+    -- Duration
+    CASE 
+        WHEN op.fyh_inicio IS NOT NULL AND op.fyh_fin IS NOT NULL THEN
+            EXTRACT(EPOCH FROM (op.fyh_fin - op.fyh_inicio)) / 3600 -- hours
+        WHEN op.fyh_inicio IS NOT NULL THEN
+            EXTRACT(EPOCH FROM (NOW() - op.fyh_inicio)) / 3600 -- current duration
+        ELSE NULL
+    END AS duracion_horas,
+    
+    -- User info
+    op.usr_cre,
+    prof.first_name || ' ' || prof.last_name AS creado_por
+
+FROM mes.orden_produccion op
+JOIN doc.partida p ON p.id = op.partida_id
+LEFT JOIN cliente c ON c.id = p.cliente_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+LEFT JOIN tenido t ON t.id = p.tenido_id
+LEFT JOIN profiles prof ON prof.id_usuario = op.usr_cre
+
+-- Aggregate pasos stats
+LEFT JOIN LATERAL (
+    SELECT 
+        COUNT(*) AS total_pasos,
+        COUNT(*) FILTER (WHERE estado = 'COMPLETADO') AS pasos_completados,
+        COUNT(*) FILTER (WHERE estado = 'EN_PROCESO') AS pasos_en_proceso,
+        COUNT(*) FILTER (WHERE estado = 'PENDIENTE') AS pasos_pendientes
+    FROM mes.orden_produccion_paso opp
+    WHERE opp.orden_produccion_id = op.id
+) pasos_stats ON true
+
+-- Aggregate materiales stats
+LEFT JOIN LATERAL (
+    SELECT 
+        COUNT(*) AS total_materiales,
+        SUM(opi.peso_kg) AS cantidad_total_kg
+    FROM mes.orden_produccion_item opi
+    WHERE opi.orden_produccion_id = op.id
+) materiales_stats ON true
+
+-- Aggregate production output
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS lotes_generados
+    FROM inventario.lote l
+    WHERE l.documento_tipo = 'orden_produccion'
+      AND l.documento_id = op.id
+) produccion_stats ON true;
+
+-- Grant permissions
+GRANT SELECT ON mes.vw_ordenes_produccion TO anon, authenticated;
+
+-- -- Create indexes for better performance
+-- CREATE INDEX IF NOT EXISTS idx_orden_produccion_partida_id 
+--     ON mes.orden_produccion(partida_id);
+
+-- CREATE INDEX IF NOT EXISTS idx_orden_produccion_estado 
+--     ON mes.orden_produccion(estado);
+
+-- CREATE INDEX IF NOT EXISTS idx_orden_produccion_tipo 
+--     ON mes.orden_produccion(tipo);
+
+-- CREATE INDEX IF NOT EXISTS idx_orden_produccion_fyh_cre 
+--     ON mes.orden_produccion(fyh_cre DESC);
+
+-- Example queries:
+-- SELECT * FROM mes.vw_ordenes_produccion ORDER BY fyh_cre DESC LIMIT 20;
+-- SELECT * FROM mes.vw_ordenes_produccion WHERE estado = 'EN_PROCESO';
+-- SELECT * FROM mes.vw_ordenes_produccion WHERE cliente_id = 123;
