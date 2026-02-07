@@ -1140,22 +1140,37 @@ SELECT i.id, it.id, i.cantidad, i.usr_cre, i.fyh_cre
 FROM inventario i
 LEFT JOIN insumo_x_proveedor ip ON ip.id=i.insumo_x_proveedor_id
 LEFT JOIN item it ON it.legacy_id=ip.insumo_id
-GROUP BY 1,2,3,4,5;
+WHERE i.cantidad>0
+GROUP BY 1,2,3,4,5
+;
 
 SELECT setval(
     pg_get_serial_sequence('inventario.lote', 'id'),
     (SELECT MAX(id) FROM inventario.lote)
 );
 
+UPDATE inventario.lote 
+SET item_id = item.id
+FROM inventario i 
+JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
+LEFT JOIN item ON item.legacy_id = eid.insumo_id
+WHERE i.id=inventario.lote.id and item_id IS NULL
 
-WITH 
-ec as(
-    SELECT  DISTINCT inv.id inventario_id,eid.entrada_inventario_id,ci.compra_id,inv.insumo_x_proveedor_id,inv.cantidad FROM entrada_inventario ei
-    JOIN entrada_inventario_detalle eid ON ei.id=eid.entrada_inventario_id
-    JOIN compra_x_insumo ci ON ci.id=eid.compra_x_insumo_id
-    JOIN inventario inv ON inv.entrada_inventario_detalle_id = eid.id
-)SELECT COUNT(*) FROM ec;
 
+
+
+-- SELECT * FROM inventario.lote WHERE id NOT IN (SELECT id FROM inventario)
+
+-- WITH 
+-- ec as(
+--     SELECT  DISTINCT inv.id inventario_id,eid.entrada_inventario_id,ci.compra_id,inv.insumo_x_proveedor_id,inv.cantidad FROM entrada_inventario ei
+--     JOIN entrada_inventario_detalle eid ON ei.id=eid.entrada_inventario_id
+--     JOIN compra_x_insumo ci ON ci.id=eid.compra_x_insumo_id
+--     JOIN inventario inv ON inv.entrada_inventario_detalle_id = eid.id
+-- )SELECT COUNT(*) FROM ec;
+
+----CONFIGURAR GUIAS y 
+-- TRUNCATE TABLE doc.guia_remision_detalle,doc.guia_remision,doc.compra_guia_remision;
 WITH 
 ec as(
     SELECT  DISTINCT inv.id inventario_id,ci.compra_id,eid.entrada_inventario_id,inv.insumo_x_proveedor_id,inv.cantidad FROM entrada_inventario ei
@@ -1205,6 +1220,10 @@ inserted_guias AS (
     FROM compra_data
     GROUP BY 1,2,3,4,5,6,7
     RETURNING id, serie, correlativo
+),inserted_compra_guias_remision AS (
+    INSERT INTO doc.compra_guia_remision(guia_remision_id,compra_id)
+    SELECT i.id, c.compra_id FROM inserted_guias i JOIN compra_data c ON i.serie = c.serie AND i.correlativo = c.correlativo
+    GROUP BY 1,2
 )
 UPDATE inventario.lote 
 SET documento_tipo = 'GUIA_REMISION',
@@ -1219,6 +1238,8 @@ guia_remision_id, item_id, cantidad
 SELECT doc.guia_remision.id, l.item_id, l.cantidad
 FROM inventario.lote l 
 JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_tipo='GUIA_REMISION'
+
+ 
 
 -- WITH 
 -- ec as(
@@ -1292,34 +1313,44 @@ JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_
 -- JOIN inv ON inv.compra_id = c.id
 -- WHERE c.inventario_id = inventario.lote.id;
 
---REGISTRAR Movimiento inicial
-
-
-
--------------------MIGRAR ENTRADADAS POR AJUSTES y/o CUADRES
+-------------------ACTUALIZAR DOC DE ENTRADADAS POR AJUSTES y/o CUADRES
 --pendiente
-
-SELECT i.id, 
-ip.item_id, 
-CASE WHEN ei.motivo='compra' THEN 'guia_remision' ELSE 'cuadre_inventario' END tipo_documento,
-CASE WHEN ei.motivo='compra' THEN c.guia ELSE 'cuadre_inventario' END, 
- i.cantidad, i.usr_cre, i.fyh_cre
+UPDATE inventario.lote 
+SET documento_tipo = 'CUADRE_INVENTARIO',
+documento_id = ci.id
 FROM inventario i
-LEFT JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
-LEFT JOIN insumo_x_proveedor ip ON ip.id=eid.insumo_x_proveedor_id
-LEFT JOIN entrada_inventario ei ON ei.id=eid.entrada_inventario_id
-LEFT JOIN cuadre_inventario ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
-LEFT JOIN ec ON ec.entrada_inventario_id = ei.id
-LEFT JOIN compra c ON ec.compra_id = c.id
-
-SELECT * FROM inventario.item_movimiento_tipo
-SELECT DISTINCT motivo FROM entrada_inventario;
-SELECT DISTINCT motivo FROM salida_inventario;
-SELECT * FROM inventario i
-LEFT JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
-LEFT JOIN entrada_inventario ei ON ei.id=eid.entrada_inventario_id
+JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
+JOIN entrada_inventario ei ON ei.id=eid.entrada_inventario_id
+JOIN cuadre_inventario ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
+WHERE ei.motivo IN ('ajuste','reconteo') AND inventario.lote.id = i.id;
 
 
+----PENDIENTE LIMPIAR id de documento de movimientos que NO son de cuadres
+-- SELECT l.*,i.*
+-- FROM inventario.lote l
+-- JOIN inventario i ON i.id=l.id
+-- JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
+-- JOIN entrada_inventario ei ON ei.id=eid.entrada_inventario_id
+-- LEFT JOIN cuadre_inventario ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
+-- WHERE ei.motivo IN ('ajuste','reconteo') AND ci.id IS NOT NULL
+
+--REGISTRAR MOVIMIENTO INICIAL
+INSERT INTO inventario.item_movimientos(
+    item_id, lote_id, item_movimiento_tipo_id, destino_ubicacion_id,cantidad,documento_tipo, documento_id, observacion,usr_cre, fyh_cre
+)
+SELECT 
+    i.item_id,
+    i.id,
+    CASE WHEN i.documento_tipo = 'guia_remision' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING') ELSE (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS') END,
+    (SELECT inventario.ubicacion.id FROM inventario.ubicacion JOIN inventario.almacen ON inventario.almacen.id = inventario.ubicacion.almacen_id WHERE inventario.almacen.codigo = 'ALM-INS'),
+    i.cantidad,
+    i.documento_tipo,
+    i.documento_id,
+    'Migración Inicial',
+    i.usr_cre,
+    i.fyh_cre
+FROM inventario.lote i
+WHERE i.cantidad > 0
 -- ============================================================================
 -- MIGRAR MOVIMIENTOS DE INVENTARIO Y VINCULARLOS ADECUADAMENTE
 -- ============================================================================

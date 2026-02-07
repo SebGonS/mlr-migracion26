@@ -961,7 +961,8 @@ CREATE TABLE doc.compra_guia_remision(
   guia_remision_id int,
   compra_id int,
   usr_cre int,
-  fyh_cre timestamptz
+  fyh_cre timestamptz,
+  UNIQUE(guia_remision_id,compra_id)
 );
 
 
