@@ -583,6 +583,24 @@ WHERE
  OR (grt.codigo = 'DESPACHO_CLIENTE'         AND imt.codigo = 'VENTA_EGR')     -- Service sold
  OR (grt.codigo = 'DEVOLUCION_CLIENTE_CRUDO' AND imt.codigo = 'DEV_CLI_EGR')
  OR (grt.codigo = 'DEVOLUCION_PROVEEDOR'     AND imt.codigo = 'DEV_PROV_EGR');
+
+INSERT INTO doc.guia_remision_tipo (
+  codigo,
+  nombre,
+  flg_emitida,
+  flg_cliente,
+  item_movimiento_tipo_id
+)
+SELECT
+  'DEVOLUCION_CLIENTE',
+  'Devolución de Cliente (producto terminado)',
+  false,
+  true,
+  imt.id
+FROM inventario.item_movimiento_tipo imt
+WHERE imt.codigo = 'DEV_CLI_ING';
+
+
 -- CREATE TYPE guia_operacion_enum AS ENUM (
 --     'COMPRA_INGRESO',          -- supplier → us
 --     'VENTA_EGRESO',            -- us → client
@@ -605,7 +623,7 @@ CREATE TABLE doc.guia_remision (
     receptor_cliente_id   INT, -- REFERENCES cliente(id),
     receptor_proveedor_id INT, -- REFERENCES proveedor(id),
     fecha_emision DATE NOT NULL,
-    fecha_recepcion TIMESTAMPTZ NOT NULL DEFAULT now(),
+    fecha_recepcion TIMESTAMPTZ DEFAULT now(), -- nullable: only meaningful for received guias
     usr_cre int,
     fyh_cre timestamptz DEFAULT NOW(),
     usr_mod int,
@@ -1187,4 +1205,69 @@ GRANT SELECT ON mes.vw_ordenes_produccion TO anon, authenticated;
 -- Example queries:
 -- SELECT * FROM mes.vw_ordenes_produccion ORDER BY fyh_cre DESC LIMIT 20;
 -- SELECT * FROM mes.vw_ordenes_produccion WHERE estado = 'EN_PROCESO';
--- SELECT * FROM mes.vw_ordenes_produccion WHERE cliente_id = 123;
+
+
+-- ============================================================
+-- Stock disponible base (lote + ubicacion + cantidad)
+-- Minimal aggregation: no JSONB in GROUP BY, no type-specific joins
+-- ============================================================
+CREATE OR REPLACE VIEW inventario.vw_stock_actual AS
+SELECT
+    im.lote_id,
+    im.item_id,
+    COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+    SUM(im.cantidad * imt.factor) AS cantidad_disponible
+FROM inventario.item_movimientos im
+JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
+GROUP BY im.lote_id, im.item_id,
+    COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id)
+HAVING SUM(im.cantidad * imt.factor) > 0;
+
+GRANT SELECT ON inventario.vw_stock_actual TO anon, authenticated;
+
+-- ============================================================
+-- Stock disponible de rollos (teñidos y crudos)
+-- Builds on vw_stock_actual, joins lote for detalles + type-specific tables
+-- ============================================================
+CREATE OR REPLACE VIEW inventario.vw_stock_rollos AS
+SELECT
+    sa.lote_id,
+    sa.item_id,
+    i.codigo AS item_codigo,
+    i.nombre AS item_nombre,
+    sa.ubicacion_id,
+    u.nombre AS ubicacion,
+    a.nombre AS almacen,
+    sa.cantidad_disponible,
+    un.codigo AS unidad,
+    l.estado_calidad::text,
+    (l.detalles->>'ancho')::numeric AS ancho,
+    (l.detalles->>'peso')::numeric AS peso,
+    ird.articulo_id,
+    art.articulo,
+    ird.flg_tenido,
+    ird.flg_rib,
+    ird.fibra,
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.cliente_id,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
+    c.id AS propietario_id,
+    c.cliente AS propietario
+FROM inventario.vw_stock_actual sa
+JOIN inventario.lote l ON l.id = sa.lote_id
+JOIN item i ON i.id = sa.item_id
+JOIN item_tipo it ON it.id = i.item_tipo_id
+JOIN item_rollo_detalle ird ON ird.item_id = i.id
+JOIN articulo art ON art.id = ird.articulo_id
+JOIN unidad un ON un.id = i.unidad_id
+JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
+JOIN inventario.almacen a ON a.id = u.almacen_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
+LEFT JOIN cliente c ON c.id = l.propietario_id
+WHERE it.codigo = 'ROLLO'
+ORDER BY a.nombre, u.nombre, i.nombre;
+
+GRANT SELECT ON inventario.vw_stock_rollos TO anon, authenticated;

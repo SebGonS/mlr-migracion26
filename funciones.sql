@@ -1280,80 +1280,7 @@ BEGIN
 END;
 $function$;
 
--- Function to get available lotes for a partida
--- This function returns lotes (rolls) that are available in inventory
--- for materials that can be used in the production order
-
-
-
---==================================================================||||||||||||||||
-------TERMINAR |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
---==================================================================||||||||||||||||
-CREATE OR REPLACE FUNCTION mes.get_lotes_disponibles_partida(p_partida_id bigint)
-RETURNS TABLE (
-    lote_id int,
-    item_id int,
-    item_codigo text,
-    item_nombre text,
-    ubicacion_id int,
-    ubicacion text,
-    almacen text,
-    cantidad_disponible numeric,
-    unidad text,
-    estado_calidad text,
-    detalles jsonb --color,ancho,peso
-)
-LANGUAGE plpgsql
-STABLE
-SECURITY DEFINER
-SET search_path TO 'public', 'inventario', 'mes', 'doc'
-AS $$
-BEGIN
-    RETURN QUERY
-    WITH stock_actual AS (
-        -- Calculate current stock per lote and ubicacion
-        SELECT
-            im.lote_id,
-            l.item_id,
-            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
-            SUM(im.cantidad * imt.factor) AS cantidad_disponible
-        FROM inventario.item_movimientos im
-        JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
-        JOIN inventario.lote l ON l.id = im.lote_id
-        WHERE l.estado_calidad IN ('APROBADO', 'PENDIENTE') -- Only approved or pending lots
-        GROUP BY im.lote_id, l.item_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id)
-        HAVING SUM(im.cantidad * imt.factor) > 0 -- Only positive stock
-    )
-    SELECT
-        sa.lote_id,
-        sa.item_id,
-        i.codigo AS item_codigo,
-        i.nombre AS item_nombre,
-        sa.ubicacion_id,
-        u.nombre AS ubicacion,
-        a.nombre AS almacen,
-        sa.cantidad_disponible,
-        un.codigo AS unidad,
-        l.estado_calidad::text,
-        l.detalles
-    FROM stock_actual sa
-    JOIN inventario.lote l ON l.id = sa.lote_id
-    JOIN item i ON i.id = sa.item_id
-    JOIN item_tipo it ON it.id = i.item_tipo_id
-    JOIN unidad un ON un.id = i.unidad_id
-    JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
-    JOIN inventario.almacen a ON a.id = u.almacen_id
-    WHERE it.codigo = 'ROLLO' -- Only rolls, not chemicals
-      AND sa.cantidad_disponible > 0
-    ORDER BY a.nombre, u.nombre, i.nombre;
-END;
-$$;
-
--- Grant execute permission
-GRANT EXECUTE ON FUNCTION mes.get_lotes_disponibles_partida(bigint) TO anon, authenticated;
-
--- Example usage:
--- SELECT * FROM mes.get_lotes_disponibles_partida(1);
+-- Stock de rollos disponibles ahora vive en inventario.vw_stock_rollos (tablas.sql)
 
 CREATE OR REPLACE FUNCTION mes.crear_plantilla(p_plantilla jsonb)
  RETURNS text
@@ -1480,15 +1407,24 @@ DECLARE
     v_sqlstate  text;
     v_guia_id   INT;
     v_guia_tipo guia_remision_tipo%ROWTYPE;
+    -- v_item_movimiento_tipo item_movimiento_tipo%ROWTYPE;
     v_usr_id int := get_user_id();
     v_lote_id int;
     v_error_payload jsonb;
+    v_fecha_mov TIMESTAMPTZ;
 BEGIN
  -- guard condition
  SELECT * INTO v_guia_tipo FROM guia_remision_tipo WHERE id = (p_guia->>'guia_remision_tipo_id')::SMALLINT;
+--  SELECT * INTO v_item_movimiento_tipo FROM inventario.item_movimiento_tipo WHERE id = v_guia_tipo.item_movimiento_tipo_id;
  IF NOT FOUND THEN
      RAISE EXCEPTION 'Tipo de guía con id % no existe', (p_guia->>'guia_remision_tipo_id');
  END IF;
+
+ -- Movement timestamp: for incoming guias use fecha_recepcion (allows backdating), for outgoing use now()
+ v_fecha_mov := CASE
+     WHEN v_guia_tipo.flg_emitida THEN now()
+     ELSE COALESCE((p_guia->>'fecha_recepcion')::TIMESTAMPTZ, now())
+ END;
 
 IF v_guia_tipo.flg_emitida THEN
         -- SELECT im.lote_id,COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id),SUM(CASE WHEN im.movimiento_tipo = 'EGRESO' THEN -im.cantidad WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad ELSE 0 END) FROM inventario.item_movimientos im
@@ -1507,30 +1443,24 @@ IF v_guia_tipo.flg_emitida THEN
         GROUP BY 1,2,3
     ),errores as(  SELECT
             im.item_id,
+            item.nombre AS item_nombre,
             im.lote_id,
-            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+            sa.ubicacion_id,
             items.cantidad,
-            SUM(
-                CASE
-                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
-                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
-                END
-            ) AS saldo
-        FROM inventario.item_movimientos im
-        JOIN guia_items AS items ON guia_items.item_id=im.item_id AND guia_items.lote_id=im.lote_id AND guia_items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
-        GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
-        HAVING SUM(
-                CASE
-                    WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad
-                    WHEN im.movimiento_tipo = 'EGRESO'  THEN -im.cantidad
-                END
-            )< items.cantidad
+            sa.cantidad_disponible
+        FROM inventario.vw_stock_actual sa
+        JOIN guia_items AS items ON guia_items.item_id=sa.item_id AND guia_items.lote_id=sa.lote_id AND guia_items.ubicacion_id= sa.ubicacion_id
+        JOIN item ON item.id = sa.item_id
+        WHERE sa.cantidad_disponible < items.cantidad
+        GROUP BY sa.item_id, sa.lote_id, sa.ubicacion_id,items.cantidad
+        
     ) SELECT jsonb_agg(
         jsonb_build_object(
             'item_id', item_id,
+            'item_nombre', item_nombre,
             'lote_id', lote_id,
             'ubicacion_id', ubicacion_id,
-            'saldo_disponible', saldo,
+            'saldo_disponible', cantidad_disponible,
             'cantidad_requerida', cantidad
         )
     )
@@ -1581,11 +1511,15 @@ END IF;
             WHEN p_guia ? 'receptor_proveedor_id' THEN (p_guia->>'receptor_proveedor_id')::INT
             ELSE NULL
         END,
-        (p_guia->>'fecha_emision')::DATE
+        (p_guia->>'fecha_emision')::DATE,
+        CASE
+            WHEN v_guia_tipo.flg_emitida THEN NULL
+            ELSE COALESCE((p_guia->>'fecha_recepcion')::TIMESTAMPTZ, now())
+        END
     )
     RETURNING id INTO v_guia_id;
 
-INSERT INTO doc.guia_remision_detalle (guia_id, item_id, cantidad,lote_id,ubicacion_id)
+INSERT INTO doc.guia_remision_detalle (guia_remision_id , item_id, cantidad,lote_id,ubicacion_id)
 SELECT
     v_guia_id,
     (item->>'item_id')::INT,
@@ -1596,55 +1530,75 @@ FROM jsonb_array_elements(p_guia->'items') AS item;
 
 IF v_guia_tipo.flg_emitida THEN
     -- For issued guides, create item movements as EGRESO from warehouse
-    INSERT INTO inventario.item_movimientos (item_id, lote_id, movimiento_tipo, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id, observacion)
+    INSERT INTO inventario.item_movimientos 
+    (
+        item_id, 
+        lote_id, 
+        item_movimiento_tipo_id,
+        origen_ubicacion_id,
+        destino_ubicacion_id,
+        cantidad, fecha_hora, documento_tipo, documento_id)
     SELECT
         (item->>'item_id')::INT,
         (item->>'lote_id')::INT, 
-        'EGRESO',
+        v_guia_tipo.item_movimiento_tipo_id,
         (p_guia->>'origen_ubicacion_id')::INT,
         NULL, -- destination is external
         (item->>'cantidad')::NUMERIC(12,2),
-        now(),
-        'guia_remision',
-        v_guia_id,
-        NULL
+        v_fecha_mov,
+        'GUIA_REMISION',
+        v_guia_id
     FROM jsonb_array_elements(p_guia->'items') AS item;
 ELSE
+ -- Items WITH lote_id → existing lots (devolution)
+    INSERT INTO inventario.item_movimientos
+        (item_id, lote_id, item_movimiento_tipo_id,
+         destino_ubicacion_id, cantidad, fecha_hora,
+         documento_tipo, documento_id)
+    SELECT
+        (item->>'item_id')::INT,
+        (item->>'lote_id')::INT,
+        v_guia_tipo.item_movimiento_tipo_id,
+        (item->>'ubicacion_id')::INT,
+        (item->>'cantidad')::NUMERIC(12,2),
+        v_fecha_mov,
+        'GUIA_REMISION',
+        v_guia_id
+    FROM jsonb_array_elements(p_guia->'items') AS item
+    WHERE item->>'lote_id' IS NOT NULL;
 WITH nuevos_lotes AS(
-    INSERT INTO lote (item_id, documento_tipo, documento_id, cantidad, peso, color_x_cliente_id)
+    INSERT INTO lote (
+        item_id, 
+        documento_tipo, 
+        documento_id, 
+        cantidad,
+        detalles
+        )
     SELECT
     (item->>'item_id')::INT,
-    'guia_remision',
+    'GUIA_REMISION',
     v_guia_id,
     (item->>'cantidad')::NUMERIC(12,2),
-    CASE
-        WHEN (item->>'peso') IS NOT NULL THEN (item->>'peso')::NUMERIC(8,2)
-        ELSE NULL
-    END,
-    CASE
-        WHEN (item->>'color_x_cliente_id') IS NOT NULL THEN (item->>'color_x_cliente_id')::INT
-        ELSE NULL
-    END
+    jsonb_build_object('peso', (item->>'peso')::NUMERIC(12,2))
+    FROM jsonb_array_elements(p_guia->'items') AS item
+    WHERE item->>'lote_id' IS NULL
     RETURNING id,item_id
-)
-    -- For received guides, create item movements as INGRESO to warehouse
-    INSERT INTO inventario.item_movimientos (item_id, lote_id, movimiento_tipo, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id, observacion)
+) -- For received guides, create item movements as INGRESO to warehouse
+INSERT INTO inventario.item_movimientos (item_id, lote_id, item_movimiento_tipo_id, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id)
     SELECT
         (item->>'item_id')::INT,
         nl.id, --id del lote recien creado
-        'ingreso',
+        v_guia_tipo.item_movimiento_tipo_id,
         NULL, -- origin is external
         (p_guia->>'destino_ubicacion_id')::INT,
         (item->>'cantidad')::NUMERIC(12,2),
-        COALESCE((p_guia->>'fecha_emision'),now()),
-        'guia_remision',
-        v_guia_id,
-        NULL
+        v_fecha_mov,
+        'GUIA_REMISION',
+        v_guia_id
     FROM jsonb_array_elements(p_guia->'items') AS item
-    LEFT JOIN nuevos_lotes nl ON nl.item_id = (item->>'item_id')::INT
+    JOIN nuevos_lotes nl ON nl.item_id = (item->>'item_id')::INT
     ;
 END IF;
-
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
 SELECT ur.user_id,'Nueva Guia y movimientos', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva guía de remisión y generó movimientos de inventario', 'info',jsonb_build_object('objeto_tipo','guia_remision','guia_remision_id',v_guia_id)
 FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
