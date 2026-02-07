@@ -1280,6 +1280,81 @@ BEGIN
 END;
 $function$;
 
+-- Function to get available lotes for a partida
+-- This function returns lotes (rolls) that are available in inventory
+-- for materials that can be used in the production order
+
+
+
+--==================================================================||||||||||||||||
+------TERMINAR |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+--==================================================================||||||||||||||||
+CREATE OR REPLACE FUNCTION mes.get_lotes_disponibles_partida(p_partida_id bigint)
+RETURNS TABLE (
+    lote_id int,
+    item_id int,
+    item_codigo text,
+    item_nombre text,
+    ubicacion_id int,
+    ubicacion text,
+    almacen text,
+    cantidad_disponible numeric,
+    unidad text,
+    estado_calidad text,
+    detalles jsonb --color,ancho,peso
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'public', 'inventario', 'mes', 'doc'
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH stock_actual AS (
+        -- Calculate current stock per lote and ubicacion
+        SELECT
+            im.lote_id,
+            l.item_id,
+            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+            SUM(im.cantidad * imt.factor) AS cantidad_disponible
+        FROM inventario.item_movimientos im
+        JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
+        JOIN inventario.lote l ON l.id = im.lote_id
+        WHERE l.estado_calidad IN ('APROBADO', 'PENDIENTE') -- Only approved or pending lots
+        GROUP BY im.lote_id, l.item_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id)
+        HAVING SUM(im.cantidad * imt.factor) > 0 -- Only positive stock
+    )
+    SELECT
+        sa.lote_id,
+        sa.item_id,
+        i.codigo AS item_codigo,
+        i.nombre AS item_nombre,
+        sa.ubicacion_id,
+        u.nombre AS ubicacion,
+        a.nombre AS almacen,
+        sa.cantidad_disponible,
+        un.codigo AS unidad,
+        l.estado_calidad::text,
+        l.detalles
+    FROM stock_actual sa
+    JOIN inventario.lote l ON l.id = sa.lote_id
+    JOIN item i ON i.id = sa.item_id
+    JOIN item_tipo it ON it.id = i.item_tipo_id
+    JOIN unidad un ON un.id = i.unidad_id
+    JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
+    JOIN inventario.almacen a ON a.id = u.almacen_id
+    WHERE it.codigo = 'ROLLO' -- Only rolls, not chemicals
+      AND sa.cantidad_disponible > 0
+    ORDER BY a.nombre, u.nombre, i.nombre;
+END;
+$$;
+
+-- Grant execute permission
+GRANT EXECUTE ON FUNCTION mes.get_lotes_disponibles_partida(bigint) TO anon, authenticated;
+
+-- Example usage:
+-- SELECT * FROM mes.get_lotes_disponibles_partida(1);
+
 CREATE OR REPLACE FUNCTION mes.crear_plantilla(p_plantilla jsonb)
  RETURNS text
 LANGUAGE plpgsql
