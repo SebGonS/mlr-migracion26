@@ -183,6 +183,134 @@ Complex frontend state sync	Frontend is source of truth
 Need optimistic updates	Simple: save = replace
 Want me to add this to your funciones.sql?*/
 
+CREATE OR REPLACE FUNCTION mes.generar_receta(p_paso_id BIGINT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes','doc'
+AS $function$
+DECLARE
+    v_receta        jsonb;
+    v_receta_id     int;
+    v_maquina_id    int;
+    v_maq_nombre    text;
+    v_maq_codigo    text;
+    v_adjustment    numeric;
+    v_rb            numeric;
+    v_peso          numeric;
+    v_cantidad      numeric;
+    v_volumen       numeric;
+BEGIN
+    -- 1. Validate paso, get receta + machine + relacion_bano
+    SELECT opp.receta_id, opp.maquina_asignada_id, opp.relacion_bano
+    INTO v_receta_id, v_maquina_id, v_rb
+    FROM mes.orden_produccion_paso opp
+    WHERE opp.id = p_paso_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Paso con ID % no encontrado.', p_paso_id;
+    END IF;
+
+    IF v_receta_id IS NULL THEN
+        RAISE EXCEPTION 'Paso ID % sin receta encontrada.', p_paso_id;
+    END IF;
+
+    -- 2. Machine info
+    SELECT m.nombre, m.codigo, m.adjustment_factor
+    INTO v_maq_nombre, v_maq_codigo, v_adjustment
+    FROM mes.maquina m
+    WHERE m.id = v_maquina_id;
+
+    -- 3. Roll aggregation
+    SELECT SUM(oppi.cantidad * opi.peso_kg / opi.cantidad), SUM(oppi.cantidad)
+    INTO v_peso, v_cantidad
+    FROM mes.orden_produccion_paso_item oppi
+    JOIN mes.orden_produccion_item opi ON oppi.orden_produccion_item_id = opi.id
+    WHERE oppi.orden_produccion_paso_id = p_paso_id;
+
+    -- 4. Volumen
+    v_volumen := CASE
+        WHEN v_maq_nombre != 'BRAZOLI (1)' AND v_cantidad <= 12 THEN v_peso * 7
+        ELSE v_peso * v_rb
+    END;
+
+    -- 5. Build JSON
+    SELECT jsonb_build_object(
+        'receta_id', opp.receta_id,
+        'partida_id', p.id,
+        'cliente_id', p.cliente_id,
+        'cliente', cli.cliente,
+        'orden_produccion_id', op.id,
+        'tipo_receta', tr.tipo_receta,
+        'articulo_id', r.articulo_id,
+        'articulo', a.articulo,
+        'peso', v_peso,
+        'cantidad', v_cantidad,
+        'volumen', ROUND(v_volumen::NUMERIC, 2),
+        'maquina', jsonb_build_object(
+            'id', v_maquina_id,
+            'codigo', v_maq_codigo,
+            'nombre', v_maq_nombre
+        ),
+        'pasos', (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'orden', rp.orden,
+                    'paso_id', rp.paso_id,
+                    'paso', pa.paso
+                ) ORDER BY rp.orden
+            )
+            FROM receta_x_paso rp
+            JOIN paso pa ON rp.paso_id = pa.id
+            WHERE rp.receta_id = r.id
+        ),
+        'insumos', (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'insumo_id', i.item_id,
+                    'codigo', i.codigo,
+                    'insumo', i.nombre,
+                    'cantidad', ri.cantidad,
+                    'medida', ri.medida,
+                    'cantidad_requerida_kg', CASE
+                        WHEN ri.medida = 'g/L' THEN ri.cantidad  * v_volumen
+                        WHEN ri.medida = '%'   THEN ri.cantidad  * v_peso * 10
+                    END
+                )
+            )
+            FROM receta_x_insumo ri
+            JOIN item i ON ri.insumo_id = i.legacy_id
+            WHERE ri.receta_id = r.id
+        )
+    ) INTO v_receta
+    FROM orden_produccion_paso opp
+    LEFT JOIN receta2 r ON r.receta_id = opp.receta_id
+    LEFT JOIN orden_produccion op ON op.id = opp.orden_produccion_id
+    LEFT JOIN doc.partida p ON p.id = op.partida_id
+    LEFT JOIN tipo_receta tr ON tr.id = r.tipo_receta_id
+    LEFT JOIN articulo a ON a.id = r.articulo_id
+    LEFT JOIN cliente cli ON cli.id = p.cliente_id
+    WHERE opp.id = p_paso_id;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Paso Iniciado',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' inició el paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
+           jsonb_build_object('objeto_tipo','orden_produccion_paso','paso_id', p_paso_id, 'orden_produccion_id', v_orden_id)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta','supervisor_produccion') AND v_usr_id <> ur.user_id;
+
+
+    RETURN v_receta;
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in iniciar_paso - User: %, ID: %, Error: %', v_usr_id, p_paso_id, v_message;
+    RAISE;
+END;
+$function$;
 
 -- ═══════════════════════════════════════════════════════════════
 -- 21. INICIAR PASO
@@ -199,9 +327,10 @@ DECLARE
     v_estado       orden_produccion_paso_estado_enum;
     v_orden_id     bigint;
     v_op_nombre    text;
+    v_secuencia      smallint;
 BEGIN
-    SELECT opp.estado, opp.orden_produccion_id, o.nombre
-    INTO v_estado, v_orden_id, v_op_nombre
+    SELECT opp.estado, opp.orden_produccion_id, o.nombre, opp.secuencia
+    INTO v_estado, v_orden_id, v_op_nombre, v_secuencia
     FROM mes.orden_produccion_paso opp
     LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
     WHERE opp.id = p_paso_id;
@@ -211,6 +340,9 @@ BEGIN
     END IF;
     IF v_estado <> 'PENDIENTE' THEN
         RAISE EXCEPTION 'Solo se puede iniciar un paso en estado PENDIENTE. Estado actual: %', v_estado;
+    END IF;
+    IF EXISTS (SELECT 1 FROM mes.orden_produccion_paso WHERE secuencia < v_secuencia AND orden_id=v_orden_id AND estado NOT IN ('COMPLETADO', 'CANCELADO','OMITIDO')) THEN
+        RAISE EXCEPTION 'No se puede iniciar el paso % porque hay pasos anteriores no completados.', v_op_nombre;
     END IF;
 
     UPDATE mes.orden_produccion_paso
@@ -516,6 +648,63 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $function$;
 
+
+-- ═══════════════════════════════════════════════════════════════
+-- ACTUALIZAR PESOS DE ORDEN PRODUCCION ITEMS
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.actualizar_pesos_orden_items(p_orden_id BIGINT, p_items jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id    int := get_user_id();
+    v_estado    orden_produccion_estado_enum;
+    v_count     int;
+BEGIN
+    -- Validar que la orden existe y no está en estado terminal
+    SELECT estado INTO v_estado
+    FROM mes.orden_produccion
+    WHERE id = p_orden_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
+    END IF;
+
+    IF v_estado IN ('TECO','CERRADA','CANCELADA') THEN
+        RAISE EXCEPTION 'No se pueden modificar pesos de una orden en estado %.', v_estado;
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_pesos_orden_items', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'items', p_items)::text);
+
+    -- Actualizar peso_kg para cada item
+    UPDATE mes.orden_produccion_item opi
+    SET peso_kg = (d.elem->>'peso_kg')::NUMERIC(10,2),
+        usr_mod = v_usr_id,
+        fyh_mod = NOW()
+    FROM (
+        SELECT elem
+        FROM jsonb_array_elements(p_items) AS elem
+    ) d
+    WHERE opi.orden_produccion_id = p_orden_id
+      AND opi.id = (d.elem->>'id')::BIGINT;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    RETURN format('%s pesos actualizados para orden #%s.', v_count, p_orden_id);
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS
+        v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in actualizar_pesos_orden_items - User: %, orden: %, Error: %, Detail: %',
+              v_usr_id, p_orden_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
 
 -- ═══════════════════════════════════════════════════════════════
 -- 25. REGISTRAR PRODUCCION (create output lotes)

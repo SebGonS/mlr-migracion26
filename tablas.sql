@@ -748,7 +748,9 @@ INSERT INTO mes.operacion (codigo, nombre, requiere_receta) VALUES
 ('HIDRO',  'LAVADO_HIDRO', true),
 ('SEC',    'SECADO',       false),
 ('PLAN',   'PLANCHADO',   false),
-('PERCH',  'PERCHADO',    false);
+('PERCH',  'PERCHADO',    false)
+('VOLT',   'VOLTEADO',     false);
+
 
 
 

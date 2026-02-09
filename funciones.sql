@@ -1013,14 +1013,17 @@ WITH orden_rollos AS (
     RETURNING id INTO v_orden_id;
 
     INSERT INTO mes.orden_produccion_item(
-        orden_produccion_id, item_id, lote_id, cantidad, ubicacion_id
+        orden_produccion_id, item_id, lote_id, cantidad, peso,ubicacion_id
     )
     SELECT v_orden_id,
            (i->>'item_id')::INT,
            (i->>'lote_id')::INT,
            (i->>'cantidad')::NUMERIC,
+           COALESCE((i->>'peso_kg')::NUMERIC, (i->>'cantidad')::NUMERIC*(l.detalles->>'peso_kg')::NUMERIC/l.cantidad),
            (i->>'ubicacion_id')::INT
-    FROM jsonb_array_elements(p_orden->'orden_produccion_item') i;
+    FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
+    LEFT JOIN inventario.lote l ON l.id = (i->>'lote_id')::INT
+    ;
 
     INSERT INTO mes.orden_produccion_paso(
         orden_produccion_id, secuencia, operacion_id,
@@ -1311,7 +1314,7 @@ DECLARE
     v_usr_id int := get_user_id();
 BEGIN
  INSERT INTO logs_api(function_name, user_id, params)
-        VALUES ('crear_plantilla', v_usr_id, p_plantilla::TEXT);
+        VALUES ('crear_plantilla', v_usr_id, p_plantilla);
 
 INSERT INTO ruta_plantilla (nombre)
     SELECT 
@@ -1348,60 +1351,38 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
 END;
 $function$;
 
-
-
-CREATE OR REPLACE FUNCTION mes.planificar_partida(p_orden_produccion_pasos jsonb)
- RETURNS text
+CREATE OR REPLACE FUNCTION mes.actualizar_plantilla(p_plantilla_id int, p_plantilla jsonb)
+RETURNS text
 LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'iam', 'notification', 'public','mes','doc'
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','inventario','doc','mes'
 AS $function$
 DECLARE
-    v_message   text;
-    v_detail    text;
-    v_hint      text;
-    v_context   text;
-    v_sqlstate  text;
-    v_item_id   INT;
-    v_tipo_codigo text;
     v_usr_id int := get_user_id();
 BEGIN
- INSERT INTO logs_api(function_name, user_id, params)
-        VALUES ('planificar_partida', v_usr_id, p_orden_produccion_pasos::TEXT);
-    INSERT INTO orden_produccion_paso (
-        partida_id,
-        secuencia,
-        operacion_id,
-        estado
-    )
-    VALUES (
-        (p_orden_produccion_pasos->>'partida_id')::BIGINT,
-        (p_orden_produccion_pasos->>'secuencia')::INT,
-        (p_orden_produccion_pasos->>'operacion_id')::smallint,
-        'PENDIENTE'
-    )
-    RETURNING id INTO v_item_id;
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_plantilla', v_usr_id, p_plantilla);
 
-INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Partida Planificada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' planificó la partida' || COALESCE(p_orden_produccion_pasos->>'partida_id','error'), 'info',jsonb_build_object('objeto_tipo','partida','partida_id', (p_orden_produccion_pasos->>'partida_id')::BIGINT)
-FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
-LEFT JOIN iam.rol r ON ur.rol_id=r.id
-WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
-   RETURN format('Item con ID %s creado correctamente.', v_item_id);
- EXCEPTION
-    WHEN OTHERS THEN
-        GET STACKED DIAGNOSTICS
-            v_message  = MESSAGE_TEXT,
-            v_detail   = PG_EXCEPTION_DETAIL,
-            v_hint     = PG_EXCEPTION_HINT,
-            v_context  = PG_EXCEPTION_CONTEXT,
-            v_sqlstate = RETURNED_SQLSTATE;
+    UPDATE ruta_plantilla 
+    SET nombre = p_plantilla->>'nombre', usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE id = p_plantilla_id;
 
-        RAISE LOG 'Error in planificar_partida - User: %, Params: %, Error: %, Detail: %',
-                  v_usr_id, p_orden_produccion_pasos::TEXT, v_message, v_detail;
-        RAISE;
+    DELETE FROM ruta_plantilla_detalle WHERE ruta_plantilla_id = p_plantilla_id;
+
+    INSERT INTO ruta_plantilla_detalle (ruta_plantilla_id, operacion_id, secuencia, ph, temperatura, tiempo_estandar)
+    SELECT p_plantilla_id,
+           (d->>'operacion_id')::INT,
+           (d->>'secuencia')::SMALLINT,
+           (d->>'ph')::NUMERIC(4,2),
+           (d->>'temperatura')::NUMERIC(5,2),
+           (d->>'tiempo_estandar')::INT
+    FROM jsonb_array_elements(p_plantilla->'plantilla_detalles') AS d;
+
+    RETURN format('Plantilla con ID %s actualizada correctamente.', p_plantilla_id);
 END;
 $function$;
+
+
 
 SELECT * FROM doc.guia_remision ORDER BY fyh_cre DESC
 
