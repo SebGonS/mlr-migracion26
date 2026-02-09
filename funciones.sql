@@ -47,19 +47,10 @@ jsonb_build_object(
             'tipo_articulo_id', ta.id,
             'tipo_articulo', ta.tipo_articulo,
             'fibra', ir.fibra,
-            'color_x_cliente',
-              CASE WHEN ir.color_x_cliente_id IS NOT NULL THEN
-                jsonb_build_object(
-                  'id', cxc.id,
-                  'color_id', cxc.color_id,
-                  'color', cxc.color,
-                  'cliente_id', cxc.cliente_id,
-                  'cliente', cxc.cliente
-                )
-              END
+            'flg_tenido', ir.flg_tenido,
+            'flg_rib', ir.flg_rib
           )
           FROM item_rollo_detalle ir
-          LEFT JOIN color_x_cliente cxc ON cxc.id = ir.color_x_cliente_id
           LEFT JOIN articulo ar ON ar.id=ir.articulo_id
           LEFT JOIN tipo_articulo ta ON ta.id=ar.tipo_articulo_id
           WHERE ir.item_id = i.item_id
@@ -71,7 +62,7 @@ FROM vw_items i
 WHERE i.item_id = p_item_id;
 $$;
 
-CREATE OR REPLACE FUNCTION public.crear_item_insumo(p_item jsonb,ptcr p_item_id int)
+CREATE OR REPLACE FUNCTION public.crear_item_insumo(p_item jsonb, p_item_id int)
 RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -85,13 +76,13 @@ DECLARE
     v_sqlstate  text;
     v_usr_id int := get_user_id();
 BEGIN
-    IF p_item ? 'articulo' AND p_item ? 'fibra' THEN
+    IF p_item ? 'medida' AND p_item ? 'insumo_tipo_id' THEN
     BEGIN
         INSERT INTO item_insumo_detalle (item_id, medida, insumo_tipo_id, colorante_tipo_id)
         VALUES (
             p_item_id,
             p_item->>'medida',
-            (p_item->>'insumo_tipo')::SMALLINT,
+            (p_item->>'insumo_tipo_id')::SMALLINT,
             CASE
                 WHEN p_item ? 'colorante_tipo_id' THEN (p_item->>'colorante_tipo_id')::SMALLINT
                 ELSE NULL
@@ -112,7 +103,7 @@ BEGIN
         END;
     ELSE
        RAISE EXCEPTION
-        'Los campos articulo y fibra son obligatorios para crear un item de tipo insumo'
+        'Los campos medida e insumo_tipo_id son obligatorios para crear un item de tipo insumo';
     END IF;
     RETURN format('Detalle de insumo para item_id %s creado correctamente.', p_item_id);
 END;
@@ -131,14 +122,15 @@ DECLARE
     v_sqlstate  text;
     v_usr_id int := get_user_id();
 BEGIN
-    IF p_item ? 'articulo_id' THEN
+    IF p_item ? 'articulo_id' AND p_item ? 'fibra' THEN
     BEGIN
-        INSERT INTO item_rollo_detalle (item_id, articulo_id, fibra,color_x_cliente_id)
+        INSERT INTO item_rollo_detalle (item_id, articulo_id, fibra, flg_tenido, flg_rib)
         VALUES (
             p_item_id,
             (p_item->>'articulo_id')::INT,
             (p_item->>'fibra')::SMALLINT,
-            (p_item->>'color_x_cliente_id')::INT
+            COALESCE((p_item->>'flg_tenido')::BOOLEAN, FALSE),
+            COALESCE((p_item->>'flg_rib')::BOOLEAN, FALSE)
         );
         EXCEPTION
     WHEN OTHERS THEN
@@ -155,7 +147,7 @@ BEGIN
         END;
     ELSE
        RAISE EXCEPTION
-        'El campo articulo_id es obligatorio para crear un item de tipo rollo'
+        'Los campos articulo_id y fibra son obligatorios para crear un item de tipo rollo';
     END IF;
     RETURN format('Detalle de rollo para item_id %s creado correctamente.', p_item_id);
 END;
@@ -237,7 +229,7 @@ jsonb_build_object(
         WHERE u.almacen_id = a.id
     )
 )FROM inventario.almacen a WHERE a.id = p_almacen_id;
-$$
+$$;
 
 
 CREATE FUNCTION inventario.crear_almacen(p_almacen json)
@@ -259,11 +251,11 @@ DECLARE
     v_error_payload jsonb;
 BEGIN
 INSERT INTO inventario.almacen(codigo,nombre,usr_cre)
-VALUES ((p_almacen->>'codigo')::TEXT,(p_almacen->>'nombre')::TEXT)
+VALUES ((p_almacen->>'codigo')::TEXT,(p_almacen->>'nombre')::TEXT,v_usr_id)
 RETURNING id INTO v_almacen_id;
 IF p_almacen ? 'ubicaciones' THEN
     INSERT INTO inventario.ubicacion(almacen_id,codigo,nombre,usr_cre)
-    SELECT v_almacen_id,(u->>'codigo')::TEXT,(u->>'nombre')::TEXT
+    SELECT v_almacen_id,(u->>'codigo')::TEXT,(u->>'nombre')::TEXT,v_usr_id
     FROM jsonb_array_elements(p_almacen->'ubicaciones') AS u;
 END IF;
 
@@ -306,21 +298,23 @@ DECLARE
     v_lote_id int;
     v_error_payload jsonb;
 BEGIN
+v_almacen_id := (p_almacen->>'id')::INT;
+
 UPDATE inventario.almacen
 SET codigo = (p_almacen->>'codigo')::TEXT,
     nombre = (p_almacen->>'nombre')::TEXT,
     usr_mod = v_usr_id,
     fyh_mod = NOW()
-WHERE id = (p_almacen->>'id')::INT;
+WHERE id = v_almacen_id;
 
 IF p_almacen ? 'ubicaciones' THEN
     INSERT INTO inventario.ubicacion(almacen_id,codigo,nombre,usr_cre)
     SELECT (p_almacen->>'id')::INT,(u->>'codigo')::TEXT,(u->>'nombre')::TEXT,v_usr_id
     FROM jsonb_array_elements(p_almacen->'ubicaciones') AS u
-    ON CONFLICT (almacen_id,codigo) DO UPDATE SET nombre = EXCLUDED.nombre, usr_mod = v_usr_id, fyh_mod = NOW();
+    ON CONFLICT (almacen_id,codigo_canon) DO UPDATE SET nombre = EXCLUDED.nombre, usr_mod = v_usr_id, fyh_mod = NOW();
 
-    DELETE FROM inventario.ubicacion WHERE almacen_id = (p_almacen->>'id')::INT 
-    AND codigo NOT IN (SELECT u->>'id' FROM jsonb_array_elements(p_almacen->'ubicaciones') AS u);
+    DELETE FROM inventario.ubicacion WHERE almacen_id = (p_almacen->>'id')::INT
+    AND codigo NOT IN (SELECT u->>'codigo' FROM jsonb_array_elements(p_almacen->'ubicaciones') AS u);
 END IF;
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
@@ -328,7 +322,7 @@ SELECT ur.user_id,'Almacen y/o ubicaciones actualizadas', COALESCE((SELECT COALE
 FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
-   RETURN format('Almacen con ID %s creado correctamente.', v_almacen_id);
+   RETURN format('Almacen con ID %s modificado correctamente.', v_almacen_id);
 EXCEPTION
     WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS
@@ -364,12 +358,12 @@ DECLARE
     v_error_payload jsonb;
 BEGIN
 
-DELETE FROM ubicacion WHERE almacen_id = p_almacen_id;
-DELETE FROM almacen WHERE id = p_almacen_id
+DELETE FROM inventario.ubicacion WHERE almacen_id = p_almacen_id;
+DELETE FROM inventario.almacen WHERE id = p_almacen_id
 RETURNING nombre INTO v_almacen_nombre;
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Almacen eliminado', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' eliminó un almacen y sus ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',v_almacen_id)
+SELECT ur.user_id,'Almacen eliminado', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' eliminó un almacen y sus ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',p_almacen_id)
 FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
@@ -466,13 +460,14 @@ BEGIN
         VALUES ('crear_partida', v_usr_id, p_partida);
 
 -------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento,color_x_cliente_id,flg_antipilling)
+    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento,ancho,color_x_cliente_id,flg_antipilling)
     VALUES (
        ( p_partida->>'prioridad_id')::INT,
         (p_partida->>'cliente_id')::INT,
         (p_partida->>'tenido_id')::INT,
         (p_partida->>'malla')::TEXT,
         p_partida->>'rendimiento',
+        (p_partida->>'ancho')::TEXT,
         (p_partida->>'color_x_cliente_id')::INT,
         (p_partida->>'flg_antipilling')::BOOLEAN
     )
@@ -653,7 +648,7 @@ BEGIN
         'tenido', tenido.tenido,
         'malla', p.malla,
         'rendimiento', p.rendimiento,
-        
+        'ancho', p.ancho,
         -- Estado y fechas
         'estado', p.estado,
         'fyh_inicio', p.fyh_inicio,
@@ -982,13 +977,29 @@ WITH orden_rollos AS (
     )
     INTO v_error_payload
     FROM errores;
-    IF v_error_payload IS NOT NULL THEN 
+    IF v_error_payload IS NOT NULL THEN
         RAISE EXCEPTION
             'Stock insuficiente para emitir la guía'
             USING
                 DETAIL  = v_error_payload::text;
     END IF;
 
+    -- --------------------------------------------------
+    -- VALIDAR QUE LA PARTIDA NO ESTÉ CERRADA
+    -- --------------------------------------------------
+    IF EXISTS (
+        SELECT 1 FROM doc.partida
+        WHERE id = (p_orden->>'partida_id')::BIGINT
+          AND estado IN ('ENTREGADA','DEVUELTA_TOTAL','FACTURADA','CERRADA','CANCELADA')
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede crear una orden de producción para una partida con estado cerrado'
+            USING DETAIL = (
+                SELECT format('Partida %s tiene estado: %s', id, estado)
+                FROM doc.partida
+                WHERE id = (p_orden->>'partida_id')::BIGINT
+            );
+    END IF;
 
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('crear_orden_produccion', v_usr_id, p_orden);
@@ -1102,7 +1113,8 @@ BEGIN
             'tenido_id',            p.tenido_id,
             'tenido',               tenido.tenido,
             'malla',                p.malla,
-            'rendimiento',          p.rendimiento
+            'rendimiento',          p.rendimiento,
+            'ancho',                p.ancho
         ),
 
         -- ═══════════════════════════════════════
@@ -1359,7 +1371,7 @@ BEGIN
     INSERT INTO orden_produccion_paso (
         partida_id,
         secuencia,
-        operacion_id
+        operacion_id,
         estado
     )
     VALUES (
@@ -1391,9 +1403,9 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
 END;
 $function$;
 
+SELECT * FROM doc.guia_remision ORDER BY fyh_cre DESC
 
-
-CREATE FUNCTION doc.crear_guia(p_guia json)
+CREATE OR REPLACE FUNCTION doc.crear_guia(p_guia jsonb)
 RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -1422,9 +1434,10 @@ BEGIN
 
  -- Movement timestamp: for incoming guias use fecha_recepcion (allows backdating), for outgoing use now()
  v_fecha_mov := CASE
-     WHEN v_guia_tipo.flg_emitida THEN now()
-     ELSE COALESCE((p_guia->>'fecha_recepcion')::TIMESTAMPTZ, now())
- END;
+    WHEN v_guia_tipo.flg_emitida THEN (p_guia->>'fecha_emision')::TIMESTAMPTZ
+    ELSE COALESCE((p_guia->>'fecha_recepcion')::TIMESTAMPTZ, now())
+END;
+
 
 IF v_guia_tipo.flg_emitida THEN
         -- SELECT im.lote_id,COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id),SUM(CASE WHEN im.movimiento_tipo = 'EGRESO' THEN -im.cantidad WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad ELSE 0 END) FROM inventario.item_movimientos im
@@ -1488,7 +1501,7 @@ ELSE
 END IF;
 
  INSERT INTO logs_api(function_name, user_id, params)
-        VALUES ('crear_guia', v_usr_id, p_guia::TEXT);
+        VALUES ('crear_guia', v_usr_id, p_guia);
 
     INSERT INTO doc.guia_remision(guia_remision_tipo_id, serie, correlativo, emisor_cliente_id, emisor_proveedor_id, receptor_cliente_id, receptor_proveedor_id, fecha_emision, fecha_recepcion)
     VALUES (
@@ -1511,7 +1524,7 @@ END IF;
             WHEN p_guia ? 'receptor_proveedor_id' THEN (p_guia->>'receptor_proveedor_id')::INT
             ELSE NULL
         END,
-        (p_guia->>'fecha_emision')::DATE,
+        (p_guia->>'fecha_emision')::TIMESTAMPTZ,
         CASE
             WHEN v_guia_tipo.flg_emitida THEN NULL
             ELSE COALESCE((p_guia->>'fecha_recepcion')::TIMESTAMPTZ, now())
@@ -1621,3 +1634,162 @@ END;
 $function$;
 
 GRANT USAGE ON SCHEMA mes to authenticated;
+
+
+
+
+CREATE OR REPLACE FUNCTION doc.get_guia_remision(p_guia_id BIGINT)
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+SET search_path TO 'public', 'doc', 'inventario'
+AS $$
+SELECT jsonb_build_object(
+    'id', gr.id,
+    'guia_remision_tipo_id', gr.guia_remision_tipo_id,
+    'tipo_codigo', grt.codigo,
+    'tipo_nombre', grt.nombre,
+    'flg_emitida', grt.flg_emitida,
+    'serie', gr.serie,
+    'correlativo', gr.correlativo,
+    'fecha_emision', gr.fecha_emision,
+    'fecha_recepcion', gr.fecha_recepcion,
+    'emisor_cliente_id', gr.emisor_cliente_id,
+    'emisor_cliente', ec.cliente,
+    'emisor_proveedor_id', gr.emisor_proveedor_id,
+    'emisor_proveedor', ep.proveedor,
+    'receptor_cliente_id', gr.receptor_cliente_id,
+    'receptor_cliente', rc.cliente,
+    'receptor_proveedor_id', gr.receptor_proveedor_id,
+    'receptor_proveedor', rp.proveedor,
+    'fyh_cre', gr.fyh_cre,
+    'detalles', (
+        SELECT COALESCE(jsonb_agg(
+            jsonb_build_object(
+                'id', grd.id,
+                'item_id', grd.item_id,
+                'item_codigo', i.codigo,
+                'item_nombre', i.nombre,
+                'cantidad', grd.cantidad,
+                'unidad_codigo', u.codigo,
+                'lote_id', grd.lote_id,
+                'ubicacion_id', grd.ubicacion_id,
+                'ubicacion_codigo', ub.codigo,
+                'almacen_nombre', al.nombre
+            ) ORDER BY grd.id
+        ), '[]'::jsonb)
+        FROM doc.guia_remision_detalle grd
+        LEFT JOIN item i ON i.id = grd.item_id
+        LEFT JOIN unidad u ON u.id = i.unidad_id
+        LEFT JOIN inventario.ubicacion ub ON ub.id = grd.ubicacion_id
+        LEFT JOIN inventario.almacen al ON al.id = ub.almacen_id
+        WHERE grd.guia_remision_id = gr.id
+    )
+)
+FROM doc.guia_remision gr
+LEFT JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
+LEFT JOIN cliente ec ON ec.id = gr.emisor_cliente_id
+LEFT JOIN proveedor ep ON ep.id = gr.emisor_proveedor_id
+LEFT JOIN cliente rc ON rc.id = gr.receptor_cliente_id
+LEFT JOIN proveedor rp ON rp.id = gr.receptor_proveedor_id
+WHERE gr.id = p_guia_id;
+$$;
+
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- ACTUALIZAR PASOS DE ORDEN DE PRODUCCION (bulk)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.actualizar_pasos_orden(p_orden_id BIGINT, p_pasos jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id    int := get_user_id();
+    v_estado    orden_produccion_estado_enum;
+    v_count     int;
+BEGIN
+    -- Validar que la orden existe y no está en estado terminal
+    SELECT estado INTO v_estado
+    FROM mes.orden_produccion
+    WHERE id = p_orden_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
+    END IF;
+
+    IF v_estado IN ('FINALIZADA','TECO','CERRADA','CANCELADA') THEN
+        RAISE EXCEPTION 'No se pueden modificar pasos de una orden en estado %.', v_estado;
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_pasos_orden', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'pasos', p_pasos));
+
+    -- Bulk upsert: update existing, insert new
+    WITH datos AS (
+        SELECT
+            (p->>'id')::BIGINT                AS id,
+            (p->>'secuencia')::SMALLINT       AS secuencia,
+            (p->>'operacion_id')::SMALLINT    AS operacion_id,
+            (p->>'maquina_asignada_id')::INT  AS maquina_asignada_id,
+            (p->>'empleado_id')::SMALLINT     AS empleado_id,
+            (p->>'receta_id')::INT            AS receta_id,
+            (p->>'ph')::NUMERIC               AS ph,
+            (p->>'temperatura')::NUMERIC      AS temperatura,
+            (p->>'tiempo_estandar')::INT      AS tiempo_estandar,
+            (p->>'relacion_bano')::NUMERIC    AS relacion_bano,
+            (p->>'flg_final')::BOOL           AS flg_final
+        FROM jsonb_array_elements(p_pasos) p
+    )
+    INSERT INTO mes.orden_produccion_paso(
+        orden_produccion_id, secuencia, operacion_id,
+        maquina_asignada_id, empleado_id, receta_id,
+        ph, temperatura, tiempo_estandar, relacion_bano,
+        flg_final, usr_cre
+    )
+    SELECT p_orden_id, d.secuencia, d.operacion_id,
+           d.maquina_asignada_id, d.empleado_id, d.receta_id,
+           d.ph, d.temperatura, d.tiempo_estandar, d.relacion_bano,
+           COALESCE(d.flg_final, false), v_usr_id
+    FROM datos d
+    ON CONFLICT (orden_produccion_id, secuencia)
+    DO UPDATE SET
+        operacion_id       = EXCLUDED.operacion_id,
+        maquina_asignada_id = EXCLUDED.maquina_asignada_id,
+        empleado_id        = EXCLUDED.empleado_id,
+        receta_id          = EXCLUDED.receta_id,
+        ph                 = EXCLUDED.ph,
+        temperatura        = EXCLUDED.temperatura,
+        tiempo_estandar    = EXCLUDED.tiempo_estandar,
+        relacion_bano      = EXCLUDED.relacion_bano,
+        flg_final          = EXCLUDED.flg_final,
+        usr_mod            = v_usr_id,
+        fyh_mod            = NOW();
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    -- Eliminar pasos que ya no están en la lista (solo si están PENDIENTE)
+    DELETE FROM mes.orden_produccion_paso
+    WHERE orden_produccion_id = p_orden_id
+      AND estado = 'PENDIENTE'
+      AND secuencia NOT IN (
+          SELECT (p->>'secuencia')::SMALLINT
+          FROM jsonb_array_elements(p_pasos) p
+      );
+
+    RETURN format('%s pasos actualizados para orden #%s.', v_count, p_orden_id);
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS
+        v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in actualizar_pasos_orden - User: %, orden: %, Error: %, Detail: %',
+              v_usr_id, p_orden_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
+

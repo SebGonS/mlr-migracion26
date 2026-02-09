@@ -682,7 +682,8 @@ JOIN base b USING (codigo);
 
 INSERT INTO inventario.almacen(codigo,nombre,fyh_cre)
 VALUES ('ALM-INS', 'Almacén de Insumos', NOW()),
-       ('ALM-CRU', 'Almacén de Crudo', NOW());
+       ('ALM-CRU', 'Almacén de Crudo', NOW()),
+       ('ALM-PT', 'Almacén de Productos Terminados', NOW());
 
 INSERT INTO inventario.ubicacion(almacen_id,codigo,nombre,fyh_cre)
 SELECT a.id, 'UBI-01', 'Ubicación 1',NOW()
@@ -691,7 +692,11 @@ WHERE a.codigo = 'ALM-INS'
 UNION ALL
 SELECT a.id, 'UBI-01', 'Ubicación 1',NOW()
 FROM inventario.almacen a
-WHERE a.codigo = 'ALM-CRU';
+WHERE a.codigo = 'ALM-CRU'
+UNION ALL
+SELECT a.id, 'UBI-01', 'Ubicación 1',NOW()
+FROM inventario.almacen a
+WHERE a.codigo = 'ALM-PT';
 
 -- ============================================================================
 -- MIGRAR PARTIDAS
@@ -780,6 +785,7 @@ LEFT JOIN estado e ON ue.estado_id = e.id)
     fibra,
     malla,
     rendimiento,
+    ancho
     estado,
     fyh_programacion,
     fyh_inicio,
@@ -799,6 +805,7 @@ SELECT
     p.fibra,
     p.malla,
     p.rendimiento,
+    p.ancho,
     p.estado_comercial,
     p.fecha_registro,
     p.fecha_registro,

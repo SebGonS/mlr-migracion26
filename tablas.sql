@@ -517,6 +517,7 @@ tenido_id int references tenido(id),
 color_x_cliente_id int references color_x_cliente(id),
 malla text,
 rendimiento text,
+ancho text,
 flg_antipilling boolean DEFAULT false,
 -- Execution State
 estado partida_estado_enum DEFAULT 'CREADA',
@@ -622,7 +623,7 @@ CREATE TABLE doc.guia_remision (
     emisor_proveedor_id INT, -- REFERENCES proveedor(id),
     receptor_cliente_id   INT, -- REFERENCES cliente(id),
     receptor_proveedor_id INT, -- REFERENCES proveedor(id),
-    fecha_emision DATE NOT NULL,
+    fecha_emision TIMESTAMPTZ NOT NULL,
     fecha_recepcion TIMESTAMPTZ DEFAULT now(), -- nullable: only meaningful for received guias
     usr_cre int,
     fyh_cre timestamptz DEFAULT NOW(),
@@ -631,7 +632,6 @@ CREATE TABLE doc.guia_remision (
     UNIQUE (serie,correlativo,emisor_proveedor_id),
     UNIQUE (serie,correlativo,emisor_cliente_id) -- Removed trailing comma here
 );
-
 CREATE TABLE inventario.lote (
   id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   item_id int REFERENCES item(id),
@@ -974,15 +974,14 @@ CREATE TABLE mes.programacion (
     UNIQUE (maquina_id, fecha, secuencia)
 );
 
-
-CREATE TABLE doc.compra_guia_remision(
-  guia_remision_id int,
-  compra_id int,
-  usr_cre int,
-  fyh_cre timestamptz,
-  UNIQUE(guia_remision_id,compra_id)
+CREATE TABLE doc.compra_detalle(
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  compra_id int NOT NULL, -- REFERENCES compra(id),
+  item_id int NOT NULL REFERENCES item(id),
+  cantidad numeric(12,2) NOT NULL CHECK (cantidad > 0),
+  precio_unitario numeric(12,4) NOT NULL CHECK (precio_unitario >= 0),
+  UNIQUE(compra_id, item_id)
 );
-
 
 
 GRANT USAGE ON SCHEMA doc TO authenticated;
@@ -1022,6 +1021,7 @@ SELECT
 
     p.malla,
     p.rendimiento,
+    p.ancho,
     p.flg_antipilling,
     -- ═══════════════════════════════════════
     -- DATES (Commercial timeline)
@@ -1082,6 +1082,44 @@ LEFT JOIN LATERAL (
 ) pd_agg ON true;
 
 GRANT SELECT ON doc.vw_partidas_lista_comercial TO authenticated;
+
+-- ═══════════════════════════════════════
+-- COMPRA LISTING VIEW
+-- ═══════════════════════════════════════
+DROP VIEW IF EXISTS doc.vw_compras;
+CREATE OR REPLACE VIEW doc.vw_compras AS
+SELECT
+    c.id,
+    c.proveedor_id,
+    c.fecha_remision,
+    c.fyh_cre AS fecha_creacion,
+
+    -- Totals from detail lines
+    COALESCE(det.total_items, 0) AS total_items,
+    COALESCE(det.monto_total, 0) AS monto_total,
+
+    -- Linked guias count
+    COALESCE(guias.total_guias, 0) AS total_guias,
+
+    c.usr_cre,
+    c.fyh_cre
+FROM compra c
+
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*)               AS total_items,
+        SUM(cd.cantidad * cd.precio_unitario) AS monto_total
+    FROM doc.compra_detalle cd
+    WHERE cd.compra_id = c.id
+) det ON true
+
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS total_guias
+    FROM doc.compra_guia_remision cgr
+    WHERE cgr.compra_id = c.id
+) guias ON true;
+
+GRANT SELECT ON doc.vw_compras TO authenticated;
 
 -- View for listing ordenes de producción with essential information
 -- This view provides a performant way to list orders with related data
@@ -1216,7 +1254,8 @@ SELECT
     im.lote_id,
     im.item_id,
     COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
-    SUM(im.cantidad * imt.factor) AS cantidad_disponible
+    SUM(im.cantidad * imt.factor) AS cantidad_disponible,
+    MIN(im.fecha_hora) AS fecha_hora_ingreso
 FROM inventario.item_movimientos im
 JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
 GROUP BY im.lote_id, im.item_id,
@@ -1270,4 +1309,39 @@ LEFT JOIN cliente c ON c.id = l.propietario_id
 WHERE it.codigo = 'ROLLO'
 ORDER BY a.nombre, u.nombre, i.nombre;
 
+
+CREATE OR REPLACE VIEW inventario.vw_item_proveedor_guia AS
+SELECT 
+DISTINCT
+    i.id AS item_id,
+    i.codigo AS item_codigo,
+    i.nombre AS item_nombre,
+    gr.emisor_proveedor_id AS proveedor_id,
+    p.proveedor AS proveedor_nombre
+FROM doc.guia_remision gr 
+JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
+JOIN item i ON grd.item_id = i.id
+JOIN proveedor p ON p.id = gr.emisor_proveedor_id
+
+
+
+CREATE VIEW mes.vw_maquinas AS
+SELECT m.id,m.codigo,m.nombre,m.maquina_tipo_id,mt.codigo maquina_tipo_codigo,mt.nombre maquina_tipo_nombre,m.relacion_bano
+FROM mes.maquina m
+LEFT JOIN mes.maquina_tipo mt ON mt.id=m.maquina_tipo_id
+
+
+
+
+GRANT SELECT ON inventario.vw_item_proveedor_guia TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_rollos TO anon, authenticated;
+GRANT USAGE ON SCHEMA mes TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA mes TO authenticated;
+GRANT USAGE ON SCHEMA doc TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
+GRANT USAGE ON SCHEMA inventario TO authenticated;
+GRANT SELECT ON mes.operacion TO authenticated;
+GRANT SELECT ON mes.maquina TO authenticated;
+GRANT SELECT ON item_rollo_detalle TO authenticated;
+GRANT SELECT ON doc.partida_detalle TO authenticated;
