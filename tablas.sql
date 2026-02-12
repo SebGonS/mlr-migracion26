@@ -227,6 +227,7 @@ FROM unnest(enum_range(NULL::inventario.item_movimiento_tipo_categoria_enum)) AS
 
 CREATE SCHEMA IF NOT EXISTS inventario;
 
+
 CREATE TABLE inventario.item_movimiento_tipo(
     id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
@@ -537,7 +538,6 @@ CREATE TABLE doc.partida_detalle(
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     partida_id bigint NOT NULL REFERENCES doc.partida(id),
     item_id int NOT NULL REFERENCES item(id),
-    cantidad int NOT NULL,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,

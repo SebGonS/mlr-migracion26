@@ -376,7 +376,7 @@ COALESCE(fibra, '1') fibra
 FROM partida
 JOIN articulo  a ON a.id = partida.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
-JOIN unidad u ON u.codigo = 'UN'
+JOIN unidad u ON u.codigo = 'kg'
 GROUP BY 
 UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C'),
 'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo',
@@ -395,7 +395,7 @@ COALESCE(fibra, '1') fibra
 FROM partida
 JOIN articulo  a ON a.id = partida.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
-JOIN unidad u ON u.codigo = 'UN'
+JOIN unidad u ON u.codigo = 'kg'
 GROUP BY 
 UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C'),
 'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo',
@@ -449,7 +449,7 @@ COALESCE(fibra, '1') fibra
 FROM partida
 JOIN articulo  a ON a.id = partida.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
-JOIN unidad u ON u.codigo = 'UN'
+JOIN unidad u ON u.codigo = 'kg'
 WHERE rib>0
 GROUP BY 
 UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C'),
@@ -503,7 +503,7 @@ COALESCE(fibra, '1') fibra
 FROM partida
 JOIN articulo  a ON a.id = partida.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
-JOIN unidad u ON u.codigo = 'UN'
+JOIN unidad u ON u.codigo = 'kg'
 GROUP BY 
 UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-T'),
 'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Teñido',
@@ -556,7 +556,7 @@ COALESCE(fibra, '1') fibra
 FROM partida
 JOIN articulo  a ON a.id = partida.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
-JOIN unidad u ON u.codigo = 'UN'
+JOIN unidad u ON u.codigo = 'kg'
 WHERE rib>0
 GROUP BY 
 UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-T'),
