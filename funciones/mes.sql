@@ -1,6 +1,7 @@
 -- ═══════════════════════════════════════════════════════════════
 -- 29. GET PROGRAMACION POR FECHA (daily board)
 -- ═══════════════════════════════════════════════════════════════
+
 CREATE OR REPLACE FUNCTION mes.get_programacion_diaria(p_fecha DATE)
 RETURNS jsonb
 LANGUAGE sql STABLE
@@ -25,7 +26,11 @@ FROM (
         'color',              vc.color,
         'color_hex',          vc.color_hex,
         'tono',               vc.tono,   -- ADD (if in your view)
-        'tenido',             t.tenido  -- ADD (if applicable)
+        'tenido',             t.tenido,  -- ADD (if applicable),
+        'ancho',              p.ancho,
+        'malla',              p.malla,
+        'rendimiento',        p.rendimiento,
+        'articulo',           vpa.articulo_nombre   
     ) AS row_obj
     FROM mes.programacion prog
     JOIN mes.orden_produccion_paso opp ON opp.id = prog.orden_produccion_paso_id
@@ -35,6 +40,7 @@ FROM (
     LEFT JOIN tenido t ON t.id = p.tenido_id
     LEFT JOIN cliente c ON c.id = p.cliente_id
     LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN vw_partida_articulo vpa ON vpa.partida_id=p.id
     WHERE prog.fecha = p_fecha
     ORDER BY prog.maquina_id,prog.secuencia
 ) sub;

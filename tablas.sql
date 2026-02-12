@@ -1326,6 +1326,22 @@ JOIN item i ON grd.item_id = i.id
 JOIN proveedor p ON p.id = gr.emisor_proveedor_id
 
 
+CREATE OR REPLACE VIEW doc.partida_resumen_tenido AS
+SELECT 
+    pd.partida_id,
+    a.id AS articulo_id,
+    a.articulo AS articulo_nombre,
+    ird.fibra,
+    COUNT(pd.item_id) AS total_rollos,
+    SUM(pd.cantidad) AS cantidad_total,
+    SUM(CASE WHEN ird.flg_rib = false THEN pd.cantidad ELSE 0 END) AS cantidad_regular,
+    SUM(CASE WHEN ird.flg_rib = true THEN pd.cantidad ELSE 0 END) AS cantidad_rib
+FROM doc.partida_detalle pd
+JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
+JOIN articulo a ON ird.articulo_id = a.id
+GROUP BY 1, 2, 3, 4
+ORDER BY 1, 2;
+
 
 CREATE VIEW mes.vw_maquinas AS
 SELECT m.id,m.codigo,m.nombre,m.maquina_tipo_id,mt.codigo maquina_tipo_codigo,mt.nombre maquina_tipo_nombre,m.relacion_bano
@@ -1340,6 +1356,7 @@ GRANT SELECT ON inventario.vw_stock_rollos TO anon, authenticated;
 GRANT USAGE ON SCHEMA mes TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA mes TO authenticated;
 GRANT USAGE ON SCHEMA doc TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
 GRANT USAGE ON SCHEMA inventario TO authenticated;
