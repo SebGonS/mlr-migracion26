@@ -232,7 +232,7 @@ jsonb_build_object(
 $$;
 
 
-CREATE FUNCTION inventario.crear_almacen(p_almacen json)
+CREATE OR REPLACE FUNCTION inventario.crear_almacen(p_almacen json)
 RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -280,7 +280,7 @@ EXCEPTION
 END;
 $function$;
 
-CREATE FUNCTION inventario.modificar_almacen(p_almacen json)
+CREATE OR REPLACE FUNCTION inventario.modificar_almacen(p_almacen json)
 RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -339,7 +339,7 @@ END;
 $function$;
 
 
-CREATE FUNCTION inventario.eliminar_almacen(p_almacen_id int)
+CREATE OR REPLACE FUNCTION inventario.eliminar_almacen(p_almacen_id int)
 RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -472,8 +472,8 @@ BEGIN
         (p_partida->>'flg_antipilling')::BOOLEAN
     )
     RETURNING id INTO v_partida_id;
-     INSERT INTO doc.partida_detalle(partida_id, item_id,cantidad)
-     SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT
+     INSERT INTO doc.partida_detalle(partida_id, item_id,cantidad,unidad_id)
+     SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT, (u->>'unidad_id')::INT
      FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
 
 
@@ -569,8 +569,8 @@ WHERE pd.partida_id = p_partida_id
   );
 
 -- Upsert the rest
-INSERT INTO doc.partida_detalle(partida_id, item_id, cantidad)
-SELECT p_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT
+INSERT INTO doc.partida_detalle(partida_id, item_id, cantidad,unidad_id)
+SELECT p_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT, (u->>'unidad_id')::INT
 FROM jsonb_array_elements(p_partida->'partida_detalles') u
 ON CONFLICT (partida_id, item_id) DO UPDATE
   SET cantidad = EXCLUDED.cantidad;
@@ -614,7 +614,7 @@ END;
 $function$;
 
 
-SELECT * FROM logs_api ORDER BY called_at DESC
+
 
 CREATE OR REPLACE FUNCTION doc.get_partida(p_partida_id BIGINT)
 RETURNS jsonb
@@ -666,10 +666,11 @@ BEGIN
                 'item_codigo', vi.item_codigo,
                 'item_nombre', vi.item_nombre,
                 'cantidad', pd.cantidad,
-                'unidad', vi.unidad_codigo
+                'unidad', u.codigo
             ) ORDER BY pd.id)
             FROM doc.partida_detalle pd
             LEFT JOIN vw_items vi ON vi.item_id = pd.item_id  -- ✅ FIXED
+            LEFT JOIN unidad u ON u.id = pd.unidad_id
             WHERE pd.partida_id = p.id
         ), '[]'::jsonb),
         'resumen_progreso', jsonb_build_object(
@@ -1013,13 +1014,11 @@ WITH orden_rollos AS (
     RETURNING id INTO v_orden_id;
 
     INSERT INTO mes.orden_produccion_item(
-        orden_produccion_id, item_id, lote_id, cantidad, peso,ubicacion_id
+        orden_produccion_id, item_id, lote_id,ubicacion_id
     )
     SELECT v_orden_id,
            (i->>'item_id')::INT,
            (i->>'lote_id')::INT,
-           (i->>'cantidad')::NUMERIC,
-           COALESCE((i->>'peso_kg')::NUMERIC, (i->>'cantidad')::NUMERIC*(l.detalles->>'peso_kg')::NUMERIC/l.cantidad),
            (i->>'ubicacion_id')::INT
     FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
     LEFT JOIN inventario.lote l ON l.id = (i->>'lote_id')::INT
@@ -1197,7 +1196,6 @@ BEGIN
                             jsonb_build_object(
                                 'id',                        oppi.id,
                                 'orden_produccion_item_id',  oppi.orden_produccion_item_id,
-                                'cantidad',                  oppi.cantidad,
                                 'flg_consumido',             oppi.flg_consumido
                             ) ORDER BY oppi.id
                         )
@@ -1222,13 +1220,13 @@ BEGIN
                 jsonb_build_object(
                     'id',              opi.id,
                     'lote_id',         opi.lote_id,
+                    'lote_codigo',    'L' || EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || l.secuencia,
                     'item_id',         l.item_id,
                     'item_codigo',     vi_mat.item_codigo,
                     'item_nombre',     vi_mat.item_nombre,
-                    'cantidad',        opi.cantidad,
-                    'peso_kg',         opi.peso_kg,
-                    'unidad',          vi_mat.unidad_codigo,
                     'ubicacion_id',    opi.ubicacion_id,
+                    'cantidad', l.cantidad,
+                    'unidad',          vi_mat.unidad_codigo,
                     'ubicacion',       ubic.nombre,
                     'almacen',         alm.nombre,
                     'detalles',        l.detalles,
@@ -1435,20 +1433,23 @@ IF v_guia_tipo.flg_emitida THEN
             SUM((i->>'cantidad')::numeric)  AS cantidad
         FROM jsonb_array_elements(p_guia->'items') i
         GROUP BY 1,2,3
-    ),errores as(  SELECT
-            im.item_id,
-            item.nombre AS item_nombre,
-            im.lote_id,
-            sa.ubicacion_id,
-            items.cantidad,
-            sa.cantidad_disponible
-        FROM inventario.vw_stock_actual sa
-        JOIN guia_items AS items ON guia_items.item_id=sa.item_id AND guia_items.lote_id=sa.lote_id AND guia_items.ubicacion_id= sa.ubicacion_id
-        JOIN item ON item.id = sa.item_id
-        WHERE sa.cantidad_disponible < items.cantidad
-        GROUP BY sa.item_id, sa.lote_id, sa.ubicacion_id,items.cantidad
-        
-    ) SELECT jsonb_agg(
+    ),errores AS (
+    SELECT
+        items.item_id,
+        item.nombre AS item_nombre,
+        items.lote_id,
+        items.ubicacion_id,
+        items.cantidad,
+        COALESCE(sa.cantidad_disponible, 0) AS cantidad_disponible
+    FROM guia_items items
+    LEFT JOIN inventario.vw_stock_actual sa
+        ON sa.item_id = items.item_id
+        AND sa.lote_id = items.lote_id
+        AND sa.ubicacion_id = items.ubicacion_id
+    JOIN item ON item.id = items.item_id
+    WHERE COALESCE(sa.cantidad_disponible, 0) < items.cantidad
+)
+ SELECT jsonb_agg(
         jsonb_build_object(
             'item_id', item_id,
             'item_nombre', item_nombre,
@@ -1513,16 +1514,16 @@ END IF;
     )
     RETURNING id INTO v_guia_id;
 
-INSERT INTO doc.guia_remision_detalle (guia_remision_id , item_id, cantidad,lote_id,ubicacion_id)
-SELECT
-    v_guia_id,
-    (item->>'item_id')::INT,
-    (item->>'cantidad')::NUMERIC(12,2),
-    (item->>'lote_id')::INT,
-    (item->>'ubicacion_id')::INT
-FROM jsonb_array_elements(p_guia->'items') AS item;
-
 IF v_guia_tipo.flg_emitida THEN
+    
+    INSERT INTO doc.guia_remision_detalle (guia_remision_id , item_id, cantidad,lote_id,ubicacion_id)
+    SELECT
+        v_guia_id,
+        (item->>'item_id')::INT,
+        (item->>'cantidad')::NUMERIC(12,2),
+        (item->>'lote_id')::INT,
+        (item->>'ubicacion_id')::INT
+    FROM jsonb_array_elements(p_guia->'items') AS item;
     -- For issued guides, create item movements as EGRESO from warehouse
     INSERT INTO inventario.item_movimientos 
     (
@@ -1560,21 +1561,35 @@ ELSE
         v_guia_id
     FROM jsonb_array_elements(p_guia->'items') AS item
     WHERE item->>'lote_id' IS NOT NULL;
-WITH nuevos_lotes AS(
+WITH 
+expanded AS (
+    SELECT
+        (item->>'item_id')::INT AS item_id,
+        (item->>'ubicacion_id')::INT AS ubicacion_id,
+        (item->>'cantidad')::NUMERIC 
+            / (item->>'cantidad_rollos')::INT AS peso_estimado,
+        (p_guia->>'propietario_id')::INT AS propietario_id
+    FROM jsonb_array_elements(p_guia->'items') AS item
+    LATERAL generate_series(1, (item->>'cantidad_rollos')::INT)
+    --WHERE item->'cantidad_rollos' IS NOT NULL AND (item->>'lote_id') IS NULL -- only for items without lote_id (new lots) and with cantidad_rollos specified,
+),
+nuevos_lotes AS(
     INSERT INTO lote (
         item_id, 
         documento_tipo, 
         documento_id, 
         cantidad,
-        detalles
+        detalles,
+        propietario_id
         )
     SELECT
-    (item->>'item_id')::INT,
+    item.item_id,
     'GUIA_REMISION',
     v_guia_id,
-    (item->>'cantidad')::NUMERIC(12,2),
-    jsonb_build_object('peso', (item->>'peso')::NUMERIC(12,2))
-    FROM jsonb_array_elements(p_guia->'items') AS item
+    item.peso_estimado,
+    NULL,
+    item.propietario_id
+    FROM expanded AS item
     WHERE item->>'lote_id' IS NULL
     RETURNING id,item_id
 ) -- For received guides, create item movements as INGRESO to warehouse

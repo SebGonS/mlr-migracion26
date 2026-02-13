@@ -2505,3 +2505,205 @@ Receiving (raw roll)	lote 100.detalles = {peso: 25.5, ancho: 1.80} — immutable
 During production	orden_produccion_paso_item.cantidad — tracks changing weight per step
 Production output	New lote 200.detalles = {peso: 24.8, ancho: 1.75} — final post-production attributes
 The raw lot is a snapshot of what arrived. The dyed lot is a snapshot of what was produced. The paso_items capture what happened in between.
+
+
+I know we agreed on display but i was curious about how the functions would work, is there any way to this setbased or is a loop here unavoidable? also the distinction on ingress would be made only for rolls right?
+Set-based: yes, with generate_series
+
+WITH expanded AS (
+    SELECT
+        (item->>'item_id')::INT AS item_id,
+        (item->>'ubicacion_id')::INT AS ubicacion_id,
+        (item->>'cantidad_total')::NUMERIC 
+            / (item->>'cantidad_rollos')::INT AS peso_estimado
+    FROM jsonb_array_elements(p_guia->'items') AS item,
+    LATERAL generate_series(1, (item->>'cantidad_rollos')::INT)
+),
+inserted_lotes AS (
+    INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad, propietario_id)
+    SELECT item_id, 'guia_remision', v_guia_id, peso_estimado, v_propietario_id
+    FROM expanded
+    RETURNING id, item_id, cantidad
+)
+INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, lote_id, ubicacion_id, cantidad)
+SELECT v_guia_id, il.item_id, il.id,
+       (SELECT DISTINCT ubicacion_id FROM expanded e WHERE e.item_id = il.item_id),
+       il.cantidad
+FROM inserted_lotes il;
+generate_series expands 1 aggregated row into N rows. One CTE chain, no loop. The caveat: if the same item_id appears twice with different ubicacion_id, the subquery breaks. At that point a loop is cleaner.
+
+Disaggregation is only for rolls
+Insumos don't need it — "25 kg of Chemical X" is already 1 line = 1 lot:
+
+
+// Ingress rolls (aggregated → disaggregated):
+{ "item_id": 3, "cantidad_rollos": 17, "cantidad_total": 400.00 }
+→ 17 lots + 17 detail lines
+
+// Ingress insumos (already 1:1):
+{ "item_id": 8, "cantidad": 25.00, "lote_id": null }
+→ 1 lot + 1 detail line
+The function would branch on item type:
+
+
+SELECT it.codigo INTO v_item_tipo
+FROM item i JOIN item_tipo it ON it.id = i.item_tipo_id
+WHERE i.id = v_item_id;
+
+IF v_item_tipo = 'ROLLO' THEN
+    -- generate_series expansion
+ELSE
+    -- direct 1:1 insert
+END IF;
+Or skip the branch entirely — if cantidad_rollos is NULL or 1, the generate_series(1,1) produces one row anyway. Same code path, no branching.
+
+my current approach left lote null for ingress as its the lot that references the document that created so as to not break the unique constraint on guia-remision_:detalle, UNIQUE (guia_remision_id, item_id, lote_id, ubicacion_id), should I just insert into guia remision detalle after lot creation? or midfy the constraint?
+Insert lots first, then detail lines. That's what we agreed — lots created at guia insertion time, lote_id NOT NULL.
+
+The constraint simplifies too. Since each lot has a unique id and belongs to exactly one item, item_id and ubicacion_id in the constraint are redundant:
+
+
+-- Old (needs nullable lote_id workaround):
+UNIQUE (guia_remision_id, item_id, lote_id, ubicacion_id)
+
+-- New (lote_id is unique per lot, covers everything):
+UNIQUE (guia_remision_id, lote_id)
+Same lot can't appear twice on the same guia. Works for both directions:
+
+Ingress: each lot is freshly created, naturally unique
+Egress: prevents shipping the same roll twice on the same guia
+<system-reminder>
+The user provided the following references:
+- c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\.github\copilot-instructions.md
+
+IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+</system-reminder>
+
+whjat does this do
+
+Show less
+I need to see what you're pointing at. Are you asking about a specific function or code block in funciones.sql? Can you select the lines or paste the code?
+
+i this correct? i modified it like this so as to not deaggregate accidentally any non roll items, I could reinforce downstream with a check on item type too. Regarding ownership on ingress, how should the frontend send it? should i add a flg to the guia header to mark all items as remitent owned? Or should i add a propietario_id to each tiem wich is added accordingly in teh frontend? Which would be the correct approach? (i know for me as a backend developer the mkost practical would be to already have the id per item, dnt know abotu correctness though)
+The CTE syntax
+The logic is right but the syntax is wrong — WHERE is placed between FROM and LATERAL:
+
+
+expanded AS (
+    SELECT
+        (item->>'item_id')::INT AS item_id,
+        (item->>'ubicacion_id')::INT AS ubicacion_id,
+        (item->>'cantidad')::NUMERIC 
+            / (item->>'cantidad_rollos')::INT AS peso_estimado
+    FROM jsonb_array_elements(p_guia->'items') AS item,
+    LATERAL generate_series(1, (item->>'cantidad_rollos')::INT)
+    WHERE (item->>'cantidad_rollos') IS NOT NULL 
+      AND (item->>'lote_id') IS NULL
+)
+generate_series(1, NULL) returns 0 rows, so the LATERAL naturally produces nothing for non-roll items — the WHERE just makes intent explicit.
+
+Ownership
+Don't send it per item. A guia is a transport document from ONE sender. Your guia header already has emisor_cliente_id / emisor_proveedor_id — that IS the owner.
+
+
+-- In the function, derive it from the guia header:
+v_propietario_id := COALESCE(
+    (p_guia->>'emisor_cliente_id')::INT,
+    (p_guia->>'emisor_proveedor_id')::INT
+);
+
+-- Then use v_propietario_id for all lots created from this guia
+INSERT INTO inventario.lote (..., propietario_id)
+VALUES (..., v_propietario_id);
+Per-item propietario_id is practical for you but wrong semantically — it implies one guia could carry material from different owners, which contradicts what a guia de remision is. If the frontend sends it per item, sooner or later someone will mismatch it. Derive it from the header and there's no room for error.
+
+not quite. i saw it as it implying a guia could send bought goads as well as loaned goods? so a supplier could send me a purcahsed insumo along with a loaned insumo to be paid later? Should i just rely on guia type for inputting that as the owner? or should i have a flag in the payload?
+Good point — a supplier delivery could mix purchased (yours) and consignment (still theirs) goods on the same truck.
+
+But that's a commercial distinction, not a transport one. The guia just says "these goods moved from A to B." Ownership comes from the commercial relationship.
+
+Three options:
+
+1. Separate guias per ownership type (recommended)
+
+Force separate guias: one INGRESO_COMPRA (propietario = MLR), one INGRESO_CONSIGNACION (propietario = supplier). Same truck, two documents.
+
+Clean: guia_tipo → propietario, no ambiguity
+Matches how accounting works — different treatment for purchased vs consignment
+Downside: two documents for one physical delivery
+2. Per-item flag in payload
+
+
+{ "item_id": 8, "cantidad": 25.00, "flg_consignacion": true }
+flg_consignacion = false → propietario = MLR
+flg_consignacion = true → propietario = supplier (from guia header)
+Simple boolean, not a full propietario_id — limits error surface
+3. Per-item propietario_id
+
+Most flexible, most error-prone. Overkill for a binary distinction.
+
+Recommendation: option 1
+Purchased and consignment goods have different accounting treatment, different return obligations, different valuation. Mixing them on one document creates problems downstream. Two guias from the same supplier on the same date is a minor inconvenience for the operator; untangling mixed ownership later is a real headache for accounting.
+
+If that's too rigid for your floor, option 2 is the fallback — a boolean is enough since the owner is either you or the sender.
+
+but how is it down actually? How does sap handle it how should I? a global flag in header then?
+How SAP does it
+SAP separates transport from inventory:
+
+Delivery note (transport): one document, mixed items, doesn't care about ownership
+Goods receipt (MIGO): separate document per movement type, which determines ownership:
+101 = goods receipt from PO → ownership transfers to you
+511 = consignment receipt → ownership stays with vendor
+Same truck, same delivery note, but two separate goods receipts. The movement type is on the header — not per line.
+
+For your system
+Your guia does both (transport + inventory). So the guia_tipo acts as SAP's movement type — header level, determines ownership for all items:
+
+guia_tipo	propietario
+INGRESO_COMPRA	MLR (you)
+INGRESO_CONSIGNACION	Supplier (from header)
+INGRESO_SERVICIO	Client (from header)
+EGRESO_*	derived from lot
+
+v_propietario_id := CASE v_guia_tipo.codigo
+    WHEN 'INGRESO_COMPRA' THEN v_empresa_id          -- MLR owns it
+    WHEN 'INGRESO_CONSIGNACION' THEN v_emisor_id      -- supplier still owns it
+    WHEN 'INGRESO_SERVICIO' THEN v_emisor_id           -- client's material for processing
+END;
+Header flag, not global flag. The guia_tipo IS the flag — no extra column needed. Mixed delivery from one supplier = two guias, same date, different type. Same as SAP would force two MIGO documents.
+
+okay so meanwhile id hake it rigid per guia type and afterwards add another document layer? Why not an on input prompt in the frontend "remitent owner" and add it to the payload?
+You're right, that's simpler. A propietario_id on the guia header covers it without multiplying guia types:
+
+
+{
+  "guia_tipo_id": "INGRESO",
+  "emisor_proveedor_id": 5,
+  "propietario_id": 5,        // supplier retains ownership (consignment)
+  // or
+  "propietario_id": null       // null = MLR owns it (purchase)
+  "items": [...]
+}
+Backend:
+
+
+v_propietario_id := COALESCE(
+    (p_guia->>'propietario_id')::INT,
+    v_empresa_id  -- default: MLR
+);
+One ingress type, one field. The frontend prompts "Owner?" with a default of your company. Operator selects the remitent if it's consignment/service, leaves default if it's a purchase.
+
+No extra guia types, no extra document layers, no rigidity. The lot gets the right propietario_id regardless, and downstream queries filter by owner when needed.
+
+that would still be part of the technical debt I already aswsumed of not having an intermediate material document layer
+Exactly. The guia is carrying two responsibilities — transport and inventory impact — because the material document layer doesn't exist yet. propietario_id on the guia header is the pragmatic patch for that.
+
+When you eventually add the material document layer, ownership moves there:
+
+
+guia_remision (transport)  →  documento_material (inventory)  →  lote
+    who sent what                movement type, ownership           propietario_id
+And the guia goes back to being just a transport document. The migration is clean — move propietario_id from guia to the new document and backfill from existing data.
+
+For now, ship it on the guia. You know where the seam is.

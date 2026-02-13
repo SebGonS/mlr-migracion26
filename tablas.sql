@@ -547,6 +547,8 @@ CREATE TABLE doc.partida_detalle(
     UNIQUE (partida_id, item_id)
 );
 
+
+
 CREATE TABLE doc.guia_remision_tipo(
     id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
@@ -636,6 +638,8 @@ CREATE TABLE doc.guia_remision (
 );
 CREATE TABLE inventario.lote (
   id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  secuencia int NOT NULL, -- sequential number for the item
+   item_id int NOT NULL REFERENCES item(id),
   item_id int REFERENCES item(id),
 --   guia_remision_detalle_id bigint references guia_remision_detalle(id), ---guia_remision_detalle si es ingreso externo
   documento_tipo TEXT,      -- e.g., 'guia_remision', 'partida', 'cuadre'
@@ -654,6 +658,11 @@ estado_calidad calidad_estado_enum DEFAULT 'PENDIENTE',
   fyh_mod TIMESTAMPTZ
 );
 
+ CREATE TABLE inventario.lote_secuencia_anual (
+    ano INT PRIMARY KEY,
+    ultimo_valor INT NOT NULL DEFAULT 0
+);
+   
 
 CREATE TABLE doc.guia_remision_detalle (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -919,13 +928,14 @@ CREATE TABLE mes.orden_produccion_item(  --production order table detail ¿MES T
     item_id int NOT NULL REFERENCES item(id),
     lote_id int NOT NULL REFERENCES inventario.lote(id), -- The specific roll of fabric
     ubicacion_id int NOT NULL REFERENCES inventario.ubicacion(id),
-    cantidad numeric(12,2) NOT NULL CHECK (cantidad > 0), -- How much of that roll is being used in this production order
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
   usr_mod int,
   fyh_mod TIMESTAMPTZ,
     UNIQUE(orden_produccion_id, lote_id, ubicacion_id) -- Prevent adding same roll twice
 );
+
+
 
 DROP TABLE IF EXISTS mes.orden_produccion_paso_item;
 CREATE TABLE mes.orden_produccion_paso_item (
@@ -1126,6 +1136,7 @@ GRANT SELECT ON doc.vw_compras TO authenticated;
 -- View for listing ordenes de producción with essential information
 -- This view provides a performant way to list orders with related data
 
+DROP VIEW IF EXISTS mes.vw_ordenes_produccion;
 CREATE OR REPLACE VIEW mes.vw_ordenes_produccion AS
 SELECT 
     op.id,
@@ -1213,8 +1224,9 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT 
         COUNT(*) AS total_materiales,
-        SUM(opi.peso_kg) AS cantidad_total_kg
+        SUM(l.cantidad) AS cantidad_total_kg
     FROM mes.orden_produccion_item opi
+    LEFT JOIN inventario.lote l ON l.id = opi.lote_id
     WHERE opi.orden_produccion_id = op.id
 ) materiales_stats ON true
 
