@@ -538,6 +538,8 @@ CREATE TABLE doc.partida_detalle(
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     partida_id bigint NOT NULL REFERENCES doc.partida(id),
     item_id int NOT NULL REFERENCES item(id),
+    cantidad numeric(12,2) NOT NULL CHECK (cantidad > 0),
+    unidad_id int NOT NULL REFERENCES unidad(id),
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
@@ -913,12 +915,11 @@ CREATE TABLE mes.orden_produccion_paso (
 ----items especificos procurados para la partida, NO producto final a ser producido si no items que requieran seguimiento a través del rpoceso de produccion 
 CREATE TABLE mes.orden_produccion_item(  --production order table detail ¿MES TABLE or public table? it contains the detail of which roll lot the partida is drawing from
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-   orden_produccion_id bigint NOT NULL REFERENCES mes.orden_produccion(id),
-   item_id int NOT NULL REFERENCES item(id),
+    orden_produccion_id bigint NOT NULL REFERENCES mes.orden_produccion(id),
+    item_id int NOT NULL REFERENCES item(id),
     lote_id int NOT NULL REFERENCES inventario.lote(id), -- The specific roll of fabric
     ubicacion_id int NOT NULL REFERENCES inventario.ubicacion(id),
-    peso_kg numeric(10,2),
-    cantidad int,
+    cantidad numeric(12,2) NOT NULL CHECK (cantidad > 0), -- How much of that roll is being used in this production order
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
   usr_mod int,
@@ -931,7 +932,6 @@ CREATE TABLE mes.orden_produccion_paso_item (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     orden_produccion_paso_id bigint NOT NULL REFERENCES mes.orden_produccion_paso(id),
     orden_produccion_item_id int NOT NULL REFERENCES mes.orden_produccion_item(id), -- Must be one of the IDs in partida_rollo
-    cantidad numeric(10,2) NOT NULL,
     flg_consumido bool DEFAULT false,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
