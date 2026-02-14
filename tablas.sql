@@ -340,23 +340,34 @@ VALUES
 ('DEV_PROV_EGR', 'Devolución Proveedor', 'DEVOLUCION', -1, 
  true, true, false, true, true, false, 
  'Salida por devolución a proveedor'),
--- RECEPCION DE CRUDO
-INSERT INTO inventario.item_movimiento_tipo
-(codigo, nombre, categoria, factor, flg_afecta_stock, flg_valorizable, flg_recalcula_costo, req_partner, req_origen, req_destino, descripcion)
-VALUES
+
+-- =====================
+-- SERVICIO / MAQUILA (Client's material, not valorizable)
+-- =====================
 ('SERV_ING', 'Servicio – Recepción Material Cliente', 'PROCESO_EXTERNO', 1, 
  true, false, false, true, false, true, 
- 'Recepción de material de cliente para servicio de teñido (maquila)');
+ 'Recepción de material de cliente para servicio de teñido (maquila)'),
+
+('SERV_EGR', 'Servicio – Despacho Material Cliente', 'PROCESO_EXTERNO', -1,
+ true, false, false, true, true, false,
+ 'Despacho de material procesado de vuelta al cliente (maquila)'),
+
+('SERV_DEV_ING', 'Servicio – Devolución Material Cliente', 'PROCESO_EXTERNO', 1,
+ true, false, false, true, false, true,
+ 'Cliente devuelve material procesado (reclamo de servicio)');
 
 -- =====================
 -- AJUSTES
 -- =====================
-('AJUSTE_POS', 'Ajuste Inventario (+)', 'AJUSTE', 1, 
- true, true, true, false, false, true, 
+INSERT INTO inventario.item_movimiento_tipo
+(codigo, nombre, categoria, factor, flg_afecta_stock, flg_valorizable, flg_recalcula_costo, req_partner, req_origen, req_destino, descripcion)
+VALUES
+('AJUSTE_POS', 'Ajuste Inventario (+)', 'AJUSTE', 1,
+ true, true, true, false, false, true,
  'Sobrante físico (puede recalcular costo si entra con costo 0 o específico)'),
 
-('AJUSTE_NEG', 'Ajuste Inventario (-)', 'AJUSTE', -1, 
- true, true, false, false, true, false, 
+('AJUSTE_NEG', 'Ajuste Inventario (-)', 'AJUSTE', -1,
+ true, true, false, false, true, false,
  'Faltante físico / Merma');
 
 CREATE TABLE insumo_tipo(
@@ -572,38 +583,34 @@ EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
 INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente)
 VALUES
-('COMPRA_INGRESO',          'Compra - Ingreso de materia insumos', false, false),
-('VENTA_EGRESO',            'Venta - Egreso de producto terminado', true, true),
-('CLIENTE_ENVIO_PROCESO',   'Cliente - Envío a proceso (rollos crudos a teñido)', false, true),
-('DESPACHO_CLIENTE',      'Devolución a cliente (producto terminado)', true, true),
-('DEVOLUCION_CLIENTE_CRUDO', 'Devolución a Cliente (rollos crudos)', true, true),
-('DEVOLUCION_PROVEEDOR',    'Devolución a proveedor', true, false);
+('COMPRA_INGRESO',           'Compra – Ingreso de insumos',                         false, false),
+('VENTA_EGRESO',             'Venta – Egreso de producto terminado',                 true,  true),
+('CLIENTE_ENVIO_PROCESO',    'Servicio – Recepción de material cliente',              false, true),
+('DESPACHO_CLIENTE',         'Servicio – Despacho de material procesado a cliente',   true,  true),
+('DEVOLUCION_CLIENTE_CRUDO', 'Devolución a cliente (rollos sin procesar)',            true,  true),
+('DEVOLUCION_PROVEEDOR',     'Devolución a proveedor',                               true,  false);
+
 UPDATE doc.guia_remision_tipo grt
 SET item_movimiento_tipo_id = imt.id
 FROM inventario.item_movimiento_tipo imt
 WHERE 
     (grt.codigo = 'COMPRA_INGRESO'           AND imt.codigo = 'COMPRA_ING')
  OR (grt.codigo = 'VENTA_EGRESO'             AND imt.codigo = 'VENTA_EGR')
- OR (grt.codigo = 'CLIENTE_ENVIO_PROCESO'    AND imt.codigo = 'SERV_ING')      -- NEW TYPE
- OR (grt.codigo = 'DESPACHO_CLIENTE'         AND imt.codigo = 'VENTA_EGR')     -- Service sold
+ OR (grt.codigo = 'CLIENTE_ENVIO_PROCESO'    AND imt.codigo = 'SERV_ING')
+ OR (grt.codigo = 'DESPACHO_CLIENTE'         AND imt.codigo = 'SERV_EGR')
  OR (grt.codigo = 'DEVOLUCION_CLIENTE_CRUDO' AND imt.codigo = 'DEV_CLI_EGR')
  OR (grt.codigo = 'DEVOLUCION_PROVEEDOR'     AND imt.codigo = 'DEV_PROV_EGR');
 
-INSERT INTO doc.guia_remision_tipo (
-  codigo,
-  nombre,
-  flg_emitida,
-  flg_cliente,
-  item_movimiento_tipo_id
-)
-SELECT
-  'DEVOLUCION_CLIENTE',
-  'Devolución de Cliente (producto terminado)',
-  false,
-  true,
-  imt.id
+INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente, item_movimiento_tipo_id)
+SELECT 'DEVOLUCION_CLIENTE_VENTA', 'Devolución de cliente (producto vendido)', false, true, imt.id
 FROM inventario.item_movimiento_tipo imt
 WHERE imt.codigo = 'DEV_CLI_ING';
+
+INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente, item_movimiento_tipo_id)
+SELECT 'DEVOLUCION_CLIENTE_SERVICIO', 'Devolución de cliente (material de servicio)', false, true, imt.id
+FROM inventario.item_movimiento_tipo imt
+WHERE imt.codigo = 'SERV_DEV_ING';
+
 
 
 -- CREATE TYPE guia_operacion_enum AS ENUM (
@@ -708,7 +715,6 @@ CREATE TABLE inventario.item_movimientos (
     origen_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
     destino_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
     cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
-    owner_id int,
     fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     documento_tipo TEXT,          -- 'GUIA', 'LOTE', 'AJUSTE', etc. DOCUMENT CAUSING THE MOVEMENT
@@ -717,8 +723,6 @@ CREATE TABLE inventario.item_movimientos (
     usr_cre int,
     fyh_cre timestamptz DEFAULT NOW()
 );
-
-
 
 CREATE SCHEMA mes;
 
@@ -1295,7 +1299,7 @@ SELECT
     un.codigo AS unidad,
     l.estado_calidad::text,
     (l.detalles->>'ancho')::numeric AS ancho,
-    (l.detalles->>'peso')::numeric AS peso,
+    l.cantidad AS peso,
     ird.articulo_id,
     art.articulo,
     ird.flg_tenido,
@@ -1321,6 +1325,54 @@ JOIN inventario.almacen a ON a.id = u.almacen_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
 LEFT JOIN cliente c ON c.id = l.propietario_id
 WHERE it.codigo = 'ROLLO'
+ORDER BY a.nombre, u.nombre, i.nombre;
+
+CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_despachados AS
+SELECT
+    l.id AS lote_id,
+EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0') AS lote_codigo,
+    l.item_id,
+    i.codigo AS item_codigo,
+    i.nombre AS item_nombre,
+    sa.ubicacion_id,
+    u.nombre AS ubicacion,
+    a.nombre AS almacen,
+    sa.cantidad_disponible,
+    un.codigo AS unidad,
+    l.estado_calidad::text,
+    (l.detalles->>'ancho')::numeric AS ancho,
+    l.cantidad AS peso,
+    ird.articulo_id,
+    art.articulo,
+    ird.flg_tenido,
+    ird.flg_rib,
+    ird.fibra,
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.cliente_id,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
+    c.id AS propietario_id,
+    c.cliente AS propietario
+FROM inventario.lote l
+LEFT JOIN inventario.vw_stock_actual sa ON l.id = sa.lote_id
+JOIN item i ON i.id = l.item_id
+JOIN item_tipo it ON it.id = i.item_tipo_id
+JOIN item_rollo_detalle ird ON ird.item_id = i.id
+JOIN articulo art ON art.id = ird.articulo_id
+JOIN unidad un ON un.id = i.unidad_id
+LEFT JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
+LEFT JOIN inventario.almacen a ON a.id = u.almacen_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
+LEFT JOIN cliente c ON c.id = l.propietario_id
+WHERE it.codigo = 'ROLLO' AND sa.cantidad_disponible IS NULL
+AND EXISTS (
+    SELECT 1 FROM inventario.item_movimientos im
+    JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+    WHERE im.lote_id = l.id
+      AND imt.codigo IN ('SERV_EGR')
+)
 ORDER BY a.nombre, u.nombre, i.nombre;
 
 

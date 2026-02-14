@@ -1382,8 +1382,6 @@ $function$;
 
 
 
-SELECT * FROM doc.guia_remision ORDER BY fyh_cre DESC
-
 CREATE OR REPLACE FUNCTION doc.crear_guia(p_guia jsonb)
 RETURNS text
 LANGUAGE plpgsql
@@ -1561,17 +1559,24 @@ ELSE
         v_guia_id
     FROM jsonb_array_elements(p_guia->'items') AS item
     WHERE item->>'lote_id' IS NOT NULL;
+    -- This is missing (detail line):
+INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, cantidad, lote_id)
+SELECT v_guia_id, (item->>'item_id')::INT, (item->>'cantidad')::NUMERIC, (item->>'lote_id')::INT
+FROM jsonb_array_elements(p_guia->'items') AS item
+WHERE item->>'lote_id' IS NOT NULL;
+    ---INSERSION de items sin lote existente (nuevos lotes) y registro de movimientos de ingreso al almacen
 WITH 
 expanded AS (
     SELECT
         (item->>'item_id')::INT AS item_id,
         (item->>'ubicacion_id')::INT AS ubicacion_id,
+        (item->>'cantidad')::NUMERIC AS cantidad,
         (item->>'cantidad')::NUMERIC 
             / (item->>'cantidad_rollos')::INT AS peso_estimado,
         (p_guia->>'propietario_id')::INT AS propietario_id
     FROM jsonb_array_elements(p_guia->'items') AS item
-    LATERAL generate_series(1, (item->>'cantidad_rollos')::INT)
-    --WHERE item->'cantidad_rollos' IS NOT NULL AND (item->>'lote_id') IS NULL -- only for items without lote_id (new lots) and with cantidad_rollos specified,
+    LEFT JOIN LATERAL generate_series(1, (item->>'cantidad_rollos')::INT) rollo_numero ON true
+    WHERE item->>'lote_id' IS NULL
 ),
 nuevos_lotes AS(
     INSERT INTO lote (
@@ -1586,27 +1591,33 @@ nuevos_lotes AS(
     item.item_id,
     'GUIA_REMISION',
     v_guia_id,
-    item.peso_estimado,
+    COALESCE(item.peso_estimado,item.cantidad), -- si hay cantidad de rollos, usar peso estimado, sino usar cantidad total (caso de no tener cantidad_rollos)
     NULL,
     item.propietario_id
     FROM expanded AS item
-    WHERE item->>'lote_id' IS NULL
-    RETURNING id,item_id
-) -- For received guides, create item movements as INGRESO to warehouse
+    RETURNING id,item_id,documento_tipo,documento_id,cantidad,propietario_id
+) -- Para guias recibidas con items sin lote_id, se crean nuevos lotes y se registra el movimiento de ingreso al almacen
+,detalles as(
+    INSERT INTO doc.guia_remision_detalle (guia_remision_id , item_id, cantidad,lote_id)
+    SELECT
+        v_guia_id,
+        nl.item_id,
+        nl.cantidad,
+        nl.id --id del lote recien creado
+        FROM nuevos_lotes nl
+)
 INSERT INTO inventario.item_movimientos (item_id, lote_id, item_movimiento_tipo_id, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id)
     SELECT
-        (item->>'item_id')::INT,
+        nl.item_id,
         nl.id, --id del lote recien creado
         v_guia_tipo.item_movimiento_tipo_id,
         NULL, -- origin is external
         (p_guia->>'destino_ubicacion_id')::INT,
-        (item->>'cantidad')::NUMERIC(12,2),
+        nl.cantidad,
         v_fecha_mov,
         'GUIA_REMISION',
         v_guia_id
-    FROM jsonb_array_elements(p_guia->'items') AS item
-    JOIN nuevos_lotes nl ON nl.item_id = (item->>'item_id')::INT
-    ;
+    FROM nuevos_lotes nl;
 END IF;
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
 SELECT ur.user_id,'Nueva Guia y movimientos', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva guía de remisión y generó movimientos de inventario', 'info',jsonb_build_object('objeto_tipo','guia_remision','guia_remision_id',v_guia_id)
