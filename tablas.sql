@@ -1583,6 +1583,8 @@ SELECT * FROM inventario.vw_stock_actual
 SELECT * FROM vw_items
 
 
+
+
 SELECT * FROM doc.partida
 
 CREATE VIEW inventario.vw_lotes_disponibles AS
