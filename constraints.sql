@@ -664,3 +664,9 @@ CREATE TRIGGER trg_bi_inspeccion_audit
 BEFORE INSERT ON calidad.inspeccion
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+
+CREATE TRIGGER trg_bi_inspeccion_audit
+BEFORE INSERT ON calidad.inspeccion
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();

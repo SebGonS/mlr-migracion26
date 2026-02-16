@@ -664,11 +664,11 @@ $function$;
 -- ═══════════════════════════════════════════════════════════════
 -- ACTUALIZAR PESOS DE ORDEN PRODUCCION ITEMS
 -- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION mes.actualizar_pesos_orden_items(p_orden_id BIGINT, p_items jsonb)
+CREATE OR REPLACE FUNCTION mes.actualizar_pesos_orden_items(p_orden_id BIGINT, p_peso int)
 RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'iam','public','mes'
+SET search_path TO 'iam','public','mes','inventario'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
@@ -690,21 +690,28 @@ BEGIN
     END IF;
 
     INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('actualizar_pesos_orden_items', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'items', p_items)::text);
+    VALUES ('actualizar_pesos_orden_items', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'peso', p_peso)::text);
+    
+    ---Confuigurar cantidad de items para proratear peso
+    SELECT COUNT(*)
+    INTO v_count
+    FROM mes.orden_produccion_item
+    WHERE orden_id = p_orden_id;
+
+    IF v_count = 0 THEN
+    RAISE EXCEPTION 'La orden % no tiene items', p_orden_id;
+    END IF;
+
+    p_peso := p_peso / v_count;
 
     -- Actualizar peso_kg para cada item
-    UPDATE mes.orden_produccion_item opi
-    SET peso_kg = (d.elem->>'peso_kg')::NUMERIC(10,2),
-        usr_mod = v_usr_id,
-        fyh_mod = NOW()
-    FROM (
-        SELECT elem
-        FROM jsonb_array_elements(p_items) AS elem
-    ) d
+    UPDATE inventario.lote 
+    SET cantidad = p_peso,
+        detalle = jsonb_set(detalle, '{fyh_peso}', to_jsonb(NOW()))
+    FROM mes.orden_produccion_item opi
     WHERE opi.orden_produccion_id = p_orden_id
-      AND opi.id = (d.elem->>'id')::BIGINT;
+      AND opi.lote_id = inventario.lote.id AND opi.item_id = inventario.lote.item_id AND opi.ubicacion_id = inventario.lote.ubicacion_id;
 
-    GET DIAGNOSTICS v_count = ROW_COUNT;
 
     RETURN format('%s pesos actualizados para orden #%s.', v_count, p_orden_id);
 
@@ -750,6 +757,11 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Paso #% no encontrado o no está EN_PROCESO | COMPLETADO o no esta marcado como paso final.', p_orden_paso_id;
     END IF;
+    
+    PERFORM 1
+    FROM doc.partida_detalle
+    WHERE partida_id = v_partida_id
+    FOR UPDATE;
 
     -- 2. Validate items exist in partida_detalle and quantity <= planned
     WITH solicitado AS (
@@ -757,14 +769,16 @@ BEGIN
         FROM jsonb_array_elements(p_output) i
     ),
     errores AS (
-        SELECT s.item_id, s.cantidad AS cantidad_solicitada, pd.cantidad AS cantidad_planificada
+        SELECT s.item_id, s.cantidad AS cantidad_solicitada,vppr.cantidad_rollos AS cantidad_producida, pd.cantidad AS cantidad_planificada
         FROM solicitado s
         LEFT JOIN doc.partida_detalle pd ON pd.partida_id = v_partida_id AND pd.item_id = s.item_id
-        WHERE pd.id IS NULL OR s.cantidad > pd.cantidad
+        LEFT JOIN mes.vw_partida_produccion_rollos vppr ON vppr.partida_id = v_partida_id AND vppr.item_id = s.item_id
+        WHERE pd.id IS NULL OR s.cantidad > pd.cantidad OR COALESCE(vppr.cantidad_rollos, 0)+s.cantidad > pd.cantidad
     )
     SELECT jsonb_agg(jsonb_build_object(
         'item_id', item_id,
         'cantidad_solicitada', cantidad_solicitada,
+        'cantidad_producida', cantidad_producida,
         'cantidad_planificada', cantidad_planificada
     ))
     INTO v_error_payload
@@ -825,12 +839,12 @@ BEGIN
     SELECT ur.user_id, 'Producción Registrada',
            COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
                      FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
-           || format(' registró %s lotes de producción en orden #%s', jsonb_array_length(p_output->'lotes'), v_orden_id), 'info',
+           || format(' registró %s lotes de producción en orden #%s', jsonb_array_length(p_output), v_orden_id), 'info',
            jsonb_build_object('objeto_tipo','orden_produccion','orden_produccion_id', v_orden_id)
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
     WHERE r.code IN ('jefe_planta','calidad') AND v_usr_id <> ur.user_id;
 
-    RETURN format('%s lotes creados para orden #%s.', jsonb_array_length(p_output->'lotes'), v_orden_id);
+    RETURN format('%s lotes creados para orden #%s.', jsonb_array_length(p_output), v_orden_id);
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;

@@ -976,6 +976,67 @@ CREATE TABLE calidad.inspeccion (
   fyh_cre TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE calidad.tipo_defecto (
+  id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  codigo text NOT NULL UNIQUE,          -- 'HILO_ROTO', 'MANCHA', 'TONO_DESIGUAL'...
+  codigo_canon TEXT NOT NULL,
+  UNIQUE (codigo_canon),
+  nombre text NOT NULL,
+  descripcion text,
+  severidad smallint DEFAULT 1,         -- 1=minor, 2=major, 3=critical
+  activo boolean DEFAULT true
+);
+CREATE TRIGGER trg_bi_tipo_defecto_codigo_canon
+BEFORE INSERT OR UPDATE ON calidad.tipo_defecto
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+INSERT INTO calidad.tipo_defecto (codigo, nombre, descripcion, severidad) VALUES
+-- Severity 1 = minor, 2 = major, 3 = critical
+
+-- The 3 you already know
+('LINEA',           'Línea / Raya',         'Línea visible en sentido de urdimbre o trama',           2),
+('MANCHA',          'Mancha',               'Mancha de aceite, óxido, suciedad u otro agente',        2),
+('HUECO',           'Hueco',                'Perforación o rotura en la tela',                        3),
+
+-- Yarn/knitting defects
+('HILO_ROTO',       'Hilo roto',            'Filamento o hilo cortado visible en la superficie',      2),
+('CAIDA_MALLA',     'Caída de malla',       'Malla suelta o corrida en tejido de punto',              3),
+('HILO_GRUESO',     'Hilo grueso / delgado','Variación de título de hilo visible',                    1),
+('CONTAMINACION',   'Contaminación / Fibra extraña', 'Fibra o material ajeno atrapado en el tejido',  2),
+
+-- Color/finish defects
+('TONO_DESIGUAL',   'Tono desigual',        'Variación de tono dentro del mismo rollo',               2),
+('BARRADO',         'Barrado',              'Franjas horizontales por diferencia de tensión o lote de hilo', 3),
+('PILLING',         'Pilling',              'Bolitas de fibra en la superficie',                      1),
+
+-- Dimensional / physical
+('PESO_FUERA_SPEC', 'Peso fuera de especificación', 'Gramaje (g/m²) fuera de tolerancia',             2),
+('ANCHO_FUERA_SPEC','Ancho fuera de especificación', 'Ancho del rollo fuera de tolerancia',           2),
+('ENCOGIMIENTO',    'Encogimiento excesivo', 'Encogimiento superior al permitido tras lavado/proceso', 3),
+
+-- Mechanical/process
+('ARRUGA',          'Arruga / Quiebre',     'Marca de pliegue permanente',                            1),
+('ORILLO_DEFECTUOSO','Orillo defectuoso',   'Orillo enrollado, cortado o irregular',                  1);
+
+CREATE TABLE calidad.inspeccion_defecto (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  inspeccion_id bigint NOT NULL REFERENCES calidad.inspeccion(id),
+  tipo_defecto_id smallint NOT NULL REFERENCES calidad.tipo_defecto(id),
+  cantidad smallint DEFAULT 1,          -- how many instances of this defect
+  observacion text                      -- specific notes for this defect
+);
+CREATE TABLE calidad.inspeccion_foto (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  inspeccion_defecto_id bigint NOT NULL REFERENCES calidad.inspeccion_defecto(id),
+  ruta_archivo text NOT NULL,           -- path/key in your storage (S3, local, etc.)
+  etiqueta text,                        -- pre-label: 'HILO_ROTO', 'MANCHA'...
+  observacion text,
+  usr_cre int,
+  fyh_cre timestamptz DEFAULT now()
+);
+
+
+
 CREATE TABLE mes.programacion (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     orden_produccion_paso_id bigint NOT NULL REFERENCES mes.orden_produccion_paso(id),
@@ -1286,7 +1347,8 @@ GRANT SELECT ON inventario.vw_stock_actual TO anon, authenticated;
 -- Stock disponible de rollos (teñidos y crudos)
 -- Builds on vw_stock_actual, joins lote for detalles + type-specific tables
 -- ============================================================
-CREATE OR REPLACE VIEW inventario.vw_stock_rollos AS
+
+CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_stock AS
 SELECT
     sa.lote_id,
     sa.item_id,
@@ -1412,19 +1474,136 @@ SELECT m.id,m.codigo,m.nombre,m.maquina_tipo_id,mt.codigo maquina_tipo_codigo,mt
 FROM mes.maquina m
 LEFT JOIN mes.maquina_tipo mt ON mt.id=m.maquina_tipo_id
 
+CREATE VIEW mes.vw_partida_produccion_rollos AS
+    SELECT p.id AS partida_id,l.item_id,vi.item_codigo,vi.item_nombre,COUNT(*) AS cantidad_rollos 
+    FROM inventario.lote l
+    JOIN vw_items vi ON vi.item_id = l.item_id AND vi.item_tipo_codigo = 'ROLLO'
+    JOIN mes.orden_produccion_paso opp ON opp.id = l.documento_id
+    JOIN mes.orden_produccion op ON op.id=opp.orden_produccion_id
+    JOIN doc.partida p ON op.partida_id=p.id
+    WHERE l.documento_tipo='ORDEN_PRODUCCION_PASO'
+    GROUP BY p.id ,l.item_id,vi.item_codigo,vi.item_nombre;
 
+CREATE OR REPLACE VIEW inventario.vw_stock_general AS
+SELECT vi.item_id,vi.item_codigo, vi.item_nombre,vi.item_tipo_id, vi.item_tipo_codigo,SUM(sa.cantidad_disponible) AS cantidad_total,vi.unidad_id,vi.unidad_codigo
+FROM inventario.vw_stock_actual sa
+LEFT JOIN vw_items vi ON vi.item_id=sa.item_id
+GROUP BY vi.item_id,vi.item_codigo, vi.item_nombre,vi.item_tipo_id, vi.item_tipo_codigo,vi.unidad_id,vi.unidad_codigo;
+
+CREATE OR REPLACE VIEW inventario.vw_stock_rollos AS
+WITH rollos AS(
+    SELECT 
+    sa.item_id,
+    i.codigo item_codigo,
+    i.nombre item_nombre,
+    op.partida_id,
+    COUNT(sa.lote_id) AS cantidad_rollos,
+    SUM(sa.cantidad_disponible) AS cantidad_total,
+    u.codigo AS unidad_codigo,
+    l.propietario_id,
+    l.estado_calidad
+    FROM inventario.vw_stock_actual sa
+    JOIN inventario.lote l ON l.id = sa.lote_id
+    LEFT JOIN mes.orden_produccion_paso opp ON documento_tipo='ORDEN_PRODUCCION_PASO' AND opp.id = l.documento_id 
+    LEFT JOIN mes.orden_produccion op ON opp.orden_produccion_id=op.id
+    JOIN item i ON i.id = sa.item_id
+    JOIN item_tipo it ON it.id = i.item_tipo_id
+    JOIN unidad u ON i.unidad_id=u.id
+    WHERE it.codigo = 'ROLLO'
+    GROUP BY sa.item_id,i.codigo ,i.nombre ,op.partida_id,u.codigo,l.propietario_id,l.estado_calidad
+)
+SELECT
+    r.item_id,
+    r.item_codigo,
+    r.item_nombre,
+    r.partida_id,
+    r.cantidad_rollos,
+    r.cantidad_total,
+    r.unidad_codigo,
+    r.estado_calidad,
+    ird.articulo_id,
+    art.articulo,
+    ird.flg_tenido,
+    ird.flg_rib,
+    ird.fibra,
+    p.tenido_id,
+    t.tenido,
+    p.ancho,
+    p.malla,
+    p.rendimiento,
+    p.flg_antipilling,
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.cliente_id,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
+    c.id AS propietario_id,
+    c.cliente AS propietario
+FROM rollos r
+JOIN item_rollo_detalle ird ON ird.item_id = r.item_id
+JOIN articulo art ON art.id = ird.articulo_id
+LEFT JOIN doc.partida p ON p.id=r.partida_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id=p.color_x_cliente_id
+LEFT JOIN cliente c ON c.id = r.propietario_id
+LEFT JOIN tenido t ON t.id = p.tenido_id
+ORDER BY art.articulo, r.item_nombre;
+
+CREATE VIEW inventario.vw_stock_insumos AS
+WITH insumos AS(
+    SELECT 
+    sa.item_id,
+    vi.item_codigo item_codigo,
+    vi.item_nombre item_nombre,
+    SUM(sa.cantidad_disponible) AS cantidad_total,
+    vi.unidad_codigo
+    FROM inventario.vw_stock_actual sa
+    JOIN vw_items vi ON vi.item_id = sa.item_id
+    WHERE vi.item_tipo_codigo='INSUMO'
+    GROUP BY sa.item_id,vi.item_codigo,vi.item_nombre,vi.unidad_codigo
+)
+SELECT 
+i.item_id,
+i.item_codigo,
+i.item_nombre,
+i.cantidad_total,
+i.unidad_codigo,
+iid.insumo_tipo_id,
+it.codigo insumo_tipo_codigo,
+it.nombre AS insumo_tipo_nombre,
+iid.colorante_tipo_id,
+ct.codigo colorante_tipo_codigo,
+ct.nombre AS colorante_tipo_nombre
+FROM insumos i 
+LEFT JOIN item_insumo_detalle iid ON iid.item_id=i.item_id
+LEFT JOIN insumo_tipo it ON it.id=iid.insumo_tipo_id
+LEFT JOIN colorante_tipo ct ON ct.id=iid.colorante_tipo_id;
+
+SELECT * FROM inventario.vw_stock_actual
+SELECT * FROM vw_items
+
+
+SELECT * FROM doc.partida
+
+CREATE VIEW inventario.vw_lotes_disponibles AS
+SELECT vi.item_id,vi.item_codigo, vi.item_nombre,vi.item_tipo_id, vi.item_tipo_codigo, sa.lote_id,sa.ubicacion_id,sa.cantidad_disponible,vi.unidad_id,vi.unidad_codigo
+FROM inventario.vw_stock_actual sa
+LEFT JOIN vw_items vi ON vi.item_id=sa.item_id
 
 
 GRANT SELECT ON inventario.vw_item_proveedor_guia TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_rollos TO anon, authenticated;
 GRANT USAGE ON SCHEMA mes TO authenticated;
-GRANT SELECT ON ALL TABLES IN SCHEMA mes TO authenticated;
+
 GRANT USAGE ON SCHEMA doc TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
-GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
-GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
+
 GRANT USAGE ON SCHEMA inventario TO authenticated;
 GRANT SELECT ON mes.operacion TO authenticated;
 GRANT SELECT ON mes.maquina TO authenticated;
 GRANT SELECT ON item_rollo_detalle TO authenticated;
 GRANT SELECT ON doc.partida_detalle TO authenticated;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA mes TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
