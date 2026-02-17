@@ -195,6 +195,7 @@ Complex frontend state sync	Frontend is source of truth
 Need optimistic updates	Simple: save = replace
 Want me to add this to your funciones.sql?*/
 
+
 CREATE OR REPLACE FUNCTION mes.generar_receta(p_paso_id BIGINT)
 RETURNS text
 LANGUAGE plpgsql
@@ -238,11 +239,10 @@ BEGIN
     END IF;
 
     -- 2. Machine info
-    SELECT m.nombre, m.codigo, m.adjustment_factor
-    INTO v_maq_nombre, v_maq_codigo, v_adjustment
+    SELECT m.nombre, m.codigo
+    INTO v_maq_nombre, v_maq_codigo
     FROM mes.maquina m
     WHERE m.id = v_maquina_id;
-
     -- 3. Roll aggregation
     SELECT SUM(l.cantidad), COUNT(*)
     INTO v_peso, v_cantidad
@@ -265,8 +265,8 @@ BEGIN
         'cliente', cli.cliente,
         'orden_produccion_id', op.id,
         'tipo_receta', tr.tipo_receta,
-        'articulo_id', r.articulo_id,
-        'articulo', a.articulo,
+        'tipo_articulo_id', r.tipo_articulo_id,
+        'tipo_articulo', a.tipo_articulo,
         'peso', v_peso,
         'cantidad', v_cantidad,
         'volumen', ROUND(v_volumen::NUMERIC, 2),
@@ -290,28 +290,29 @@ BEGIN
         'insumos', (
             SELECT jsonb_agg(
                 jsonb_build_object(
-                    'insumo_id', i.item_id,
+                    'insumo_id', i.id,
                     'codigo', i.codigo,
                     'insumo', i.nombre,
                     'cantidad', ri.cantidad,
-                    'medida', ri.medida,
+                    'medida', iid.medida,
                     'cantidad_requerida_kg', CASE
-                        WHEN ri.medida = 'g/L' THEN ri.cantidad  * v_volumen
-                        WHEN ri.medida = '%'   THEN ri.cantidad  * v_peso * 10
+                        WHEN iid.medida = 'g/L' THEN ri.cantidad  * v_volumen
+                        WHEN iid.medida = '%'   THEN ri.cantidad  * v_peso * 10
                     END
                 )
             )
             FROM receta_x_insumo ri
             JOIN item i ON ri.insumo_id = i.legacy_id
+            JOIN item_insumo_detalle iid ON iid.item_id=i.id
             WHERE ri.receta_id = r.id
         )
     ) INTO v_receta
     FROM orden_produccion_paso opp
-    LEFT JOIN receta2 r ON r.receta_id = opp.receta_id
+    LEFT JOIN receta2 r ON r.id = opp.receta_id
     LEFT JOIN orden_produccion op ON op.id = opp.orden_produccion_id
     LEFT JOIN doc.partida p ON p.id = op.partida_id
     LEFT JOIN tipo_receta tr ON tr.id = r.tipo_receta_id
-    LEFT JOIN articulo a ON a.id = r.articulo_id
+    LEFT JOIN tipo_articulo a ON a.id = r.tipo_articulo_id
     LEFT JOIN cliente cli ON cli.id = p.cliente_id
     WHERE opp.id = p_paso_id;
 
@@ -399,6 +400,97 @@ EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
     RAISE LOG 'Error in iniciar_paso - User: %, ID: %, Error: %', v_usr_id, p_paso_id, v_message;
+    RAISE;
+END;
+$function$;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- 23. REGISTRAR CONSUMO EN PASO (chemicals/auxiliaries)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.registrar_consumo_paso(p_paso_id BIGINT, p_consumos jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id    int := get_user_id();
+    v_consumos   jsonb;
+    v_saldo     numeric;
+    v_egr_tipo_id smallint;
+    v_error_payload jsonb;
+BEGIN
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_consumo_paso', v_usr_id, jsonb_build_object('paso_id', p_paso_id, 'consumos', p_consumos)::text);
+
+    SELECT id INTO v_egr_tipo_id
+    FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
+
+    WITH consumos AS (
+    SELECT
+        (i->>'item_id')::int AS item_id,
+        SUM((i->>'cantidad')::numeric) AS cantidad
+    FROM jsonb_array_elements(p_consumos) i
+    GROUP BY 1
+),
+errores AS (
+    SELECT
+        c.item_id,
+        it.nombre AS item_nombre,
+        c.cantidad,
+        COALESCE(SUM(sa.cantidad_disponible), 0) AS cantidad_disponible
+    FROM consumos c
+    LEFT JOIN inventario.vw_stock_actual sa
+        ON sa.item_id = c.item_id
+    JOIN inventario.item it
+        ON it.id = c.item_id
+    GROUP BY c.item_id, it.nombre, c.cantidad
+    HAVING COALESCE(SUM(sa.cantidad_disponible), 0) < c.cantidad
+)
+SELECT jsonb_agg(
+    jsonb_build_object(
+        'item_id', item_id,
+        'item_nombre', item_nombre,
+        'saldo_disponible', cantidad_disponible,
+        'cantidad_requerida', cantidad
+    )
+)
+INTO v_error_payload
+FROM errores;
+
+    IF v_error_payload IS NOT NULL THEN
+        RAISE EXCEPTION
+            'Stock insuficiente para emitir la guía'
+            USING
+                DETAIL  = v_error_payload::text;
+    END IF;
+
+v_consumos:= mes.calcular_fifo(p_consumos);
+        INSERT INTO inventario.item_movimientos(
+            item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, cantidad,
+            documento_tipo, documento_id, observacion
+        ) SELECT 
+            (v_consumo->>'item_id')::INT,
+            (v_consumo->>'lote_id')::INT,
+            v_egr_tipo_id,
+            (v_consumo->>'ubicacion_id')::INT,
+            (v_consumo->>'cantidad')::NUMERIC(12,2),
+            'ORDEN_PRODUCCION_PASO',
+            p_paso_id,
+            p_consumo->>'observacion'
+        FROM jsonb_array_elements(v_consumos) v_consumo
+        JOIN jsonb_array_elements(p_consumos) p_consumo
+        ON v_consumo->>'item_id' = p_consumo->>'item_id'
+        ;
+    RETURN format('%s consumos registrados para paso #%s.', jsonb_array_length(v_consumos), p_paso_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_consumo_paso - User: %, paso: %, Error: %, Detail: %',
+              v_usr_id, p_paso_id, v_message, v_detail;
     RAISE;
 END;
 $function$;
@@ -542,97 +634,6 @@ $function$;
 
 
 
-
-
--- ═══════════════════════════════════════════════════════════════
--- 23. REGISTRAR CONSUMO EN PASO (chemicals/auxiliaries)
--- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION mes.registrar_consumo_paso(p_paso_id BIGINT, p_consumos jsonb)
-RETURNS text
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'iam','public','inventario','mes'
-AS $function$
-DECLARE
-    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id    int := get_user_id();
-    v_consumos   jsonb;
-    v_saldo     numeric;
-    v_egr_tipo_id smallint;
-    v_error_payload jsonb;
-BEGIN
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('registrar_consumo_paso', v_usr_id, jsonb_build_object('paso_id', p_paso_id, 'consumos', p_consumos)::text);
-
-    SELECT id INTO v_egr_tipo_id
-    FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
-
-    WITH consumos AS (
-    SELECT
-        (i->>'item_id')::int AS item_id,
-        SUM((i->>'cantidad')::numeric) AS cantidad
-    FROM jsonb_array_elements(p_consumos) i
-    GROUP BY 1
-),
-errores AS (
-    SELECT
-        c.item_id,
-        it.nombre AS item_nombre,
-        c.cantidad,
-        COALESCE(SUM(sa.cantidad_disponible), 0) AS cantidad_disponible
-    FROM consumos c
-    LEFT JOIN inventario.vw_stock_actual sa
-        ON sa.item_id = c.item_id
-    JOIN inventario.item it
-        ON it.id = c.item_id
-    GROUP BY c.item_id, it.nombre, c.cantidad
-    HAVING COALESCE(SUM(sa.cantidad_disponible), 0) < c.cantidad
-)
-SELECT jsonb_agg(
-    jsonb_build_object(
-        'item_id', item_id,
-        'item_nombre', item_nombre,
-        'saldo_disponible', cantidad_disponible,
-        'cantidad_requerida', cantidad
-    )
-)
-INTO v_error_payload
-FROM errores;
-
-    IF v_error_payload IS NOT NULL THEN
-        RAISE EXCEPTION
-            'Stock insuficiente para emitir la guía'
-            USING
-                DETAIL  = v_error_payload::text;
-    END IF;
-
-v_consumos:= mes.calcular_fifo(p_consumos);
-        INSERT INTO inventario.item_movimientos(
-            item_id, lote_id, item_movimiento_tipo_id,
-            origen_ubicacion_id, cantidad,
-            documento_tipo, documento_id, observacion
-        ) SELECT 
-            (v_consumo->>'item_id')::INT,
-            (v_consumo->>'lote_id')::INT,
-            v_egr_tipo_id,
-            (v_consumo->>'ubicacion_id')::INT,
-            (v_consumo->>'cantidad')::NUMERIC(12,2),
-            'ORDEN_PRODUCCION_PASO',
-            p_paso_id,
-            p_consumo->>'observacion'
-        FROM jsonb_array_elements(v_consumos) v_consumo
-        JOIN jsonb_array_elements(p_consumos) p_consumo
-        ON v_consumo->>'item_id' = p_consumo->>'item_id'
-        ;
-    RETURN format('%s consumos registrados para paso #%s.', jsonb_array_length(v_consumos), p_paso_id);
-EXCEPTION WHEN OTHERS THEN
-    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
-        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in registrar_consumo_paso - User: %, paso: %, Error: %, Detail: %',
-              v_usr_id, p_paso_id, v_message, v_detail;
-    RAISE;
-END;
-$function$;
 
 -- ═══════════════════════════════════════════════════════════════
 -- 24. REGISTRAR ITEMS PROCESADOS EN PASO (roll tracking)

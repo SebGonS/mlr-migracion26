@@ -1668,6 +1668,33 @@ LEFT JOIN inventario.lote l ON l.id = i.lote_id
 LEFT JOIN vw_items vi ON vi.item_id = l.item_id
 LEFT JOIN mes.empleado e ON e.id = i.empleado_id;
 
+CREATE OR REPLACE VIEW mes.vw_pasos AS
+SELECT 
+opp.id AS paso_id,
+opp.secuencia,
+opp.orden_produccion_id,
+op.partida_id,
+p.numero AS partida_numero,
+EXTRACT(YEAR FROM p.fyh_cre) || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
+opp.operacion_id,
+o.codigo AS operacion_codigo,
+o.nombre AS operacion_nombre,
+o.requiere_receta,
+o.requiere_maquina,
+opp.maquina_asignada_id,
+opp.receta_id,
+m.codigo AS maquina_codigo,
+m.nombre AS maquina_nombre,
+opp.estado,
+opp.fyh_inicio,
+opp.fyh_fin,
+opp.flg_final
+FROM mes.orden_produccion_paso opp
+JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+JOIN doc.partida p ON p.id = op.partida_id
+JOIN mes.operacion o ON o.id = opp.operacion_id
+LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id;
+
 -- Allow authenticated users to insert photo records
 -- CREATE POLICY "calidad_inspeccion_foto_insert" 
 -- ON calidad.inspeccion_foto
