@@ -212,6 +212,8 @@ DECLARE
     v_rb            numeric;
     v_peso          numeric;
     v_cantidad      numeric;
+    v_cantidad_regular numeric;
+    v_cantidad_rib  numeric;
     v_volumen       numeric;
     v_usr_id        int := get_user_id();
     v_orden_id      bigint;
@@ -223,11 +225,12 @@ DECLARE
     v_sqlstate      text;
 BEGIN
     -- 1. Validate paso, get receta + machine + relacion_bano
-    SELECT opp.receta_id, opp.maquina_asignada_id, opp.relacion_bano,
+    SELECT opp.receta_id, opp.maquina_asignada_id, COALESCE(opp.relacion_bano,m.relacion_bano),
            opp.orden_produccion_id, o.nombre
     INTO v_receta_id, v_maquina_id, v_rb, v_orden_id, v_op_nombre
     FROM mes.orden_produccion_paso opp
     LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
+    LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id
     WHERE opp.id = p_paso_id;
 
     IF NOT FOUND THEN
@@ -244,12 +247,15 @@ BEGIN
     FROM mes.maquina m
     WHERE m.id = v_maquina_id;
     -- 3. Roll aggregation
-    SELECT SUM(l.cantidad), COUNT(*)
-    INTO v_peso, v_cantidad
+    SELECT SUM(l.cantidad), SUM(CASE ird.flg_rib WHEN false THEN 1 ELSE 0 END) cantidad_regular, SUM(CASE ird.flg_rib WHEN true THEN 1 ELSE 0 END) cantidad_rib
+    INTO v_peso, v_cantidad_regular, v_cantidad_rib
     FROM mes.orden_produccion_paso_item oppi
     JOIN mes.orden_produccion_item opi ON oppi.orden_produccion_item_id = opi.id
     JOIN inventario.lote l ON opi.lote_id=l.id
+    JOIN item_rollo_detalle ird ON ird.item_id=l.item_id
     WHERE oppi.orden_produccion_paso_id = p_paso_id;
+
+    v_cantidad:= v_cantidad_regular + v_cantidad_rib;
 
     -- 4. Volumen
     v_volumen := CASE
@@ -269,6 +275,8 @@ BEGIN
         'tipo_articulo', a.tipo_articulo,
         'peso', v_peso,
         'cantidad', v_cantidad,
+        'cantidad_regular', v_cantidad_regular,
+        'cantidad_rib', v_cantidad_rib,
         'volumen', ROUND(v_volumen::NUMERIC, 2),
         'maquina', jsonb_build_object(
             'id', v_maquina_id,
@@ -291,6 +299,7 @@ BEGIN
             SELECT jsonb_agg(
                 jsonb_build_object(
                     'insumo_id', i.id,
+                    'orden', ri.orden,
                     'codigo', i.codigo,
                     'insumo', i.nombre,
                     'cantidad', ri.cantidad,
@@ -423,7 +432,7 @@ DECLARE
     v_error_payload jsonb;
 BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('registrar_consumo_paso', v_usr_id, jsonb_build_object('paso_id', p_paso_id, 'consumos', p_consumos)::text);
+    VALUES ('registrar_consumo_paso', v_usr_id, jsonb_build_object('paso_id', p_paso_id, 'consumos', p_consumos));
 
     SELECT id INTO v_egr_tipo_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
@@ -444,7 +453,7 @@ errores AS (
     FROM consumos c
     LEFT JOIN inventario.vw_stock_actual sa
         ON sa.item_id = c.item_id
-    JOIN inventario.item it
+    JOIN item it
         ON it.id = c.item_id
     GROUP BY c.item_id, it.nombre, c.cantidad
     HAVING COALESCE(SUM(sa.cantidad_disponible), 0) < c.cantidad
@@ -647,7 +656,7 @@ AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id int := get_user_id();
-
+    v_deleted int;
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM mes.orden_produccion_paso
@@ -657,16 +666,21 @@ BEGIN
     END IF;
 
     INSERT INTO mes.orden_produccion_paso_item(
-        orden_produccion_paso_id, orden_produccion_item_id, flg_consumido
+        orden_produccion_paso_id, orden_produccion_item_id
     )
     SELECT p_paso_id,
-           (i->>'orden_produccion_item_id')::INT,
-           COALESCE((i->>'flg_consumido')::BOOLEAN, false)
+           (i->>'orden_produccion_item_id')::INT
     FROM jsonb_array_elements(p_items) i
     ON CONFLICT (orden_produccion_paso_id, orden_produccion_item_id)
-    DO UPDATE SET flg_consumido = EXCLUDED.flg_consumido, usr_mod = v_usr_id, fyh_mod = NOW();
-
-    RETURN format('%s items procesados registrados para paso #%s.', jsonb_array_length(p_items), p_paso_id);
+    DO UPDATE SET usr_mod = v_usr_id, fyh_mod = NOW();
+    DELETE FROM mes.orden_produccion_paso_item
+    WHERE orden_produccion_paso_id = p_paso_id
+      AND orden_produccion_item_id NOT IN (
+          SELECT (i->>'orden_produccion_item_id')::INT
+          FROM jsonb_array_elements(p_items) i
+      );
+      GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    RETURN format('%s items procesados registrados para paso #%s. %s items eliminados.', jsonb_array_length(p_items), p_paso_id, v_deleted);
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
@@ -705,7 +719,7 @@ BEGIN
     END IF;
 
     INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('actualizar_pesos_orden_items', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'peso', p_peso)::text);
+    VALUES ('actualizar_pesos_orden_items', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'peso', p_peso));
     
     ---Confuigurar cantidad de items para proratear peso
     SELECT COUNT(*)
@@ -760,7 +774,7 @@ DECLARE
     v_error_payload jsonb;
 BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('registrar_produccion', v_usr_id, jsonb_build_object('orden_paso_id', p_orden_paso_id, 'output', p_output)::text);
+    VALUES ('registrar_produccion', v_usr_id, jsonb_build_object('orden_paso_id', p_orden_paso_id, 'output', p_output));
 
     -- 1. Paso must be EN_PROCESO; derive orden and partida
     SELECT opp.orden_produccion_id, op.partida_id

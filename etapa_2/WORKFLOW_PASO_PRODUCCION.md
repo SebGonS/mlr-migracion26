@@ -86,8 +86,7 @@ POST → generar_receta(paso_id) → returns JSONB
 
 While the step is in process, the operator MAY:
 
-- **Update items processed** (`registrar_items_procesados`): Adjust roll tracking if needed (e.g., mark `flg_consumido`).
-
+- **Update items processed** (`registrar_items_procesados`): Adjust roll tracking if needed 
 ---
 
 ## 3. `finalizar_paso(paso_id, datos)` — Main workflow event

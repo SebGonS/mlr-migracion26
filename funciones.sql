@@ -808,8 +808,7 @@ BEGIN
                                     SELECT jsonb_agg(
                                         jsonb_build_object(
                                             'id', oppi.id,
-                                            'orden_produccion_item_id', oppi.orden_produccion_item_id,
-                                            'flg_consumido', oppi.flg_consumido
+                                            'orden_produccion_item_id', oppi.orden_produccion_item_id
                                         ) ORDER BY oppi.id
                                     )
                                     FROM mes.orden_produccion_paso_item oppi
@@ -1036,8 +1035,9 @@ WITH orden_rollos AS (
            (p->>'ph')::NUMERIC,
            (p->>'temperatura')::NUMERIC,
            (p->>'tiempo_estandar')::INT,
-           (p->>'relacion_bano')::NUMERIC
-    FROM jsonb_array_elements(p_orden->'pasos') p;
+           COALESCE((p->>'relacion_bano')::NUMERIC,m.relacion_bano)
+    FROM jsonb_array_elements(p_orden->'pasos') p
+    LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT;
 
     -- Notification (before RETURN)
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
@@ -1194,8 +1194,7 @@ BEGIN
                         SELECT jsonb_agg(
                             jsonb_build_object(
                                 'id',                        oppi.id,
-                                'orden_produccion_item_id',  oppi.orden_produccion_item_id,
-                                'flg_consumido',             oppi.flg_consumido
+                                'orden_produccion_item_id',  oppi.orden_produccion_item_id
                             ) ORDER BY oppi.id
                         )
                         FROM mes.orden_produccion_paso_item oppi
@@ -1224,7 +1223,7 @@ BEGIN
                     'item_codigo',     vi_mat.item_codigo,
                     'item_nombre',     vi_mat.item_nombre,
                     'ubicacion_id',    opi.ubicacion_id,
-                    'cantidad', l.cantidad,
+                    'cantidad',        l.cantidad,
                     'unidad',          vi_mat.unidad_codigo,
                     'ubicacion',       ubic.nombre,
                     'almacen',         alm.nombre,
@@ -1746,9 +1745,10 @@ BEGIN
             (p->>'ph')::NUMERIC               AS ph,
             (p->>'temperatura')::NUMERIC      AS temperatura,
             (p->>'tiempo_estandar')::INT      AS tiempo_estandar,
-            (p->>'relacion_bano')::NUMERIC    AS relacion_bano,
+            COALESCE((p->>'relacion_bano')::NUMERIC,m.relacion_bano) AS relacion_bano,
             (p->>'flg_final')::BOOL           AS flg_final
         FROM jsonb_array_elements(p_pasos) p
+        LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT
     )
     INSERT INTO mes.orden_produccion_paso(
         orden_produccion_id, secuencia, operacion_id,
@@ -1773,7 +1773,8 @@ BEGIN
         relacion_bano      = EXCLUDED.relacion_bano,
         flg_final          = EXCLUDED.flg_final,
         usr_mod            = v_usr_id,
-        fyh_mod            = NOW();
+        fyh_mod            = NOW()
+        WHERE mes.orden_produccion_paso.estado = 'PENDIENTE';
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
 

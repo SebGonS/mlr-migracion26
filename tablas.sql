@@ -499,7 +499,6 @@ CREATE TABLE inventario.ubicacion (
 --   AND contype = 'u';
 --   ALTER TABLE inventario.ubicacion
 -- DROP CONSTRAINT ubicacion_codigo_key;
-
 CREATE TRIGGER trg_bi_ubicacion_codigo_canon
 BEFORE INSERT OR UPDATE ON inventario.ubicacion
 FOR EACH ROW
@@ -966,7 +965,6 @@ CREATE TABLE mes.orden_produccion_paso_item (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     orden_produccion_paso_id bigint NOT NULL REFERENCES mes.orden_produccion_paso(id),
     orden_produccion_item_id int NOT NULL REFERENCES mes.orden_produccion_item(id), -- Must be one of the IDs in partida_rollo
-    flg_consumido bool DEFAULT false,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
   usr_mod int,
@@ -1607,10 +1605,14 @@ SELECT * FROM vw_items
 
 SELECT * FROM doc.partida
 
-CREATE VIEW inventario.vw_lotes_disponibles AS
-SELECT vi.item_id,vi.item_codigo, vi.item_nombre,vi.item_tipo_id, vi.item_tipo_codigo, sa.lote_id,sa.ubicacion_id,sa.cantidad_disponible,vi.unidad_id,vi.unidad_codigo
+CREATE OR REPLACE VIEW inventario.vw_lotes_disponibles AS
+SELECT vi.item_id,vi.item_codigo, vi.item_nombre,vi.item_tipo_id, vi.item_tipo_codigo, 
+sa.lote_id,
+EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0') AS lote_codigo,
+sa.ubicacion_id,sa.cantidad_disponible,vi.unidad_id,vi.unidad_codigo
 FROM inventario.vw_stock_actual sa
 LEFT JOIN vw_items vi ON vi.item_id=sa.item_id
+LEFT JOIN inventario.lote l ON l.id=sa.lote_id;
 
 DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion;
 CREATE OR REPLACE VIEW calidad.vw_lotes_pendientes_inspeccion AS
