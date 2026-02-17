@@ -666,7 +666,8 @@ BEGIN
                 'item_codigo', vi.item_codigo,
                 'item_nombre', vi.item_nombre,
                 'cantidad', pd.cantidad,
-                'unidad', u.codigo
+                'unidad', u.codigo,
+                'unidad_id',u.id
             ) ORDER BY pd.id)
             FROM doc.partida_detalle pd
             LEFT JOIN vw_items vi ON vi.item_id = pd.item_id  -- ✅ FIXED
@@ -808,7 +809,6 @@ BEGIN
                                         jsonb_build_object(
                                             'id', oppi.id,
                                             'orden_produccion_item_id', oppi.orden_produccion_item_id,
-                                            'cantidad', oppi.cantidad,
                                             'flg_consumido', oppi.flg_consumido
                                         ) ORDER BY oppi.id
                                     )
@@ -835,8 +835,7 @@ BEGIN
                                 'item_id', l.item_id,
                                 'item_codigo', vi_mat.item_codigo,
                                 'item_nombre', vi_mat.item_nombre,
-                                'cantidad', opi.cantidad,
-                                'peso_kg', opi.peso_kg,
+                                'peso_kg', l.cantidad,
                                 'unidad', vi_mat.unidad_codigo,
                                 'detalles', l.detalles,
                                 'estado_calidad', l.estado_calidad
@@ -1132,7 +1131,7 @@ BEGIN
                     'operacion_id',         opp.operacion_id,
                     'operacion_codigo',     o.codigo,
                     'operacion_nombre',     o.nombre,
-
+                    'operacion_requiere_receta', o.requiere_receta,
                     -- Recursos
                     'maquina_asignada_id',  opp.maquina_asignada_id,
                     'maquina_nombre',       maq.nombre,

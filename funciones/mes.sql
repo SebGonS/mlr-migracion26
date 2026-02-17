@@ -212,11 +212,21 @@ DECLARE
     v_peso          numeric;
     v_cantidad      numeric;
     v_volumen       numeric;
+    v_usr_id        int := get_user_id();
+    v_orden_id      bigint;
+    v_op_nombre     text;
+    v_message       text;
+    v_detail        text;
+    v_hint          text;
+    v_context       text;
+    v_sqlstate      text;
 BEGIN
     -- 1. Validate paso, get receta + machine + relacion_bano
-    SELECT opp.receta_id, opp.maquina_asignada_id, opp.relacion_bano
-    INTO v_receta_id, v_maquina_id, v_rb
+    SELECT opp.receta_id, opp.maquina_asignada_id, opp.relacion_bano,
+           opp.orden_produccion_id, o.nombre
+    INTO v_receta_id, v_maquina_id, v_rb, v_orden_id, v_op_nombre
     FROM mes.orden_produccion_paso opp
+    LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
     WHERE opp.id = p_paso_id;
 
     IF NOT FOUND THEN
@@ -234,10 +244,11 @@ BEGIN
     WHERE m.id = v_maquina_id;
 
     -- 3. Roll aggregation
-    SELECT SUM(oppi.cantidad * opi.peso_kg / opi.cantidad), SUM(oppi.cantidad)
+    SELECT SUM(l.cantidad), COUNT(*)
     INTO v_peso, v_cantidad
     FROM mes.orden_produccion_paso_item oppi
     JOIN mes.orden_produccion_item opi ON oppi.orden_produccion_item_id = opi.id
+    JOIN inventario.lote l ON opi.lote_id=l.id
     WHERE oppi.orden_produccion_paso_id = p_paso_id;
 
     -- 4. Volumen
@@ -305,21 +316,20 @@ BEGIN
     WHERE opp.id = p_paso_id;
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
-    SELECT ur.user_id, 'Paso Iniciado',
+    SELECT ur.user_id, 'Receta Generada',
            COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
                      FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
-           || format(' inició el paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
+           || format(' generó la receta del paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
            jsonb_build_object('objeto_tipo','orden_produccion_paso','paso_id', p_paso_id, 'orden_produccion_id', v_orden_id)
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
     WHERE r.code IN ('jefe_planta','supervisor_produccion') AND v_usr_id <> ur.user_id;
-
 
     RETURN v_receta;
 
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in iniciar_paso - User: %, ID: %, Error: %', v_usr_id, p_paso_id, v_message;
+    RAISE LOG 'Error in generar_receta - User: %, ID: %, Error: %', v_usr_id, p_paso_id, v_message;
     RAISE;
 END;
 $function$;
@@ -353,7 +363,7 @@ BEGIN
     IF v_estado <> 'PENDIENTE' THEN
         RAISE EXCEPTION 'Solo se puede iniciar un paso en estado PENDIENTE. Estado actual: %', v_estado;
     END IF;
-    IF EXISTS (SELECT 1 FROM mes.orden_produccion_paso WHERE secuencia < v_secuencia AND orden_id=v_orden_id AND estado NOT IN ('COMPLETADO', 'CANCELADO','OMITIDO')) THEN
+    IF EXISTS (SELECT 1 FROM mes.orden_produccion_paso WHERE secuencia < v_secuencia AND orden_produccion_id=v_orden_id AND estado NOT IN ('COMPLETADO','OMITIDO')) THEN
         RAISE EXCEPTION 'No se puede iniciar el paso % porque hay pasos anteriores no completados.', v_op_nombre;
     END IF;
 
@@ -422,6 +432,11 @@ BEGIN
     END IF;
     IF v_estado <> 'EN_PROCESO' THEN
         RAISE EXCEPTION 'Solo se puede finalizar un paso EN_PROCESO. Estado actual: %', v_estado;
+    END IF;
+
+    -- Process consumptions (recipe + manual) if provided
+    IF p_datos->'consumos' IS NOT NULL AND jsonb_array_length(p_datos->'consumos') > 0 THEN
+        PERFORM mes.registrar_consumo_paso(p_paso_id, p_datos->'consumos');
     END IF;
 
     UPDATE mes.orden_produccion_paso
@@ -635,21 +650,20 @@ DECLARE
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM mes.orden_produccion_paso
-        WHERE id = p_paso_id AND estado = 'EN_PROCESO'
+        WHERE id = p_paso_id AND estado IN ('PENDIENTE', 'EN_PROCESO', 'COMPLETADO')
     ) THEN
-        RAISE EXCEPTION 'Solo se pueden registrar items en un paso EN_PROCESO. Paso #% no encontrado o en estado incorrecto.', p_paso_id;
+        RAISE EXCEPTION 'Paso #% no encontrado o en estado que no permite registrar items.', p_paso_id;
     END IF;
 
     INSERT INTO mes.orden_produccion_paso_item(
-        orden_produccion_paso_id, orden_produccion_item_id, cantidad
+        orden_produccion_paso_id, orden_produccion_item_id, flg_consumido
     )
     SELECT p_paso_id,
            (i->>'orden_produccion_item_id')::INT,
-           (i->>'cantidad')::NUMERIC(10,2),
-           (i->>'flg_consumido')::BOOLEAN
+           COALESCE((i->>'flg_consumido')::BOOLEAN, false)
     FROM jsonb_array_elements(p_items) i
     ON CONFLICT (orden_produccion_paso_id, orden_produccion_item_id)
-    DO UPDATE SET cantidad = EXCLUDED.cantidad, flg_consumido = EXCLUDED.flg_consumido;
+    DO UPDATE SET flg_consumido = EXCLUDED.flg_consumido, usr_mod = v_usr_id, fyh_mod = NOW();
 
     RETURN format('%s items procesados registrados para paso #%s.', jsonb_array_length(p_items), p_paso_id);
 EXCEPTION WHEN OTHERS THEN

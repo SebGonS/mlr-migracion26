@@ -1,5 +1,5 @@
 CREATE OR REPLACE FUNCTION calidad.crear_inspeccion(p_inspeccion jsonb)
-RETURNS text
+RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO 'iam','notification','public','calidad','inventario','mes'
@@ -23,17 +23,33 @@ BEGIN
         (p_inspeccion->>'orden_produccion_paso_id')::BIGINT,
         (p_inspeccion->>'resultado')::calidad_estado_enum,
         p_inspeccion->>'observacion',
-        (p_inspeccion->>'empleado_id')::INT,
+        (p_inspeccion->>'empleado_id')::INT
     )
     RETURNING id INTO v_inspeccion_id;
 
-    -- Children: defectos
-    INSERT INTO calidad.inspeccion_defecto (inspeccion_id, tipo_defecto_id, cantidad, observacion)
-    SELECT v_inspeccion_id,
-           (d->>'tipo_defecto_id')::SMALLINT,
-           COALESCE((d->>'cantidad')::SMALLINT, 1),
-           d->>'observacion'
-    FROM jsonb_array_elements(p_inspeccion->'defectos') AS d;
+    -- Children: defectos + fotos (fotos nested inside each defecto in the JSON)
+    WITH defectos_inserted AS (
+        INSERT INTO calidad.inspeccion_defecto (inspeccion_id, tipo_defecto_id, cantidad, observacion)
+        SELECT v_inspeccion_id,
+               (d.value->>'tipo_defecto_id')::SMALLINT,
+               COALESCE((d.value->>'cantidad')::SMALLINT, 1),
+               d.value->>'observacion'
+        FROM jsonb_array_elements(p_inspeccion->'defectos') WITH ORDINALITY AS d(value, ordinality)
+        ORDER BY d.ordinality
+        RETURNING id
+    ),
+    defectos_mapped AS (
+        SELECT id, ROW_NUMBER() OVER () AS idx
+        FROM defectos_inserted
+    )
+    INSERT INTO calidad.inspeccion_foto (inspeccion_defecto_id, ruta_archivo, etiqueta, observacion)
+    SELECT dm.id,
+           f->>'ruta_archivo',
+           f->>'etiqueta',
+           f->>'observacion'
+    FROM jsonb_array_elements(p_inspeccion->'defectos') WITH ORDINALITY AS d(value, ordinality)
+    JOIN defectos_mapped dm ON dm.idx = d.ordinality
+    CROSS JOIN LATERAL jsonb_array_elements(d.value->'fotos') AS f;
 
     -- Update lote quality status
     UPDATE inventario.lote
@@ -54,7 +70,15 @@ BEGIN
     LEFT JOIN iam.rol r ON ur.rol_id = r.id
     WHERE r.code IN ('jefe_planta','calidad') AND v_usr_id <> ur.user_id;
 
-    RETURN format('Inspección con ID %s creada correctamente.', v_inspeccion_id);
+   RETURN jsonb_build_object(
+    'inspeccion_id', v_inspeccion_id,
+    'defecto_ids', (
+        SELECT jsonb_agg(id ORDER BY id) 
+        FROM calidad.inspeccion_defecto 
+        WHERE inspeccion_id = v_inspeccion_id
+    ),
+    'message', format('Inspección %s creada', v_inspeccion_id)
+);
 
 EXCEPTION
     WHEN OTHERS THEN
@@ -69,6 +93,11 @@ EXCEPTION
         RAISE;
 END;
 $function$;
+
+
+SELECT * FROM doc.partida_detalle where partida_id=3858;
+SELECT * FROm inventario.vw_lotes_rollos_stock WHERE item_id=91
+SELECT * FROm inventario.vw_lotes_rollos_stock WHERE articulo_id=32
 
 
 CREATE OR REPLACE FUNCTION calidad.get_inspeccion(p_inspeccion_id BIGINT)

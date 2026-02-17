@@ -17,6 +17,26 @@
 ----A futuro separar movimientos de los documentos de negocio
 ---Crear capa de "documentos de movimiento" con motivo explicito en vez de derivarlo
 
+-- Create the bucket (run in SQL editor or use dashboard)
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('calidad', 'calidad', false);
+-- Allow authenticated users to upload to calidad bucket
+CREATE POLICY "Usuarios pueden subir iamgenes de QC"
+ON storage.objects FOR INSERT
+TO authenticated
+WITH CHECK (bucket_id = 'calidad');
+
+-- Allow authenticated users to view QC images
+CREATE POLICY "Usuarios pueden ver iamgenes de QC"
+ON storage.objects FOR SELECT
+TO authenticated
+USING (bucket_id = 'calidad');
+
+-- Optional: Allow deletion (maybe restrict to creator or admin)
+CREATE POLICY "Usuarios pueden borrar iamgenes de QC propios"
+ON storage.objects FOR DELETE
+TO authenticated
+USING (bucket_id = 'calidad' AND auth.uid()::text = owner_id::text);
 
 
 ALTER TABLE color
@@ -1592,14 +1612,75 @@ SELECT vi.item_id,vi.item_codigo, vi.item_nombre,vi.item_tipo_id, vi.item_tipo_c
 FROM inventario.vw_stock_actual sa
 LEFT JOIN vw_items vi ON vi.item_id=sa.item_id
 
+DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion;
+CREATE OR REPLACE VIEW calidad.vw_lotes_pendientes_inspeccion AS
+SELECT  
+l.id AS lote_id,
+EXTRACT(YEAR FROM l.fyh_cre) || '-'|| l.secuencia AS lote_codigo,
+l.item_id,
+vi.item_codigo,
+vi.item_nombre,
+l.documento_tipo,
+l.documento_id,
+opp.id orden_produccion_paso_id,
+m.id as maquina_id,
+m.codigo  as maquina_codigo,
+o.id as operacion_id,
+o.codigo as operacion_codigo,
+p.id AS partida_id,
+EXTRACT(YEAR FROM p.fyh_cre) || '-'|| p.numero AS partida_codigo,
+p.ancho,
+p.rendimiento,
+p.malla,
+p.flg_antipilling,
+p.prioridad_id,
+pr.prioridad,
+l.propietario_id,
+c.cliente cliente_nombre,
+l.fyh_cre fecha_creacion_lote
+FROM inventario.lote l
+LEFT JOIN vw_items vi ON vi.item_id=l.item_id
+LEFT JOIN mes.orden_produccion_paso opp ON opp.id=l.documento_id AND l.documento_tipo='ORDEN_PRODUCCION_PASO'
+LEFT JOIN mes.operacion o ON o.id=opp.operacion_id
+LEFT JOIN mes.maquina m ON m.id=opp.maquina_asignada_id
+LEFT JOIN mes.orden_produccion op ON op.id=opp.orden_produccion_id
+LEFT JOIN doc.partida p ON p.id=op.partida_id
+LEFT JOIN cliente c ON l.propietario_id=c.id
+LEFT JOIN prioridad pr ON pr.id=prioridad_id
+WHERE l.estado_calidad='PENDIENTE' AND vi.item_tipo_codigo='ROLLO';
+
+
+CREATE OR REPLACE VIEW calidad.vw_inspecciones AS
+SELECT 
+i.id AS inspeccion_id,
+i.lote_id,
+l.item_id,
+vi.item_codigo,
+vi.item_nombre,
+i.orden_produccion_paso_id,
+i.resultado,
+i.observacion,
+i.empleado_id,
+e.nombre AS empleado_nombre,
+i.fyh_inspeccion
+FROM calidad.inspeccion i
+LEFT JOIN inventario.lote l ON l.id = i.lote_id
+LEFT JOIN vw_items vi ON vi.item_id = l.item_id
+LEFT JOIN mes.empleado e ON e.id = i.empleado_id;
+
+-- Allow authenticated users to insert photo records
+-- CREATE POLICY "calidad_inspeccion_foto_insert" 
+-- ON calidad.inspeccion_foto
+-- FOR INSERT TO authenticated
+-- WITH CHECK (true);
 
 GRANT SELECT ON inventario.vw_item_proveedor_guia TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_rollos TO anon, authenticated;
 GRANT USAGE ON SCHEMA mes TO authenticated;
 
-GRANT USAGE ON SCHEMA doc TO authenticated;
-GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
 
+GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
+GRANT USAGE ON SCHEMA doc TO authenticated;
 GRANT USAGE ON SCHEMA inventario TO authenticated;
 GRANT SELECT ON mes.operacion TO authenticated;
 GRANT SELECT ON mes.maquina TO authenticated;
@@ -1609,3 +1690,5 @@ GRANT SELECT ON doc.partida_detalle TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA mes TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA calidad TO authenticated;
+GRANT USAGE ON SCHEMA calidad TO authenticated;
