@@ -1703,6 +1703,21 @@ LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id;
 -- FOR INSERT TO authenticated
 -- WITH CHECK (true);
 
+CREATE VIEW inventario.vw_items_movimientos AS
+SELECT 
+im.id AS item_movimiento_id,
+im.item_id,
+vi.item_codigo,
+vi.item_nombre,
+im.cantidad,
+im.fecha_movimiento,
+imt.nombre AS item_movimiento_tipo_nombre
+FROM inventario.item_movimientos im
+LEFT JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+LEFT JOIN vw_items vi ON vi.item_id = im.item_id;
+
+
+
 GRANT SELECT ON inventario.vw_item_proveedor_guia TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_rollos TO anon, authenticated;
 GRANT USAGE ON SCHEMA mes TO authenticated;
@@ -1721,3 +1736,4 @@ GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA calidad TO authenticated;
 GRANT USAGE ON SCHEMA calidad TO authenticated;
+

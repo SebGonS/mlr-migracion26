@@ -1025,7 +1025,7 @@ WITH orden_rollos AS (
     INSERT INTO mes.orden_produccion_paso(
         orden_produccion_id, secuencia, operacion_id,
         maquina_asignada_id, receta_id, ph,
-        temperatura, tiempo_estandar, relacion_bano
+        temperatura, tiempo_estandar, relacion_bano,flg_final
     )
     SELECT v_orden_id,
            (p->>'secuencia')::SMALLINT,
@@ -1035,7 +1035,8 @@ WITH orden_rollos AS (
            (p->>'ph')::NUMERIC,
            (p->>'temperatura')::NUMERIC,
            (p->>'tiempo_estandar')::INT,
-           COALESCE((p->>'relacion_bano')::NUMERIC,m.relacion_bano)
+           COALESCE((p->>'relacion_bano')::NUMERIC,m.relacion_bano),
+              (p->>'flg_final')::BOOLEAN
     FROM jsonb_array_elements(p_orden->'pasos') p
     LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT;
 

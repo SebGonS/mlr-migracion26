@@ -690,10 +690,11 @@ END;
 $function$;
 
 
+SELECT mes.actualizar_pesos_orden_items(8097, 100);
 -- ═══════════════════════════════════════════════════════════════
 -- ACTUALIZAR PESOS DE ORDEN PRODUCCION ITEMS
 -- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION mes.actualizar_pesos_orden_items(p_orden_id BIGINT, p_peso int)
+CREATE OR REPLACE FUNCTION mes.actualizar_pesos_orden_items(p_orden_id BIGINT, p_peso numeric)
 RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -725,7 +726,7 @@ BEGIN
     SELECT COUNT(*)
     INTO v_count
     FROM mes.orden_produccion_item
-    WHERE orden_id = p_orden_id;
+    WHERE orden_produccion_id = p_orden_id;
 
     IF v_count = 0 THEN
     RAISE EXCEPTION 'La orden % no tiene items', p_orden_id;
@@ -736,10 +737,10 @@ BEGIN
     -- Actualizar peso_kg para cada item
     UPDATE inventario.lote 
     SET cantidad = p_peso,
-        detalle = jsonb_set(detalle, '{fyh_peso}', to_jsonb(NOW()))
+        detalles = jsonb_set(detalles, '{fyh_peso}', to_jsonb(NOW()))
     FROM mes.orden_produccion_item opi
     WHERE opi.orden_produccion_id = p_orden_id
-      AND opi.lote_id = inventario.lote.id AND opi.item_id = inventario.lote.item_id AND opi.ubicacion_id = inventario.lote.ubicacion_id;
+      AND opi.lote_id = inventario.lote.id AND opi.item_id = inventario.lote.item_id;
 
 
     RETURN format('%s pesos actualizados para orden #%s.', v_count, p_orden_id);
@@ -753,6 +754,69 @@ EXCEPTION WHEN OTHERS THEN
     RAISE;
 END;
 $function$;
+
+CREATE OR REPLACE FUNCTION mes.actualizar_pesos_individuales_orden(
+    p_orden_id  BIGINT,
+    p_items     jsonb   -- [{id: bigint, peso_kg: numeric}, ...]  id = orden_produccion_item.id
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'mes', 'inventario'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id  int  := get_user_id();
+    v_estado  orden_produccion_estado_enum;
+    v_item    jsonb;
+    v_count   int  := 0;
+BEGIN
+    SELECT estado INTO v_estado
+    FROM mes.orden_produccion
+    WHERE id = p_orden_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
+    END IF;
+
+    IF v_estado IN ('TECO', 'CERRADA', 'CANCELADA') THEN
+        RAISE EXCEPTION 'No se pueden modificar pesos de una orden en estado %.', v_estado;
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_pesos_individuales_orden', v_usr_id,
+            jsonb_build_object('orden_id', p_orden_id, 'items', p_items));
+
+    FOR v_item IN SELECT value FROM jsonb_array_elements(p_items) LOOP
+        UPDATE inventario.lote
+        SET cantidad = (v_item ->> 'peso_kg')::numeric,
+            detalles = jsonb_set(COALESCE(detalles, '{}'::jsonb), '{fyh_peso}', to_jsonb(NOW()))
+        FROM mes.orden_produccion_item opi
+        WHERE opi.id                  = (v_item ->> 'id')::bigint
+          AND opi.orden_produccion_id = p_orden_id
+          AND opi.lote_id             = inventario.lote.id
+          AND opi.item_id             = inventario.lote.item_id;
+
+        IF FOUND THEN
+            v_count := v_count + 1;
+        ELSE
+            RAISE WARNING 'Item id=% no encontrado o no pertenece a la orden %.', (v_item ->> 'id'), p_orden_id;
+        END IF;
+    END LOOP;
+
+    RETURN format('%s pesos actualizados individualmente para orden #%s.', v_count, p_orden_id);
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS
+        v_message = MESSAGE_TEXT, v_detail = PG_EXCEPTION_DETAIL,
+        v_hint = PG_EXCEPTION_HINT, v_context = PG_EXCEPTION_CONTEXT,
+        v_sqlstate = RETURNED_SQLSTATE;
+    RAISE LOG 'Error in actualizar_pesos_individuales_orden - User: %, orden: %, Error: %, Detail: %',
+              v_usr_id, p_orden_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
 
 -- ═══════════════════════════════════════════════════════════════
 -- 25. REGISTRAR PRODUCCION (create output lotes)
