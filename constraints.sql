@@ -135,6 +135,19 @@ BEFORE UPDATE ON unidad
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
+---pesaje
+REVOKE INSERT (usr_cre,fyh_cre)
+ON inventario.pesaje
+FROM anon, authenticated;
+
+REVOKE UPDATE (usr_cre, fyh_cre)
+ON inventario.pesaje
+FROM anon, authenticated;
+
+CREATE TRIGGER trg_bi_pesaje_audit
+BEFORE INSERT ON inventario.pesaje
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 ----ITEM TIPO
 
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
@@ -173,7 +186,7 @@ CREATE TRIGGER trg_bu_item_audit
 BEFORE UPDATE ON item
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
-CREATE TRIGGER trg_bu_item_audit
+CREATE TRIGGER trg_bu_item_elm
 BEFORE UPDATE ON item
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_elm_fields();
@@ -240,19 +253,19 @@ EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 ---ITEM INSUMO DETALLE
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
-ON insumo_detalle
+ON item_insumo_detalle
 FROM anon, authenticated;
 
 REVOKE UPDATE (usr_cre, fyh_cre)
-ON insumo_detalle
+ON item_insumo_detalle
 FROM anon, authenticated;
 
-CREATE TRIGGER trg_bi_insumo_detalle_audit
-BEFORE INSERT ON insumo_detalle
+CREATE TRIGGER trg_bi_item_insumo_detalle_audit
+BEFORE INSERT ON item_insumo_detalle
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_insumo_detalle_audit
-BEFORE UPDATE ON insumo_detalle
+CREATE TRIGGER trg_bu_item_insumo_detalle_audit
+BEFORE UPDATE ON item_insumo_detalle
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
@@ -515,7 +528,7 @@ CREATE TRIGGER trg_bu_maquina_audit
 BEFORE UPDATE ON mes.maquina
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
-CREATE TRIGGER trg_bu_maquina_audit
+CREATE TRIGGER trg_bu_maquina_elm
 BEFORE UPDATE ON mes.maquina
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_elm_fields();
@@ -548,11 +561,11 @@ REVOKE UPDATE (usr_cre, fyh_cre)
 ON mes.empleado
 FROM anon, authenticated;
 
-CREATE TRIGGER trg_bi_empleado_rol_audit
+CREATE TRIGGER trg_bi_empleado_audit
 BEFORE INSERT ON mes.empleado
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_empleado_rol_audit
+CREATE TRIGGER trg_bu_empleado_audit
 BEFORE UPDATE ON mes.empleado
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
@@ -578,7 +591,7 @@ CREATE TRIGGER trg_bu_ruta_plantilla_audit
 BEFORE UPDATE ON mes.ruta_plantilla
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
-CREATE TRIGGER trg_bu_ruta_plantilla_audit
+CREATE TRIGGER trg_bu_ruta_plantilla_elm
 BEFORE UPDATE ON mes.ruta_plantilla
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_elm_fields();
@@ -650,6 +663,24 @@ FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 
+---programacion
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
+ON mes.programacion
+FROM anon, authenticated;
+
+REVOKE UPDATE (usr_cre, fyh_cre)
+ON mes.programacion
+FROM anon, authenticated;
+
+CREATE TRIGGER trg_bi_programacion_audit
+BEFORE INSERT ON mes.programacion
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+CREATE TRIGGER trg_bu_programacion_audit
+BEFORE UPDATE ON mes.programacion
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+
 ---inspeccion
 
 REVOKE INSERT (usr_cre, fyh_cre)
@@ -665,8 +696,12 @@ BEFORE INSERT ON calidad.inspeccion
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 
+---inspeccion_foto
+REVOKE INSERT (usr_cre, fyh_cre)
+ON calidad.inspeccion_foto
+FROM anon, authenticated;
 
-CREATE TRIGGER trg_bi_inspeccion_audit
-BEFORE INSERT ON calidad.inspeccion
+CREATE TRIGGER trg_bi_inspeccion_foto_audit
+BEFORE INSERT ON calidad.inspeccion_foto
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_cre_fields();

@@ -719,7 +719,7 @@ BEGIN
             SUM(m.cantidad) as cantidad_total
         FROM inventario.item_movimientos m
         JOIN vw_items vi ON vi.item_id = m.item_id
-        WHERE m.documento_tipo = 'orden_produccion_paso'
+        WHERE m.documento_tipo = 'ORDEN_PRODUCCION_PASO'
         AND m.documento_id IN (
             SELECT opp.id 
             FROM mes.orden_produccion_paso opp

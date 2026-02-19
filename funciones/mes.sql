@@ -360,12 +360,23 @@ DECLARE
     v_orden_id     bigint;
     v_op_nombre    text;
     v_secuencia      smallint;
+    v_requiere_receta       boolean;
+    v_check boolean;
 BEGIN
-    SELECT opp.estado, opp.orden_produccion_id, o.nombre, opp.secuencia
-    INTO v_estado, v_orden_id, v_op_nombre, v_secuencia
+    SELECT opp.estado, opp.orden_produccion_id, o.nombre, opp.secuencia,o.requiere_receta,CASE WHEN (o.requiere_receta AND opp.receta_id IS NULL)or (o.requiere_maquina AND opp.maquina_asignada_id IS NULL) THEN false ELSE true END
+    INTO v_estado, v_orden_id, v_op_nombre, v_secuencia, v_requiere_receta, v_check
     FROM mes.orden_produccion_paso opp
     LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
     WHERE opp.id = p_paso_id;
+    ---EVALUAR mejora futura
+-- -- current (verbose)
+-- CASE WHEN (o.requiere_receta AND opp.receta_id IS NULL)
+--       OR  (o.requiere_maquina AND opp.maquina_asignada_id IS NULL)
+--      THEN false ELSE true END
+
+-- -- cleaner
+-- (NOT o.requiere_receta OR opp.receta_id IS NOT NULL)
+-- AND (NOT o.requiere_maquina OR opp.maquina_asignada_id IS NOT NULL)
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Paso con ID % no encontrado.', p_paso_id;
@@ -373,8 +384,14 @@ BEGIN
     IF v_estado <> 'PENDIENTE' THEN
         RAISE EXCEPTION 'Solo se puede iniciar un paso en estado PENDIENTE. Estado actual: %', v_estado;
     END IF;
+    IF NOT v_check THEN
+        RAISE EXCEPTION 'No se puede iniciar el paso % porque no se han cumplido los requisitos de receta o maquina asignadas.', v_op_nombre;
+    END IF;
     IF EXISTS (SELECT 1 FROM mes.orden_produccion_paso WHERE secuencia < v_secuencia AND orden_produccion_id=v_orden_id AND estado NOT IN ('COMPLETADO','OMITIDO')) THEN
         RAISE EXCEPTION 'No se puede iniciar el paso % porque hay pasos anteriores no completados.', v_op_nombre;
+    END IF;
+    IF v_requiere_receta AND NOT EXISTS (SELECT 1 FROM mes.orden_produccion_paso_item WHERE orden_produccion_paso_id = p_paso_id) THEN
+        RAISE EXCEPTION 'No se puede iniciar el paso % porque no tiene rollos asignados.', v_op_nombre;
     END IF;
 
     UPDATE mes.orden_produccion_paso
@@ -690,7 +707,7 @@ END;
 $function$;
 
 
-SELECT mes.actualizar_pesos_orden_items(8097, 100);
+
 -- ═══════════════════════════════════════════════════════════════
 -- ACTUALIZAR PESOS DE ORDEN PRODUCCION ITEMS
 -- ═══════════════════════════════════════════════════════════════
@@ -705,43 +722,68 @@ DECLARE
     v_usr_id    int := get_user_id();
     v_estado    orden_produccion_estado_enum;
     v_count     int;
+    v_pesaje_id int;
+    v_peso_prorate numeric;
+    v_pesaje_pos_id smallint;
+    v_pesaje_neg_id smallint;
 BEGIN
-    -- Validar que la orden existe y no está en estado terminal
     SELECT estado INTO v_estado
-    FROM mes.orden_produccion
-    WHERE id = p_orden_id;
+    FROM mes.orden_produccion WHERE id = p_orden_id;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
     END IF;
-
     IF v_estado IN ('TECO','CERRADA','CANCELADA') THEN
         RAISE EXCEPTION 'No se pueden modificar pesos de una orden en estado %.', v_estado;
     END IF;
 
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('actualizar_pesos_orden_items', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'peso', p_peso));
-    
-    ---Confuigurar cantidad de items para proratear peso
-    SELECT COUNT(*)
-    INTO v_count
-    FROM mes.orden_produccion_item
-    WHERE orden_produccion_id = p_orden_id;
+
+    SELECT COUNT(*) INTO v_count
+    FROM mes.orden_produccion_item WHERE orden_produccion_id = p_orden_id;
 
     IF v_count = 0 THEN
-    RAISE EXCEPTION 'La orden % no tiene items', p_orden_id;
+        RAISE EXCEPTION 'La orden % no tiene items', p_orden_id;
     END IF;
 
-    p_peso := p_peso / v_count;
+    v_peso_prorate := p_peso / v_count;
 
-    -- Actualizar peso_kg para cada item
-    UPDATE inventario.lote 
-    SET cantidad = p_peso,
-        detalles = jsonb_set(detalles, '{fyh_peso}', to_jsonb(NOW()))
+    SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
+    SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
+
+    -- Create pesaje header
+    INSERT INTO inventario.pesaje (orden_produccion_id)
+    VALUES (p_orden_id)
+    RETURNING id INTO v_pesaje_id;
+
+    -- Create adjustment movements for differences
+    INSERT INTO inventario.item_movimientos (
+        item_id, lote_id, item_movimiento_tipo_id,
+        origen_ubicacion_id, destino_ubicacion_id,
+        cantidad, documento_tipo, documento_id
+    )
+    SELECT
+        l.item_id,
+        l.id,
+        CASE WHEN v_peso_prorate > l.cantidad THEN v_pesaje_pos_id ELSE v_pesaje_neg_id END,
+        CASE WHEN v_peso_prorate < l.cantidad THEN sa.ubicacion_id ELSE NULL END,
+        CASE WHEN v_peso_prorate > l.cantidad THEN sa.ubicacion_id ELSE NULL END,
+        ABS(v_peso_prorate - l.cantidad),
+        'PESAJE', v_pesaje_id
+    FROM inventario.lote l
+    JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id AND opi.item_id = l.item_id
+    JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+    WHERE opi.orden_produccion_id = p_orden_id
+      AND v_peso_prorate - l.cantidad <> 0;
+
+    -- Update lotes
+    UPDATE inventario.lote
+    SET cantidad = v_peso_prorate,
+        detalles = jsonb_set(COALESCE(detalles, '{}'::jsonb), '{fyh_pesado}', to_jsonb(NOW()))
     FROM mes.orden_produccion_item opi
     WHERE opi.orden_produccion_id = p_orden_id
       AND opi.lote_id = inventario.lote.id AND opi.item_id = inventario.lote.item_id;
-
 
     RETURN format('%s pesos actualizados para orden #%s.', v_count, p_orden_id);
 
@@ -755,9 +797,10 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $function$;
 
+
 CREATE OR REPLACE FUNCTION mes.actualizar_pesos_individuales_orden(
     p_orden_id  BIGINT,
-    p_items     jsonb   -- [{id: bigint, peso_kg: numeric}, ...]  id = orden_produccion_item.id
+    p_items     jsonb
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -766,19 +809,19 @@ SET search_path TO 'iam', 'public', 'mes', 'inventario'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id  int  := get_user_id();
+    v_usr_id  int := get_user_id();
     v_estado  orden_produccion_estado_enum;
-    v_item    jsonb;
-    v_count   int  := 0;
+    v_count   int;
+    v_pesaje_id int;
+    v_pesaje_pos_id smallint;
+    v_pesaje_neg_id smallint;
 BEGIN
     SELECT estado INTO v_estado
-    FROM mes.orden_produccion
-    WHERE id = p_orden_id;
+    FROM mes.orden_produccion WHERE id = p_orden_id;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
     END IF;
-
     IF v_estado IN ('TECO', 'CERRADA', 'CANCELADA') THEN
         RAISE EXCEPTION 'No se pueden modificar pesos de una orden en estado %.', v_estado;
     END IF;
@@ -787,22 +830,55 @@ BEGIN
     VALUES ('actualizar_pesos_individuales_orden', v_usr_id,
             jsonb_build_object('orden_id', p_orden_id, 'items', p_items));
 
-    FOR v_item IN SELECT value FROM jsonb_array_elements(p_items) LOOP
-        UPDATE inventario.lote
-        SET cantidad = (v_item ->> 'peso_kg')::numeric,
-            detalles = jsonb_set(COALESCE(detalles, '{}'::jsonb), '{fyh_peso}', to_jsonb(NOW()))
-        FROM mes.orden_produccion_item opi
-        WHERE opi.id                  = (v_item ->> 'id')::bigint
-          AND opi.orden_produccion_id = p_orden_id
-          AND opi.lote_id             = inventario.lote.id
-          AND opi.item_id             = inventario.lote.item_id;
+    SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
+    SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
 
-        IF FOUND THEN
-            v_count := v_count + 1;
-        ELSE
-            RAISE WARNING 'Item id=% no encontrado o no pertenece a la orden %.', (v_item ->> 'id'), p_orden_id;
-        END IF;
-    END LOOP;
+    INSERT INTO inventario.pesaje (orden_produccion_id, usr_cre)
+    VALUES (p_orden_id, v_usr_id)
+    RETURNING id INTO v_pesaje_id;
+
+    WITH
+    input_items AS (
+        SELECT (i->>'id')::BIGINT AS opi_id, (i->>'peso_kg')::NUMERIC AS peso_nuevo
+        FROM jsonb_array_elements(p_items) i
+    ),
+    lotes_data AS (
+        SELECT
+            ii.peso_nuevo,
+            l.id AS lote_id,
+            l.item_id,
+            l.cantidad AS peso_anterior,
+            sa.ubicacion_id,
+            ii.peso_nuevo - l.cantidad AS diferencia
+        FROM input_items ii
+        JOIN mes.orden_produccion_item opi ON opi.id = ii.opi_id
+            AND opi.orden_produccion_id = p_orden_id
+        JOIN inventario.lote l ON l.id = opi.lote_id AND l.item_id = opi.item_id
+        JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+    ),
+    movimientos AS (
+        INSERT INTO inventario.item_movimientos (
+            item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, destino_ubicacion_id,
+            cantidad, documento_tipo, documento_id
+        )
+        SELECT
+            ld.item_id, ld.lote_id,
+            CASE WHEN ld.diferencia > 0 THEN v_pesaje_pos_id ELSE v_pesaje_neg_id END,
+            CASE WHEN ld.diferencia < 0 THEN ld.ubicacion_id ELSE NULL END,
+            CASE WHEN ld.diferencia > 0 THEN ld.ubicacion_id ELSE NULL END,
+            ABS(ld.diferencia),
+            'PESAJE', v_pesaje_id
+        FROM lotes_data ld
+        WHERE ld.diferencia <> 0
+    )
+    UPDATE inventario.lote l
+    SET cantidad = ld.peso_nuevo,
+        detalles = jsonb_set(COALESCE(l.detalles, '{}'::jsonb), '{fyh_pesado}', to_jsonb(NOW()))
+    FROM lotes_data ld
+    WHERE l.id = ld.lote_id;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
 
     RETURN format('%s pesos actualizados individualmente para orden #%s.', v_count, p_orden_id);
 
@@ -816,6 +892,8 @@ EXCEPTION WHEN OTHERS THEN
     RAISE;
 END;
 $function$;
+
+
 
 
 -- ═══════════════════════════════════════════════════════════════

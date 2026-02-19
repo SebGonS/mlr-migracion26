@@ -390,6 +390,25 @@ VALUES
  true, true, false, false, true, false,
  'Faltante físico / Merma');
 
+INSERT INTO inventario.item_movimiento_tipo
+(codigo, nombre, categoria, factor, flg_afecta_stock, flg_valorizable, flg_recalcula_costo, req_partner, req_origen, req_destino, descripcion)
+VALUES
+('PESAJE_POS', 'Pesaje – Corrección (+)', 'AJUSTE', 1,
+ true, false, false, false, false, true,
+ 'Corrección de peso por pesaje real (peso real > declarado)'),
+('PESAJE_NEG', 'Pesaje – Corrección (-)', 'AJUSTE', -1,
+ true, false, false, false, true, false,
+ 'Corrección de peso por pesaje real (peso real < declarado)');
+
+CREATE TABLE inventario.pesaje (
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    orden_produccion_id BIGINT REFERENCES mes.orden_produccion(id),
+    observacion TEXT,
+    usr_cre INT,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW()
+);
+
+
 CREATE TABLE insumo_tipo(
     id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
@@ -666,7 +685,6 @@ CREATE TABLE inventario.lote (
   id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   secuencia int NOT NULL, -- sequential number for the item
    item_id int NOT NULL REFERENCES item(id),
-  item_id int REFERENCES item(id),
 --   guia_remision_detalle_id bigint references guia_remision_detalle(id), ---guia_remision_detalle si es ingreso externo
   documento_tipo TEXT,      -- e.g., 'guia_remision', 'partida', 'cuadre'
   documento_id BIGINT,      -- ID of the document header
@@ -1704,17 +1722,50 @@ LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id;
 -- WITH CHECK (true);
 
 CREATE VIEW inventario.vw_items_movimientos AS
-SELECT 
-im.id AS item_movimiento_id,
-im.item_id,
-vi.item_codigo,
-vi.item_nombre,
-im.cantidad,
-im.fecha_movimiento,
-imt.nombre AS item_movimiento_tipo_nombre
+SELECT
+    im.id                                                           AS movimiento_id,
+    im.fecha_hora,
+
+    -- Item
+    im.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+
+    -- Lote
+    im.lote_id,
+    CASE WHEN l.id IS NOT NULL
+        THEN EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0')
+    END                                                             AS lote_codigo,
+
+    -- Movement type
+    im.item_movimiento_tipo_id,
+    imt.codigo                                                      AS tipo_codigo,
+    imt.nombre                                                      AS tipo_nombre,
+    imt.categoria,
+    imt.factor,                  -- 1 = ingreso, -1 = egreso, 0 = transferencia
+
+    -- Signed quantity (positive for ingresos, negative for egresos, as-is for transfers)
+    im.cantidad,
+    im.cantidad * imt.factor                                        AS cantidad_neta,
+
+    -- Locations
+    im.origen_ubicacion_id,
+    uo.nombre                                                       AS origen_nombre,
+    im.destino_ubicacion_id,
+    ud.nombre                                                       AS destino_nombre,
+
+    -- Source document
+    im.documento_tipo,
+    im.documento_id,
+
+    im.observacion
+
 FROM inventario.item_movimientos im
-LEFT JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-LEFT JOIN vw_items vi ON vi.item_id = im.item_id;
+LEFT JOIN inventario.item_movimiento_tipo imt ON imt.id  = im.item_movimiento_tipo_id
+LEFT JOIN vw_items                        vi  ON vi.item_id = im.item_id
+LEFT JOIN inventario.lote                 l   ON l.id      = im.lote_id
+LEFT JOIN inventario.ubicacion            uo  ON uo.id     = im.origen_ubicacion_id
+LEFT JOIN inventario.ubicacion            ud  ON ud.id     = im.destino_ubicacion_id;
 
 
 
@@ -1736,4 +1787,5 @@ GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA calidad TO authenticated;
 GRANT USAGE ON SCHEMA calidad TO authenticated;
-
+GRANT INSERT ON calidad.inspeccion TO authenticated;
+GRANT INSERT ON calidad.inspeccion_foto TO authenticated;
