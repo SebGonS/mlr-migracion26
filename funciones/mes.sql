@@ -798,6 +798,7 @@ END;
 $function$;
 
 
+
 CREATE OR REPLACE FUNCTION mes.actualizar_pesos_individuales_orden(
     p_orden_id  BIGINT,
     p_items     jsonb
