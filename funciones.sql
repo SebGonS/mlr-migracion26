@@ -1074,6 +1074,107 @@ EXCEPTION
 END;
 $function$;
 
+
+-- ═══════════════════════════════════════════════════════════════
+-- ACTUALIZAR PASOS DE ORDEN DE PRODUCCION (bulk)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.actualizar_pasos_orden(p_orden_id BIGINT, p_pasos jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id    int := get_user_id();
+    v_estado    orden_produccion_estado_enum;
+    v_count     int;
+BEGIN
+    -- Validar que la orden existe y no está en estado terminal
+    SELECT estado INTO v_estado
+    FROM mes.orden_produccion
+    WHERE id = p_orden_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
+    END IF;
+
+    IF v_estado IN ('FINALIZADA','TECO','CERRADA','CANCELADA') THEN
+        RAISE EXCEPTION 'No se pueden modificar pasos de una orden en estado %.', v_estado;
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_pasos_orden', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'pasos', p_pasos));
+
+    -- Bulk upsert: update existing, insert new
+    WITH datos AS (
+        SELECT
+            (p->>'id')::BIGINT                AS id,
+            (p->>'secuencia')::SMALLINT       AS secuencia,
+            (p->>'operacion_id')::SMALLINT    AS operacion_id,
+            (p->>'maquina_asignada_id')::INT  AS maquina_asignada_id,
+            (p->>'empleado_id')::SMALLINT     AS empleado_id,
+            (p->>'receta_id')::INT            AS receta_id,
+            (p->>'ph')::NUMERIC               AS ph,
+            (p->>'temperatura')::NUMERIC      AS temperatura,
+            (p->>'tiempo_estandar')::INT      AS tiempo_estandar,
+            COALESCE((p->>'relacion_bano')::NUMERIC,m.relacion_bano) AS relacion_bano,
+            (p->>'flg_final')::BOOL           AS flg_final
+        FROM jsonb_array_elements(p_pasos) p
+        LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT
+    )
+    INSERT INTO mes.orden_produccion_paso(
+        orden_produccion_id, secuencia, operacion_id,
+        maquina_asignada_id, empleado_id, receta_id,
+        ph, temperatura, tiempo_estandar, relacion_bano,
+        flg_final, usr_cre
+    )
+    SELECT p_orden_id, d.secuencia, d.operacion_id,
+           d.maquina_asignada_id, d.empleado_id, d.receta_id,
+           d.ph, d.temperatura, d.tiempo_estandar, d.relacion_bano,
+           COALESCE(d.flg_final, false), v_usr_id
+    FROM datos d
+    ON CONFLICT (orden_produccion_id, secuencia)
+    DO UPDATE SET
+        operacion_id       = EXCLUDED.operacion_id,
+        maquina_asignada_id = EXCLUDED.maquina_asignada_id,
+        empleado_id        = EXCLUDED.empleado_id,
+        receta_id          = EXCLUDED.receta_id,
+        ph                 = EXCLUDED.ph,
+        temperatura        = EXCLUDED.temperatura,
+        tiempo_estandar    = EXCLUDED.tiempo_estandar,
+        relacion_bano      = EXCLUDED.relacion_bano,
+        flg_final          = EXCLUDED.flg_final,
+        usr_mod            = v_usr_id,
+        fyh_mod            = NOW()
+        WHERE mes.orden_produccion_paso.estado = 'PENDIENTE';
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    -- Eliminar pasos que ya no están en la lista (solo si están PENDIENTE)
+    DELETE FROM mes.orden_produccion_paso
+    WHERE orden_produccion_id = p_orden_id
+      AND estado = 'PENDIENTE'
+      AND secuencia NOT IN (
+          SELECT (p->>'secuencia')::SMALLINT
+          FROM jsonb_array_elements(p_pasos) p
+      );
+
+    RETURN format('%s pasos actualizados para orden #%s.', v_count, p_orden_id);
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS
+        v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in actualizar_pasos_orden - User: %, orden: %, Error: %, Detail: %',
+              v_usr_id, p_orden_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
+
+
+
 CREATE OR REPLACE FUNCTION mes.get_orden_produccion(p_orden_produccion_id BIGINT)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -1116,7 +1217,22 @@ BEGIN
             'tenido',               tenido.tenido,
             'malla',                p.malla,
             'rendimiento',          p.rendimiento,
-            'ancho',                p.ancho
+            'ancho',                p.ancho,
+
+            -- Partida detalles (needed for production output form on flg_final steps)
+            'detalles', COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                    'id',           pd.id,
+                    'item_id',      pd.item_id,
+                    'item_codigo',  vi.item_codigo,
+                    'item_nombre',  vi.item_nombre,
+                    'cantidad',     pd.cantidad,
+                    'unidad_id',    pd.unidad_id
+                ) ORDER BY pd.id)
+                FROM doc.partida_detalle pd
+                LEFT JOIN vw_items vi ON vi.item_id = pd.item_id
+                WHERE pd.partida_id = p.id
+            ), '[]'::jsonb)
         ),
 
         -- ═══════════════════════════════════════
@@ -1701,103 +1817,5 @@ LEFT JOIN proveedor rp ON rp.id = gr.receptor_proveedor_id
 WHERE gr.id = p_guia_id;
 $$;
 
-
-
--- ═══════════════════════════════════════════════════════════════
--- ACTUALIZAR PASOS DE ORDEN DE PRODUCCION (bulk)
--- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION mes.actualizar_pasos_orden(p_orden_id BIGINT, p_pasos jsonb)
-RETURNS text
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'iam','notification','public','mes'
-AS $function$
-DECLARE
-    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id    int := get_user_id();
-    v_estado    orden_produccion_estado_enum;
-    v_count     int;
-BEGIN
-    -- Validar que la orden existe y no está en estado terminal
-    SELECT estado INTO v_estado
-    FROM mes.orden_produccion
-    WHERE id = p_orden_id;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
-    END IF;
-
-    IF v_estado IN ('FINALIZADA','TECO','CERRADA','CANCELADA') THEN
-        RAISE EXCEPTION 'No se pueden modificar pasos de una orden en estado %.', v_estado;
-    END IF;
-
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('actualizar_pasos_orden', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'pasos', p_pasos));
-
-    -- Bulk upsert: update existing, insert new
-    WITH datos AS (
-        SELECT
-            (p->>'id')::BIGINT                AS id,
-            (p->>'secuencia')::SMALLINT       AS secuencia,
-            (p->>'operacion_id')::SMALLINT    AS operacion_id,
-            (p->>'maquina_asignada_id')::INT  AS maquina_asignada_id,
-            (p->>'empleado_id')::SMALLINT     AS empleado_id,
-            (p->>'receta_id')::INT            AS receta_id,
-            (p->>'ph')::NUMERIC               AS ph,
-            (p->>'temperatura')::NUMERIC      AS temperatura,
-            (p->>'tiempo_estandar')::INT      AS tiempo_estandar,
-            COALESCE((p->>'relacion_bano')::NUMERIC,m.relacion_bano) AS relacion_bano,
-            (p->>'flg_final')::BOOL           AS flg_final
-        FROM jsonb_array_elements(p_pasos) p
-        LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT
-    )
-    INSERT INTO mes.orden_produccion_paso(
-        orden_produccion_id, secuencia, operacion_id,
-        maquina_asignada_id, empleado_id, receta_id,
-        ph, temperatura, tiempo_estandar, relacion_bano,
-        flg_final, usr_cre
-    )
-    SELECT p_orden_id, d.secuencia, d.operacion_id,
-           d.maquina_asignada_id, d.empleado_id, d.receta_id,
-           d.ph, d.temperatura, d.tiempo_estandar, d.relacion_bano,
-           COALESCE(d.flg_final, false), v_usr_id
-    FROM datos d
-    ON CONFLICT (orden_produccion_id, secuencia)
-    DO UPDATE SET
-        operacion_id       = EXCLUDED.operacion_id,
-        maquina_asignada_id = EXCLUDED.maquina_asignada_id,
-        empleado_id        = EXCLUDED.empleado_id,
-        receta_id          = EXCLUDED.receta_id,
-        ph                 = EXCLUDED.ph,
-        temperatura        = EXCLUDED.temperatura,
-        tiempo_estandar    = EXCLUDED.tiempo_estandar,
-        relacion_bano      = EXCLUDED.relacion_bano,
-        flg_final          = EXCLUDED.flg_final,
-        usr_mod            = v_usr_id,
-        fyh_mod            = NOW()
-        WHERE mes.orden_produccion_paso.estado = 'PENDIENTE';
-
-    GET DIAGNOSTICS v_count = ROW_COUNT;
-
-    -- Eliminar pasos que ya no están en la lista (solo si están PENDIENTE)
-    DELETE FROM mes.orden_produccion_paso
-    WHERE orden_produccion_id = p_orden_id
-      AND estado = 'PENDIENTE'
-      AND secuencia NOT IN (
-          SELECT (p->>'secuencia')::SMALLINT
-          FROM jsonb_array_elements(p_pasos) p
-      );
-
-    RETURN format('%s pasos actualizados para orden #%s.', v_count, p_orden_id);
-
-EXCEPTION WHEN OTHERS THEN
-    GET STACKED DIAGNOSTICS
-        v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
-        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in actualizar_pasos_orden - User: %, orden: %, Error: %, Detail: %',
-              v_usr_id, p_orden_id, v_message, v_detail;
-    RAISE;
-END;
-$function$;
 
 

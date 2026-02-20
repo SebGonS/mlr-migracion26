@@ -798,7 +798,6 @@ END;
 $function$;
 
 
-
 CREATE OR REPLACE FUNCTION mes.actualizar_pesos_individuales_orden(
     p_orden_id  BIGINT,
     p_items     jsonb
@@ -896,6 +895,15 @@ $function$;
 
 
 
+-- UPDATE mes.orden_produccion
+-- SET estado = 'EN_PROCESO'
+-- WHERE id=8098;
+-- UPDATE mes.orden_produccion_paso
+-- SET estado = 'PENDIENTE'
+-- WHERE fyh_inicio::date=now()::date and secuencia=3
+-- RETURNING id;
+
+-- SELECT id, flg_final FROM mes.orden_produccion_paso WHERE id = 4488;
 
 -- ═══════════════════════════════════════════════════════════════
 -- 25. REGISTRAR PRODUCCION (create output lotes)
@@ -929,7 +937,7 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Paso #% no encontrado o no está EN_PROCESO | COMPLETADO o no esta marcado como paso final.', p_orden_paso_id;
     END IF;
-    
+
     PERFORM 1
     FROM doc.partida_detalle
     WHERE partida_id = v_partida_id
@@ -977,13 +985,14 @@ BEGIN
     SELECT id INTO v_ing_tipo_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING';
 
-    -- 4. Create lotes and ingress movements (set-based)
+    -- 4. Create lotes and ingress movements (positional match via ordinality)
     WITH input_items AS (
         SELECT
+            ord,
             (i->>'item_id')::INT AS item_id,
             (i->>'cantidad')::NUMERIC(10,2) AS cantidad,
             (i->>'ubicacion_id')::INT AS destino_ubicacion_id
-        FROM jsonb_array_elements(p_output) i
+        FROM jsonb_array_elements(p_output) WITH ORDINALITY AS t(i, ord)
     ),
     new_lotes AS (
         INSERT INTO inventario.lote(
@@ -993,7 +1002,13 @@ BEGIN
         SELECT item_id, 'ORDEN_PRODUCCION', v_orden_id,
                cantidad, v_detalles, v_propietario_id
         FROM input_items
+        ORDER BY ord
         RETURNING id, item_id, cantidad
+    ),
+    numbered_lotes AS (
+        SELECT id, item_id, cantidad,
+               row_number() OVER (ORDER BY id) AS ord
+        FROM new_lotes
     )
     INSERT INTO inventario.item_movimientos(
         item_id, lote_id, item_movimiento_tipo_id,
@@ -1004,8 +1019,8 @@ BEGIN
            ii.destino_ubicacion_id,
            nl.cantidad,
            'ORDEN_PRODUCCION', v_orden_id
-    FROM new_lotes nl
-    JOIN input_items ii ON ii.item_id = nl.item_id;
+    FROM numbered_lotes nl
+    JOIN input_items ii ON ii.ord = nl.ord;
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Producción Registrada',
@@ -1025,5 +1040,3 @@ EXCEPTION WHEN OTHERS THEN
     RAISE;
 END;
 $function$;
-
-
