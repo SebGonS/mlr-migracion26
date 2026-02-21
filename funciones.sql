@@ -1174,7 +1174,6 @@ $function$;
 
 
 
-
 CREATE OR REPLACE FUNCTION mes.get_orden_produccion(p_orden_produccion_id BIGINT)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -1227,10 +1226,12 @@ BEGIN
                     'item_codigo',  vi.item_codigo,
                     'item_nombre',  vi.item_nombre,
                     'cantidad',     pd.cantidad,
-                    'unidad_id',    pd.unidad_id
+                    'unidad_id',    pd.unidad_id,
+                    'unidad_codigo', u.codigo
                 ) ORDER BY pd.id)
                 FROM doc.partida_detalle pd
                 LEFT JOIN vw_items vi ON vi.item_id = pd.item_id
+                LEFT JOIN unidad u ON u.id = pd.unidad_id
                 WHERE pd.partida_id = p.id
             ), '[]'::jsonb)
         ),

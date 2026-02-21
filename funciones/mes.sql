@@ -908,7 +908,11 @@ $function$;
 -- ═══════════════════════════════════════════════════════════════
 -- 25. REGISTRAR PRODUCCION (create output lotes)
 -- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION mes.registrar_produccion(p_orden_paso_id BIGINT, p_output jsonb)
+CREATE OR REPLACE FUNCTION mes.registrar_produccion(
+    p_orden_paso_id BIGINT,
+    p_output jsonb,
+    p_ubicacion_id INT  -- single destination for all lotes
+)
 RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -925,9 +929,11 @@ DECLARE
     v_error_payload jsonb;
 BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('registrar_produccion', v_usr_id, jsonb_build_object('orden_paso_id', p_orden_paso_id, 'output', p_output));
+    VALUES ('registrar_produccion', v_usr_id, jsonb_build_object(
+        'orden_paso_id', p_orden_paso_id, 'output', p_output, 'ubicacion_id', p_ubicacion_id
+    ));
 
-    -- 1. Paso must be EN_PROCESO; derive orden and partida
+    -- 1. Paso must be EN_PROCESO/COMPLETADO and flagged final
     SELECT opp.orden_produccion_id, op.partida_id
     INTO v_orden_id, v_partida_id
     FROM mes.orden_produccion_paso opp
@@ -942,14 +948,22 @@ BEGIN
     FROM doc.partida_detalle
     WHERE partida_id = v_partida_id
     FOR UPDATE;
-
-    -- 2. Validate items exist in partida_detalle and quantity <= planned
+-- Lock existing production lotes for this orden
+PERFORM 1
+FROM inventario.lote
+WHERE documento_tipo = 'ORDEN_PRODUCCION' AND documento_id = v_orden_id
+FOR UPDATE;
+PERFORM 1
+FROM mes.orden_produccion
+WHERE id = v_orden_id
+FOR UPDATE;
+    -- 2. Validation (adjust as needed for UN vs KG)
     WITH solicitado AS (
         SELECT (i->>'item_id')::INT AS item_id, (i->>'cantidad')::NUMERIC AS cantidad
         FROM jsonb_array_elements(p_output) i
     ),
     errores AS (
-        SELECT s.item_id, s.cantidad AS cantidad_solicitada,vppr.cantidad_rollos AS cantidad_producida, pd.cantidad AS cantidad_planificada
+        SELECT s.item_id, s.cantidad AS cantidad_solicitada, vppr.cantidad_rollos AS cantidad_producida, pd.cantidad AS cantidad_planificada
         FROM solicitado s
         LEFT JOIN doc.partida_detalle pd ON pd.partida_id = v_partida_id AND pd.item_id = s.item_id
         LEFT JOIN mes.vw_partida_produccion_rollos vppr ON vppr.partida_id = v_partida_id AND vppr.item_id = s.item_id
@@ -985,16 +999,14 @@ BEGIN
     SELECT id INTO v_ing_tipo_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING';
 
-    -- 4. Create lotes and ingress movements (positional match via ordinality)
+    -- 4. Create lotes + movements (pre-generated IDs, no RETURNING, no join)
     WITH input_items AS (
         SELECT
-            ord,
             (i->>'item_id')::INT AS item_id,
-            (i->>'cantidad')::NUMERIC(10,2) AS cantidad,
-            (i->>'ubicacion_id')::INT AS destino_ubicacion_id
-        FROM jsonb_array_elements(p_output) WITH ORDINALITY AS t(i, ord)
+            (i->>'cantidad')::NUMERIC(10,2) AS cantidad
+        FROM jsonb_array_elements(p_output) i
     ),
-    new_lotes AS (
+    insert_lotes AS (
         INSERT INTO inventario.lote(
             item_id, documento_tipo, documento_id,
             cantidad, detalles, propietario_id
@@ -1002,26 +1014,24 @@ BEGIN
         SELECT item_id, 'ORDEN_PRODUCCION', v_orden_id,
                cantidad, v_detalles, v_propietario_id
         FROM input_items
-        ORDER BY ord
-        RETURNING id, item_id, cantidad
-    ),
-    numbered_lotes AS (
-        SELECT id, item_id, cantidad,
-               row_number() OVER (ORDER BY id) AS ord
-        FROM new_lotes
-    )
+RETURNING id, item_id, cantidad    
+)
     INSERT INTO inventario.item_movimientos(
         item_id, lote_id, item_movimiento_tipo_id,
         destino_ubicacion_id, cantidad,
         documento_tipo, documento_id
     )
-    SELECT nl.item_id, nl.id, v_ing_tipo_id,
-           ii.destino_ubicacion_id,
-           nl.cantidad,
-           'ORDEN_PRODUCCION', v_orden_id
-    FROM numbered_lotes nl
-    JOIN input_items ii ON ii.ord = nl.ord;
+    SELECT
+    item_id,
+    id,                -- ← this is the lote_id
+    v_ing_tipo_id,
+    p_ubicacion_id,
+    cantidad,
+    'ORDEN_PRODUCCION',
+    v_orden_id
+FROM insert_lotes;
 
+    -- 5. Notifications
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Producción Registrada',
            COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
