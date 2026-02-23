@@ -1789,3 +1789,5 @@ GRANT SELECT ON ALL TABLES IN SCHEMA calidad TO authenticated;
 GRANT USAGE ON SCHEMA calidad TO authenticated;
 GRANT INSERT ON calidad.inspeccion TO authenticated;
 GRANT INSERT ON calidad.inspeccion_foto TO authenticated;
+
+GRANT UPDATE ON mes.operacion TO authenticated;

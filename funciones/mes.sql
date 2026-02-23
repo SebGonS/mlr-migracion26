@@ -521,84 +521,6 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $function$;
 
--- ═══════════════════════════════════════════════════════════════
--- 22. FINALIZAR PASO
--- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION mes.finalizar_paso(p_paso_id BIGINT, p_datos jsonb DEFAULT '{}'::jsonb)
-RETURNS text
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'iam','notification','public','mes'
-AS $function$
-DECLARE
-    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id       int := get_user_id();
-    v_estado       orden_produccion_paso_estado_enum;
-    v_orden_id     bigint;
-    v_maquina_id   int;
-    v_op_nombre    text;
-    v_todos_completos boolean;
-BEGIN
-    SELECT opp.estado, opp.orden_produccion_id, opp.maquina_asignada_id, o.nombre
-    INTO v_estado, v_orden_id, v_maquina_id, v_op_nombre
-    FROM mes.orden_produccion_paso opp
-    LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
-    WHERE opp.id = p_paso_id;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Paso con ID % no encontrado.', p_paso_id;
-    END IF;
-    IF v_estado <> 'EN_PROCESO' THEN
-        RAISE EXCEPTION 'Solo se puede finalizar un paso EN_PROCESO. Estado actual: %', v_estado;
-    END IF;
-
-    -- Process consumptions (recipe + manual) if provided
-    IF p_datos->'consumos' IS NOT NULL AND jsonb_array_length(p_datos->'consumos') > 0 THEN
-        PERFORM mes.registrar_consumo_paso(p_paso_id, p_datos->'consumos');
-    END IF;
-
-    UPDATE mes.orden_produccion_paso
-    SET estado  = 'COMPLETADO',
-        fyh_fin = NOW()
-    WHERE id = p_paso_id;
-
-    -- Release machine
-    IF v_maquina_id IS NOT NULL THEN
-        UPDATE mes.maquina SET estado_actual = 'espera'
-        WHERE id = v_maquina_id;
-    END IF;
-
-    -- Check if ALL pasos are done -> auto-complete orden
-    SELECT NOT EXISTS (
-        SELECT 1 FROM mes.orden_produccion_paso
-        WHERE orden_produccion_id = v_orden_id
-          AND estado NOT IN ('COMPLETADO','OMITIDO')
-    ) INTO v_todos_completos;
-
-    IF v_todos_completos THEN
-        UPDATE mes.orden_produccion
-        SET estado = 'FINALIZADA', fyh_fin = NOW()
-        WHERE id = v_orden_id;
-    END IF;
-
-    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
-    SELECT ur.user_id, 'Paso Completado',
-           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
-                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
-           || format(' completó el paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
-           jsonb_build_object('objeto_tipo','orden_produccion_paso','paso_id', p_paso_id, 'orden_produccion_id', v_orden_id)
-    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
-    WHERE r.code IN ('jefe_planta','supervisor_produccion') AND v_usr_id <> ur.user_id;
-
-    RETURN format('Paso %s (#%s) completado.%s', v_op_nombre, p_paso_id,
-                  CASE WHEN v_todos_completos THEN ' Orden #' || v_orden_id || ' FINALIZADA.' ELSE '' END);
-EXCEPTION WHEN OTHERS THEN
-    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
-        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in finalizar_paso - User: %, ID: %, Error: %', v_usr_id, p_paso_id, v_message;
-    RAISE;
-END;
-$function$;
 
 CREATE OR REPLACE FUNCTION mes.calcular_fifo(p_items jsonb)
 RETURNS jsonb
@@ -654,55 +576,6 @@ BEGIN
     FROM inventario_consumo;
 
     RETURN v_consumos;
-END;
-$function$;
-
-
-
-
-
--- ═══════════════════════════════════════════════════════════════
--- 24. REGISTRAR ITEMS PROCESADOS EN PASO (roll tracking)
--- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION mes.registrar_items_procesados(p_paso_id BIGINT, p_items jsonb)
-RETURNS text
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'iam','public','mes'
-AS $function$
-DECLARE
-    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id int := get_user_id();
-    v_deleted int;
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM mes.orden_produccion_paso
-        WHERE id = p_paso_id AND estado IN ('PENDIENTE', 'EN_PROCESO', 'COMPLETADO')
-    ) THEN
-        RAISE EXCEPTION 'Paso #% no encontrado o en estado que no permite registrar items.', p_paso_id;
-    END IF;
-
-    INSERT INTO mes.orden_produccion_paso_item(
-        orden_produccion_paso_id, orden_produccion_item_id
-    )
-    SELECT p_paso_id,
-           (i->>'orden_produccion_item_id')::INT
-    FROM jsonb_array_elements(p_items) i
-    ON CONFLICT (orden_produccion_paso_id, orden_produccion_item_id)
-    DO UPDATE SET usr_mod = v_usr_id, fyh_mod = NOW();
-    DELETE FROM mes.orden_produccion_paso_item
-    WHERE orden_produccion_paso_id = p_paso_id
-      AND orden_produccion_item_id NOT IN (
-          SELECT (i->>'orden_produccion_item_id')::INT
-          FROM jsonb_array_elements(p_items) i
-      );
-      GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    RETURN format('%s items procesados registrados para paso #%s. %s items eliminados.', jsonb_array_length(p_items), p_paso_id, v_deleted);
-EXCEPTION WHEN OTHERS THEN
-    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
-        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in registrar_items_procesados - User: %, paso: %, Error: %', v_usr_id, p_paso_id, v_message;
-    RAISE;
 END;
 $function$;
 
@@ -905,6 +778,73 @@ $function$;
 
 -- SELECT id, flg_final FROM mes.orden_produccion_paso WHERE id = 4488;
 
+-- UPDATE mes.orden_produccion_paso opp SET estado='PENDIENTE' WHERE orden_produccion_id =8099 AND secuencia =4
+-- ═══════════════════════════════════════════════════════════════
+-- 24. REGISTRAR ITEMS PROCESADOS EN PASO (roll tracking)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.registrar_items_procesados(p_paso_id BIGINT, p_items jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+    v_error_payload jsonb;
+    v_deleted int;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM mes.orden_produccion_paso
+        WHERE id = p_paso_id AND estado IN ('PENDIENTE', 'EN_PROCESO', 'COMPLETADO')
+    ) THEN
+        RAISE EXCEPTION 'Paso #% no encontrado o en estado que no permite registrar items.', p_paso_id;
+    END IF;
+
+ -- 2. Validation (adjust as needed for UN vs KG)
+    WITH errores AS (
+        SELECT i.orden_produccion_item_id 
+        FROM jsonb_array_elements(p_items) i
+        JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_item_id = (i->>'orden_produccion_item_id')::INT
+        JOIN mes.orden_produccion_paso opp ON opp.id = oppi.orden_produccion_paso_id
+        WHERE opp.flg_final=true and opp.id != p_paso_id
+    )
+    SELECT jsonb_agg(jsonb_build_object(
+        'orden_produccion_item_id', orden_produccion_item_id
+    ))
+    INTO v_error_payload
+    FROM errores;
+
+    IF v_error_payload IS NOT NULL THEN
+        RAISE EXCEPTION 'Items seleccionados ya fueron usados para generar produccion'
+            USING DETAIL = v_error_payload::text;
+    END IF;
+
+    INSERT INTO mes.orden_produccion_paso_item(
+        orden_produccion_paso_id, orden_produccion_item_id
+    )
+    SELECT p_paso_id,
+           (i->>'orden_produccion_item_id')::INT
+    FROM jsonb_array_elements(p_items) i
+    ON CONFLICT (orden_produccion_paso_id, orden_produccion_item_id)
+    DO UPDATE SET usr_mod = v_usr_id, fyh_mod = NOW();
+    DELETE FROM mes.orden_produccion_paso_item
+    WHERE orden_produccion_paso_id = p_paso_id
+      AND orden_produccion_item_id NOT IN (
+          SELECT (i->>'orden_produccion_item_id')::INT
+          FROM jsonb_array_elements(p_items) i
+      );
+      GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    RETURN format('%s items procesados registrados para paso #%s. %s items eliminados.', jsonb_array_length(p_items), p_paso_id, v_deleted);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_items_procesados - User: %, paso: %, Error: %', v_usr_id, p_paso_id, v_message;
+    RAISE;
+END;
+$function$;
+
+
 -- ═══════════════════════════════════════════════════════════════
 -- 25. REGISTRAR PRODUCCION (create output lotes)
 -- ═══════════════════════════════════════════════════════════════
@@ -959,15 +899,17 @@ WHERE id = v_orden_id
 FOR UPDATE;
     -- 2. Validation (adjust as needed for UN vs KG)
     WITH solicitado AS (
-        SELECT (i->>'item_id')::INT AS item_id, (i->>'cantidad')::NUMERIC AS cantidad
+        SELECT (i->>'item_id')::INT AS item_id, COUNT(*) AS cantidad
         FROM jsonb_array_elements(p_output) i
+        GROUP BY 1
     ),
     errores AS (
-        SELECT s.item_id, s.cantidad AS cantidad_solicitada, vppr.cantidad_rollos AS cantidad_producida, pd.cantidad AS cantidad_planificada
+        SELECT s.item_id, s.cantidad AS cantidad_solicitada, COALESCE(vppr.cantidad_rollos, 0) AS cantidad_producida, pd.cantidad AS cantidad_planificada
         FROM solicitado s
         LEFT JOIN doc.partida_detalle pd ON pd.partida_id = v_partida_id AND pd.item_id = s.item_id
         LEFT JOIN mes.vw_partida_produccion_rollos vppr ON vppr.partida_id = v_partida_id AND vppr.item_id = s.item_id
-        WHERE pd.id IS NULL OR s.cantidad > pd.cantidad OR COALESCE(vppr.cantidad_rollos, 0)+s.cantidad > pd.cantidad
+        WHERE pd.id IS NULL
+           OR COALESCE(vppr.cantidad_rollos, 0) + s.cantidad > pd.cantidad
     )
     SELECT jsonb_agg(jsonb_build_object(
         'item_id', item_id,
@@ -979,7 +921,7 @@ FOR UPDATE;
     FROM errores;
 
     IF v_error_payload IS NOT NULL THEN
-        RAISE EXCEPTION 'Items no válidos o cantidad excede lo planificado en partida'
+        RAISE EXCEPTION 'Cantidad de rollos excede lo planificado en partida'
             USING DETAIL = v_error_payload::text;
     END IF;
 
@@ -1047,6 +989,97 @@ EXCEPTION WHEN OTHERS THEN
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
     RAISE LOG 'Error in registrar_produccion - User: %, orden_paso: %, Error: %, Detail: %',
               v_usr_id, p_orden_paso_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 22. FINALIZAR PASO
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.finalizar_paso(p_paso_id BIGINT, p_datos jsonb DEFAULT '{}'::jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id       int := get_user_id();
+    v_estado       orden_produccion_paso_estado_enum;
+    v_orden_id     bigint;
+    v_maquina_id   int;
+    v_op_nombre    text;
+    v_flg_final    boolean;
+    v_todos_completos boolean;
+    v_prod_result  text;
+BEGIN
+    SELECT opp.estado, opp.orden_produccion_id, opp.maquina_asignada_id, o.nombre, opp.flg_final
+    INTO v_estado, v_orden_id, v_maquina_id, v_op_nombre, v_flg_final
+    FROM mes.orden_produccion_paso opp
+    LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
+    WHERE opp.id = p_paso_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Paso con ID % no encontrado.', p_paso_id;
+    END IF;
+    IF v_estado <> 'EN_PROCESO' THEN
+        RAISE EXCEPTION 'Solo se puede finalizar un paso EN_PROCESO. Estado actual: %', v_estado;
+    END IF;
+
+    -- Process consumptions (recipe + manual) if provided
+    IF p_datos->'consumos' IS NOT NULL AND jsonb_array_length(p_datos->'consumos') > 0 THEN
+        PERFORM mes.registrar_consumo_paso(p_paso_id, p_datos->'consumos');
+    END IF;
+
+    -- Register production output atomically (final step only)
+    IF v_flg_final AND p_datos->'produccion' IS NOT NULL AND jsonb_array_length(p_datos->'produccion') > 0 THEN
+        v_prod_result := mes.registrar_produccion(
+            p_paso_id,
+            p_datos->'produccion',
+            (p_datos->>'ubicacion_id')::INT
+        );
+    END IF;
+
+    UPDATE mes.orden_produccion_paso
+    SET estado  = 'COMPLETADO',
+        fyh_fin = NOW()
+    WHERE id = p_paso_id;
+
+    -- Release machine
+    IF v_maquina_id IS NOT NULL THEN
+        UPDATE mes.maquina SET estado_actual = 'espera'
+        WHERE id = v_maquina_id;
+    END IF;
+
+    -- Check if ALL pasos are done -> auto-complete orden
+    SELECT NOT EXISTS (
+        SELECT 1 FROM mes.orden_produccion_paso
+        WHERE orden_produccion_id = v_orden_id
+          AND estado NOT IN ('COMPLETADO','OMITIDO')
+    ) INTO v_todos_completos;
+
+    IF v_todos_completos THEN
+        UPDATE mes.orden_produccion
+        SET estado = 'FINALIZADA', fyh_fin = NOW()
+        WHERE id = v_orden_id;
+    END IF;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Paso Completado',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' completó el paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
+           jsonb_build_object('objeto_tipo','orden_produccion_paso','paso_id', p_paso_id, 'orden_produccion_id', v_orden_id)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta','supervisor_produccion') AND v_usr_id <> ur.user_id;
+
+    RETURN format('Paso %s (#%s) completado.%s%s', v_op_nombre, p_paso_id,
+                  CASE WHEN v_prod_result IS NOT NULL THEN ' ' || v_prod_result ELSE '' END,
+                  CASE WHEN v_todos_completos THEN ' Orden #' || v_orden_id || ' FINALIZADA.' ELSE '' END);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in finalizar_paso - User: %, ID: %, Error: %', v_usr_id, p_paso_id, v_message;
     RAISE;
 END;
 $function$;
