@@ -15,7 +15,7 @@ await supabase.rpc('finalizar_paso', {
   }
 })
 
-// Call 2 — solo si flg_final, DESPUES de call 1
+// Call 2 — solo si flg_genera_produccion, DESPUES de call 1
 await supabase.rpc('registrar_produccion', {
   p_orden_paso_id: 42,
   p_output: [
@@ -59,8 +59,8 @@ interface FinalizarPasoDatos {
     observacion?: string
   }>
 
-  // Opcional — solo aplica si el paso tiene flg_final = true
-  // El backend lo ignora silenciosamente si flg_final = false
+  // Opcional — solo aplica si el paso tiene flg_genera_produccion = true
+  // El backend lo ignora silenciosamente si flg_genera_produccion = false
   produccion?: Array<{
     item_id: number
     cantidad: number
@@ -117,7 +117,7 @@ Cada fila en `produccion[]` = **1 rollo fisico** con su peso en kg:
 
 1. Validar paso EN_PROCESO
 2. `registrar_consumo_paso()` — si `consumos` presente
-3. `registrar_produccion()` — si `flg_final = true` Y `produccion` presente
+3. `registrar_produccion()` — si `flg_genera_produccion = true` Y `produccion` presente
 4. UPDATE paso → COMPLETADO
 5. Liberar maquina
 6. Check todos completos → auto-FINALIZAR orden

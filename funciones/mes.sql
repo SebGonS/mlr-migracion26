@@ -1,8 +1,6 @@
 -- ═══════════════════════════════════════════════════════════════
 -- 29. GET PROGRAMACION POR FECHA (daily board)
 -- ═══════════════════════════════════════════════════════════════
-
-
 CREATE OR REPLACE FUNCTION mes.get_programacion_diaria(p_fecha DATE)
 RETURNS jsonb
 LANGUAGE sql STABLE
@@ -11,47 +9,56 @@ AS $$
 SELECT COALESCE(jsonb_agg(row_obj), '[]'::jsonb)
 FROM (
     SELECT jsonb_build_object(
-        'id',                 prog.id,
-        'maquina_id',         prog.maquina_id,
-        'secuencia',          prog.secuencia,
-        'nota',               prog.nota,
-        'paso_id',            opp.id,
-        'operacion',          o.nombre,
-        'operacion_codigo',   o.codigo,  -- ADD
-        'paso_estado',        opp.estado,
-        'orden_id',           op.id,
-        'orden_tipo',         op.tipo,   -- ADD (assuming this field exists)
-        'partida_id',         op.partida_id,
-        'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
-        'cliente',            c.cliente,
-        'color',              vc.color,
-        'color_hex',          vc.color_hex,
-        'tono',               vc.tono,   -- ADD (if in your view)
-        'tenido',             t.tenido,  -- ADD (if applicable),
-        'ancho',              p.ancho,
-        'malla',              p.malla,
-        'rendimiento',        p.rendimiento,
-        'articulo',           vpa.articulo_nombre,
-        'fibra',              vpa.fibra,
-        'total_rollos',       vpa.total_rollos,
-        'cantidad_total',     vpa.cantidad_total,
-        'cantidad_regular',   vpa.cantidad_regular,
-        'cantidad_rib',       vpa.cantidad_rib
+        'id',                        prog.id,
+        'maquina_id',                prog.maquina_id,
+        'secuencia',                 prog.secuencia,
+        'nota',                      prog.nota,
+        'actividad_tipo',            prog.actividad_tipo,
+        -- Production paso fields (null when actividad_tipo = 'LAVADO_MAQUINA')
+        'paso_id',                   opp.id,
+        'operacion',                 o.nombre,
+        'operacion_codigo',          o.codigo,
+        'paso_estado',               opp.estado,
+        'orden_id',                  op.id,
+        'orden_tipo',                op.tipo,
+        'partida_id',                op.partida_id,
+        'partida_codigo',            EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
+        'cliente',                   c.cliente,
+        'color',                     vc.color,
+        'color_hex',                 vc.color_hex,
+        'tono',                      vc.tono,
+        'tenido',                    t.tenido,
+        'ancho',                     p.ancho,
+        'malla',                     p.malla,
+        'rendimiento',               p.rendimiento,
+        'articulo',                  vpa.articulo_nombre,
+        'fibra',                     vpa.fibra,
+        'total_rollos',              vpa.total_rollos,
+        'cantidad_total',            vpa.cantidad_total,
+        'cantidad_regular',          vpa.cantidad_regular,
+        'cantidad_rib',              vpa.cantidad_rib,
+        -- Lavado maquina fields (null when actividad_tipo = 'ORDEN_PRODUCCION_PASO')
+        'lavado_id',                 lm.id,
+        'lavado_estado',             lm.estado,
+        'receta_lavado_maquina_id',  lm.receta_lavado_maquina_id
     ) AS row_obj
     FROM mes.programacion prog
-    JOIN mes.orden_produccion_paso opp ON opp.id = prog.orden_produccion_paso_id
-    JOIN mes.operacion o ON o.id = opp.operacion_id
-    JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
-    JOIN doc.partida p ON p.id = op.partida_id
-    LEFT JOIN tenido t ON t.id = p.tenido_id
-    LEFT JOIN cliente c ON c.id = p.cliente_id
-    LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
-    LEFT JOIN partida_resumen_tenido vpa ON vpa.partida_id=p.id
+    LEFT JOIN mes.orden_produccion_paso opp  ON prog.actividad_tipo = 'ORDEN_PRODUCCION_PASO' AND opp.id = prog.actividad_id
+    LEFT JOIN mes.operacion o                ON o.id = opp.operacion_id
+    LEFT JOIN mes.orden_produccion op        ON op.id = opp.orden_produccion_id
+    LEFT JOIN doc.partida p                  ON p.id = op.partida_id
+    LEFT JOIN tenido t                       ON t.id = p.tenido_id
+    LEFT JOIN cliente c                      ON c.id = p.cliente_id
+    LEFT JOIN vw_colores vc                  ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN partida_resumen_tenido vpa     ON vpa.partida_id = p.id
+    LEFT JOIN mes.lavado_maquina lm          ON prog.actividad_tipo = 'LAVADO_MAQUINA' AND lm.id = prog.actividad_id
     WHERE prog.fecha = p_fecha
-    ORDER BY prog.maquina_id,prog.secuencia
+    ORDER BY prog.maquina_id, prog.secuencia
 ) sub;
 $$;
 
+-- Legacy name kept for backward compatibility — now delegates to get_actividades_sin_programar
+-- Returns only ORDEN_PRODUCCION_PASO type (same shape as before for existing consumers)
 CREATE OR REPLACE FUNCTION mes.get_pasos_sin_programar()
 RETURNS jsonb
 LANGUAGE sql STABLE
@@ -60,6 +67,7 @@ AS $$
 SELECT COALESCE(jsonb_agg(row_obj), '[]'::jsonb)
 FROM (
     SELECT jsonb_build_object(
+        'actividad_tipo',     'ORDEN_PRODUCCION_PASO',
         'paso_id',            opp.id,
         'orden_id',           op.id,
         'operacion',          o.nombre,
@@ -69,7 +77,7 @@ FROM (
         'color',              vc.color,
         'color_hex',          vc.color_hex,
         'tono',               vc.tono,
-        'tenido',             t.tenido  -- ADD (if applicable)
+        'tenido',             t.tenido
     ) AS row_obj
     FROM mes.orden_produccion_paso opp
     JOIN mes.operacion o ON o.id = opp.operacion_id
@@ -80,21 +88,84 @@ FROM (
     LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
     WHERE opp.estado = 'PENDIENTE'
       AND NOT EXISTS (
-          SELECT 1 FROM mes.programacion prog 
-          WHERE prog.orden_produccion_paso_id = opp.id
+          SELECT 1 FROM mes.programacion prog
+          WHERE prog.actividad_tipo = 'ORDEN_PRODUCCION_PASO' AND prog.actividad_id = opp.id
       )
     ORDER BY p.fyh_cre DESC
+) sub;
+$$;
+
+-- Unified: returns both unprogrammed production pasos AND unprogrammed lavados
+-- Frontend uses actividad_tipo to render the correct card type
+CREATE OR REPLACE FUNCTION mes.get_actividades_sin_programar()
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'public','doc','mes'
+AS $$
+SELECT COALESCE(jsonb_agg(row_obj ORDER BY fyh_cre DESC), '[]'::jsonb)
+FROM (
+    -- Production pasos (PENDIENTE, not yet on board)
+    SELECT
+        p.fyh_cre,
+        jsonb_build_object(
+            'actividad_tipo',     'ORDEN_PRODUCCION_PASO',
+            'actividad_id',       opp.id,
+            'paso_id',            opp.id,
+            'orden_id',           op.id,
+            'operacion',          o.nombre,
+            'operacion_codigo',   o.codigo,
+            'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
+            'cliente',            c.cliente,
+            'color',              vc.color,
+            'color_hex',          vc.color_hex,
+            'tono',               vc.tono,
+            'tenido',             t.tenido
+        ) AS row_obj
+    FROM mes.orden_produccion_paso opp
+    JOIN mes.operacion o ON o.id = opp.operacion_id
+    JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+    JOIN doc.partida p ON p.id = op.partida_id
+    LEFT JOIN tenido t ON t.id = p.tenido_id
+    LEFT JOIN cliente c ON c.id = p.cliente_id
+    LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+    WHERE opp.estado = 'PENDIENTE'
+      AND NOT EXISTS (
+          SELECT 1 FROM mes.programacion prog
+          WHERE prog.actividad_tipo = 'ORDEN_PRODUCCION_PASO' AND prog.actividad_id = opp.id
+      )
+
+    UNION ALL
+
+    -- Machine wash activities (PENDIENTE, not yet on board)
+    SELECT
+        lm.fyh_cre,
+        jsonb_build_object(
+            'actividad_tipo',            'LAVADO_MAQUINA',
+            'actividad_id',              lm.id,
+            'lavado_id',                 lm.id,
+            'receta_lavado_maquina_id',  lm.receta_lavado_maquina_id,
+            'maquina_id',                lm.maquina_id,
+            'nota',                      lm.nota
+        ) AS row_obj
+    FROM mes.lavado_maquina lm
+    WHERE lm.estado = 'PENDIENTE'
+      AND NOT EXISTS (
+          SELECT 1 FROM mes.programacion prog
+          WHERE prog.actividad_tipo = 'LAVADO_MAQUINA' AND prog.actividad_id = lm.id
+      )
 ) sub;
 $$;
 
 
 
 -- ═══════════════════════════════════════════════════════════════
--- GUARDAR PROGRAMACION - Full replace for date range or machine
+-- GUARDAR PROGRAMACION - Full replace for a given date
+-- Accepts both production pasos and lavado_maquina activities
+-- Each element: { actividad_tipo, actividad_id, maquina_id, secuencia, nota? }
 -- ═══════════════════════════════════════════════════════════════
 CREATE OR REPLACE FUNCTION mes.guardar_programacion(
     p_fecha DATE,
-    p_programaciones JSONB  -- Full schedule: [{"orden_produccion_paso_id": 1, "maquina_id": 5, "secuencia": 1, "nota": ""}, ...]
+    p_programaciones JSONB
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -102,53 +173,53 @@ SECURITY DEFINER
 SET search_path TO 'iam','public','mes'
 AS $function$
 DECLARE
-    v_usr_id INT := get_user_id();
-    v_paso RECORD;
-    v_invalid_pasos JSONB := '[]';
-    v_deleted INT;
-    v_inserted INT;
+    v_usr_id         INT := get_user_id();
+    v_invalid_pasos  JSONB;
+    v_invalid_lavados JSONB;
 BEGIN
-    -- 1. VALIDATE paso states  //Convertir a select into para no usar bucles
-    SELECT jsonb_agg(
-        jsonb_build_object(
-            'paso_id', opp.id,
-            'estado', opp.estado
-        )
-    )
+    -- 1. Validate production pasos: must not be COMPLETADO or OMITIDO
+    SELECT jsonb_agg(jsonb_build_object('actividad_id', opp.id, 'estado', opp.estado))
     INTO v_invalid_pasos
     FROM jsonb_array_elements(p_programaciones) elem
-    JOIN mes.orden_produccion_paso opp
-      ON opp.id = (elem->>'orden_produccion_paso_id')::BIGINT
-    WHERE opp.estado IN ('COMPLETADO', 'OMITIDO');
+    JOIN mes.orden_produccion_paso opp ON opp.id = (elem->>'actividad_id')::BIGINT
+    WHERE elem->>'actividad_tipo' = 'ORDEN_PRODUCCION_PASO'
+      AND opp.estado IN ('COMPLETADO', 'OMITIDO');
 
     IF v_invalid_pasos IS NOT NULL THEN
-        RAISE EXCEPTION 'Pasos no programables: %', v_invalid_pasos;
+        RAISE EXCEPTION 'Pasos no programables (ya COMPLETADO/OMITIDO): %', v_invalid_pasos;
     END IF;
 
+    -- 2. Validate lavados: must not be COMPLETADO
+    SELECT jsonb_agg(jsonb_build_object('actividad_id', lm.id, 'estado', lm.estado))
+    INTO v_invalid_lavados
+    FROM jsonb_array_elements(p_programaciones) elem
+    JOIN mes.lavado_maquina lm ON lm.id = (elem->>'actividad_id')::BIGINT
+    WHERE elem->>'actividad_tipo' = 'LAVADO_MAQUINA'
+      AND lm.estado = 'COMPLETADO';
 
-DELETE FROM mes.programacion
-    WHERE fecha = p_fecha;
+    IF v_invalid_lavados IS NOT NULL THEN
+        RAISE EXCEPTION 'Lavados no programables (ya COMPLETADO): %', v_invalid_lavados;
+    END IF;
 
- INSERT INTO mes.programacion (
-        orden_produccion_paso_id,
-        maquina_id,
-        fecha,
-        secuencia,
-        nota
-    )
+    -- 3. Full replace for the date
+    DELETE FROM mes.programacion WHERE fecha = p_fecha;
+
+    INSERT INTO mes.programacion (actividad_tipo, actividad_id, maquina_id, fecha, secuencia, nota)
     SELECT
-        (elem->>'orden_produccion_paso_id')::BIGINT,
+        elem->>'actividad_tipo',
+        (elem->>'actividad_id')::BIGINT,
         (elem->>'maquina_id')::INT,
         p_fecha,
         (elem->>'secuencia')::SMALLINT,
         elem->>'nota'
     FROM jsonb_array_elements(p_programaciones) elem;
 
-    -- 4. Sync maquina_asignada_id on pasos
+    -- 4. Sync maquina_asignada_id on production pasos only
     UPDATE mes.orden_produccion_paso opp
     SET maquina_asignada_id = (elem->>'maquina_id')::INT
     FROM jsonb_array_elements(p_programaciones) AS elem
-    WHERE opp.id = (elem->>'orden_produccion_paso_id')::BIGINT;
+    WHERE elem->>'actividad_tipo' = 'ORDEN_PRODUCCION_PASO'
+      AND opp.id = (elem->>'actividad_id')::BIGINT;
 
     RETURN 'Programación guardada correctamente para ' || p_fecha;
 END;
@@ -200,129 +271,135 @@ CREATE OR REPLACE FUNCTION mes.generar_receta(p_paso_id BIGINT)
 RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'iam','notification','public','mes','doc'
+SET search_path TO 'iam','notification','public','receta','mes','doc'
 AS $function$
 DECLARE
-    v_receta        jsonb;
-    v_receta_id     int;
-    v_maquina_id    int;
-    v_maq_nombre    text;
-    v_maq_codigo    text;
-    v_adjustment    numeric;
-    v_rb            numeric;
-    v_peso          numeric;
-    v_cantidad      numeric;
+    v_receta           jsonb;
+    v_receta_id        int;
+    v_maquina_id       int;
+    v_maq_nombre       text;
+    v_maq_codigo       text;
+    v_rb               numeric;
+    v_peso             numeric;
+    v_cantidad         numeric;
     v_cantidad_regular numeric;
-    v_cantidad_rib  numeric;
-    v_volumen       numeric;
-    v_usr_id        int := get_user_id();
-    v_orden_id      bigint;
-    v_op_nombre     text;
-    v_message       text;
-    v_detail        text;
-    v_hint          text;
-    v_context       text;
-    v_sqlstate      text;
+    v_cantidad_rib     numeric;
+    v_volumen          numeric;
+    v_usr_id           int := get_user_id();
+    v_orden_id         bigint;
+    v_op_nombre        text;
+    v_message          text;
+    v_detail           text;
+    v_hint             text;
+    v_context          text;
+    v_sqlstate         text;
 BEGIN
     -- 1. Validate paso, get receta + machine + relacion_bano
-    SELECT opp.receta_id, opp.maquina_asignada_id, COALESCE(opp.relacion_bano,m.relacion_bano),
+    SELECT opp.receta_id, opp.maquina_asignada_id, COALESCE(opp.relacion_bano, m.relacion_bano),
            opp.orden_produccion_id, o.nombre
     INTO v_receta_id, v_maquina_id, v_rb, v_orden_id, v_op_nombre
     FROM mes.orden_produccion_paso opp
     LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
-    LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id
+    LEFT JOIN mes.maquina m   ON m.id = opp.maquina_asignada_id
     WHERE opp.id = p_paso_id;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Paso con ID % no encontrado.', p_paso_id;
     END IF;
-
     IF v_receta_id IS NULL THEN
-        RAISE EXCEPTION 'Paso ID % sin receta encontrada.', p_paso_id;
+        RAISE EXCEPTION 'Paso ID % sin receta asignada.', p_paso_id;
     END IF;
 
     -- 2. Machine info
-    SELECT m.nombre, m.codigo
-    INTO v_maq_nombre, v_maq_codigo
-    FROM mes.maquina m
-    WHERE m.id = v_maquina_id;
-    -- 3. Roll aggregation
-    SELECT SUM(l.cantidad), SUM(CASE ird.flg_rib WHEN false THEN 1 ELSE 0 END) cantidad_regular, SUM(CASE ird.flg_rib WHEN true THEN 1 ELSE 0 END) cantidad_rib
+    SELECT m.nombre, m.codigo INTO v_maq_nombre, v_maq_codigo
+    FROM mes.maquina m WHERE m.id = v_maquina_id;
+
+    -- 3. Roll aggregation (weight + count)
+    SELECT
+        SUM(l.cantidad),
+        SUM(CASE ird.flg_rib WHEN false THEN 1 ELSE 0 END),
+        SUM(CASE ird.flg_rib WHEN true  THEN 1 ELSE 0 END)
     INTO v_peso, v_cantidad_regular, v_cantidad_rib
     FROM mes.orden_produccion_paso_item oppi
     JOIN mes.orden_produccion_item opi ON oppi.orden_produccion_item_id = opi.id
-    JOIN inventario.lote l ON opi.lote_id=l.id
-    JOIN item_rollo_detalle ird ON ird.item_id=l.item_id
+    JOIN inventario.lote l             ON opi.lote_id = l.id
+    JOIN item_rollo_detalle ird        ON ird.item_id = l.item_id
     WHERE oppi.orden_produccion_paso_id = p_paso_id;
 
-    v_cantidad:= v_cantidad_regular + v_cantidad_rib;
+    v_cantidad := COALESCE(v_cantidad_regular, 0) + COALESCE(v_cantidad_rib, 0);
 
-    -- 4. Volumen
+    -- 4. Bath volume
     v_volumen := CASE
         WHEN v_maq_nombre != 'BRAZOLI (1)' AND v_cantidad <= 12 THEN v_peso * 7
         ELSE v_peso * v_rb
     END;
 
     -- 5. Build JSON
+    -- pasos: chemistry steps with nested insumos (new hierarchical model)
+    -- Breaking change from flat insumos[]: frontend flattens pasos[].insumos[] for consumption form
     SELECT jsonb_build_object(
-        'receta_id', opp.receta_id,
-        'partida_id', p.id,
-        'cliente_id', p.cliente_id,
-        'cliente', cli.cliente,
+        'receta_id',         opp.receta_id,
+        'partida_id',        p.id,
+        'cliente_id',        p.cliente_id,
+        'cliente',           cli.cliente,
         'orden_produccion_id', op.id,
-        'tipo_receta', tr.tipo_receta,
-        'tipo_articulo_id', r.tipo_articulo_id,
-        'tipo_articulo', a.tipo_articulo,
-        'peso', v_peso,
-        'cantidad', v_cantidad,
-        'cantidad_regular', v_cantidad_regular,
-        'cantidad_rib', v_cantidad_rib,
-        'volumen', ROUND(v_volumen::NUMERIC, 2),
-        'maquina', jsonb_build_object(
-            'id', v_maquina_id,
-            'codigo', v_maq_codigo,
-            'nombre', v_maq_nombre
-        ),
+        'tipo_receta',       tr.tipo_receta,
+        'tipo_articulo_id',  r.tipo_articulo_id,
+        'tipo_articulo',     a.tipo_articulo,
+        'peso',              v_peso,
+        'cantidad',          v_cantidad,
+        'cantidad_regular',  v_cantidad_regular,
+        'cantidad_rib',      v_cantidad_rib,
+        'volumen',           ROUND(v_volumen::NUMERIC, 2),
+        'maquina',           jsonb_build_object(
+                                 'id',     v_maquina_id,
+                                 'codigo', v_maq_codigo,
+                                 'nombre', v_maq_nombre
+                             ),
         'pasos', (
             SELECT jsonb_agg(
                 jsonb_build_object(
-                    'orden', rp.orden,
-                    'paso_id', rp.paso_id,
-                    'paso', pa.paso
-                ) ORDER BY rp.orden
+                    'orden',        rtp.orden,
+                    'operacion_id', ro.id,
+                    'operacion',    ro.nombre,
+                    'ph',           rtp.ph,
+                    'temperatura',  rtp.temperatura,
+                    'tiempo_min',   rtp.tiempo_min,
+                    'nota',         rtp.nota,
+                    'insumos', (
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'item_id',              rtpi.item_id,
+                                'orden',                rtpi.orden,
+                                'codigo',               i.codigo,
+                                'nombre',               i.nombre,
+                                'cantidad',             rtpi.cantidad,
+                                'medida',               iid.medida,
+                                'cantidad_requerida_kg', CASE
+                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen
+                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10
+                                END
+                            ) ORDER BY rtpi.orden
+                        )
+                        FROM receta.tenido_paso_insumo rtpi
+                        JOIN item i                ON i.id   = rtpi.item_id
+                        JOIN item_insumo_detalle iid ON iid.item_id = rtpi.item_id
+                        WHERE rtpi.paso_id = rtp.id
+                    )
+                ) ORDER BY rtp.orden
             )
-            FROM receta_x_paso rp
-            JOIN paso pa ON rp.paso_id = pa.id
-            WHERE rp.receta_id = r.id
-        ),
-        'insumos', (
-            SELECT jsonb_agg(
-                jsonb_build_object(
-                    'insumo_id', i.id,
-                    'orden', ri.orden,
-                    'codigo', i.codigo,
-                    'insumo', i.nombre,
-                    'cantidad', ri.cantidad,
-                    'medida', iid.medida,
-                    'cantidad_requerida_kg', CASE
-                        WHEN iid.medida = 'g/L' THEN ri.cantidad  * v_volumen
-                        WHEN iid.medida = '%'   THEN ri.cantidad  * v_peso * 10
-                    END
-                )
-            )
-            FROM receta_x_insumo ri
-            JOIN item i ON ri.insumo_id = i.legacy_id
-            JOIN item_insumo_detalle iid ON iid.item_id=i.id
-            WHERE ri.receta_id = r.id
+            FROM receta.tenido_paso rtp
+            JOIN receta.operacion ro ON ro.id = rtp.operacion_id
+            WHERE rtp.receta_id = r.id
         )
     ) INTO v_receta
-    FROM orden_produccion_paso opp
-    LEFT JOIN receta2 r ON r.id = opp.receta_id
-    LEFT JOIN orden_produccion op ON op.id = opp.orden_produccion_id
-    LEFT JOIN doc.partida p ON p.id = op.partida_id
-    LEFT JOIN tipo_receta tr ON tr.id = r.tipo_receta_id
-    LEFT JOIN tipo_articulo a ON a.id = r.tipo_articulo_id
-    LEFT JOIN cliente cli ON cli.id = p.cliente_id
+    FROM mes.orden_produccion_paso opp
+    JOIN receta.tenido r          ON r.id  = opp.receta_id
+    JOIN mes.orden_produccion op  ON op.id = opp.orden_produccion_id
+    JOIN doc.partida p            ON p.id  = op.partida_id
+    LEFT JOIN tipo_receta tr      ON tr.id = r.tipo_receta_id
+    LEFT JOIN tipo_articulo a     ON a.id  = r.tipo_articulo_id
+    LEFT JOIN cliente cli         ON cli.id = p.cliente_id
     WHERE opp.id = p_paso_id;
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
@@ -401,10 +478,16 @@ BEGIN
         maquina_asignada_id = COALESCE((p_datos->>'maquina_asignada_id')::INT, maquina_asignada_id)
     WHERE id = p_paso_id;
 
-    -- Auto-start the parent orden if still CREADA/PLANIFICADA/PROGRAMADA/LIBERADA
+    -- Auto-start (or revert) the parent orden to EN_PROCESO
     UPDATE mes.orden_produccion
-    SET estado = 'EN_PROCESO', fyh_inicio = COALESCE(fyh_inicio, NOW())
-    WHERE id = v_orden_id AND estado IN ('CREADA','PLANIFICADA','PROGRAMADA','LIBERADA');
+    SET estado = 'EN_PROCESO', fyh_inicio = COALESCE(fyh_inicio, NOW()), fyh_fin = NULL
+    WHERE id = v_orden_id AND estado IN ('CREADA','PLANIFICADA','PROGRAMADA','LIBERADA','FINALIZADA');
+
+    -- Auto-start the partida if still CONFIRMADA
+    UPDATE doc.partida
+    SET estado = 'EN_PRODUCCION'
+    WHERE id = (SELECT partida_id FROM mes.orden_produccion WHERE id = v_orden_id)
+      AND estado = 'CONFIRMADA';
 
     -- Update machine state
     IF (p_datos->>'maquina_asignada_id') IS NOT NULL THEN
@@ -776,9 +859,11 @@ $function$;
 -- WHERE fyh_inicio::date=now()::date and secuencia=3
 -- RETURNING id;
 
--- SELECT id, flg_final FROM mes.orden_produccion_paso WHERE id = 4488;
+-- SELECT id, flg_genera_produccion FROM mes.orden_produccion_paso WHERE id = 4488;
 
 -- UPDATE mes.orden_produccion_paso opp SET estado='PENDIENTE' WHERE orden_produccion_id =8099 AND secuencia =4
+-- SELECT * FROM inventario.item_movimientos WHERE documento_tipo='ORDEN_PRODUCCION_PASO' AND documento_id=4488;
+
 -- ═══════════════════════════════════════════════════════════════
 -- 24. REGISTRAR ITEMS PROCESADOS EN PASO (roll tracking)
 -- ═══════════════════════════════════════════════════════════════
@@ -787,7 +872,7 @@ RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO 'iam','public','mes'
-AS $function$
+AS $function$   
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id int := get_user_id();
@@ -803,11 +888,11 @@ BEGIN
 
  -- 2. Validation (adjust as needed for UN vs KG)
     WITH errores AS (
-        SELECT i.orden_produccion_item_id 
+        SELECT (i->>'orden_produccion_item_id')::INT AS orden_produccion_item_id
         FROM jsonb_array_elements(p_items) i
         JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_item_id = (i->>'orden_produccion_item_id')::INT
         JOIN mes.orden_produccion_paso opp ON opp.id = oppi.orden_produccion_paso_id
-        WHERE opp.flg_final=true and opp.id != p_paso_id
+        WHERE opp.flg_genera_produccion=true and opp.id != p_paso_id
     )
     SELECT jsonb_agg(jsonb_build_object(
         'orden_produccion_item_id', orden_produccion_item_id
@@ -844,7 +929,6 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $function$;
 
-
 -- ═══════════════════════════════════════════════════════════════
 -- 25. REGISTRAR PRODUCCION (create output lotes)
 -- ═══════════════════════════════════════════════════════════════
@@ -866,6 +950,8 @@ DECLARE
     v_detalles      jsonb;
     v_propietario_id int;
     v_ing_tipo_id   smallint;
+    v_egr_tipo_id   smallint;
+    v_consumed      int;
     v_error_payload jsonb;
 BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
@@ -878,7 +964,7 @@ BEGIN
     INTO v_orden_id, v_partida_id
     FROM mes.orden_produccion_paso opp
     JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
-    WHERE opp.id = p_orden_paso_id AND opp.estado IN ('EN_PROCESO','COMPLETADO') AND flg_final=TRUE;
+    WHERE opp.id = p_orden_paso_id AND opp.estado IN ('EN_PROCESO','COMPLETADO') AND flg_genera_produccion=TRUE;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Paso #% no encontrado o no está EN_PROCESO | COMPLETADO o no esta marcado como paso final.', p_orden_paso_id;
@@ -888,11 +974,18 @@ BEGIN
     FROM doc.partida_detalle
     WHERE partida_id = v_partida_id
     FOR UPDATE;
--- Lock existing production lotes for this orden
+-- Lock existing production lotes for this orden paso
 PERFORM 1
 FROM inventario.lote
-WHERE documento_tipo = 'ORDEN_PRODUCCION' AND documento_id = v_orden_id
+WHERE documento_tipo = 'ORDEN_PRODUCCION_PASO' AND documento_id = p_orden_paso_id
 FOR UPDATE;
+-- Lock input roll lotes to prevent concurrent consumption
+PERFORM 1
+FROM inventario.lote l
+JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id
+JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_item_id = opi.id
+WHERE oppi.orden_produccion_paso_id = p_orden_paso_id
+FOR UPDATE OF l;
 PERFORM 1
 FROM mes.orden_produccion
 WHERE id = v_orden_id
@@ -940,8 +1033,31 @@ FOR UPDATE;
 
     SELECT id INTO v_ing_tipo_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING';
+    SELECT id INTO v_egr_tipo_id
+    FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
 
-    -- 4. Create lotes + movements (pre-generated IDs, no RETURNING, no join)
+    -- 4a. Backflush: consume input rolls assigned to this paso
+    INSERT INTO inventario.item_movimientos(
+        item_id, lote_id, item_movimiento_tipo_id,
+        origen_ubicacion_id, cantidad,
+        documento_tipo, documento_id
+    )
+    SELECT
+        opi.item_id,
+        opi.lote_id,
+        v_egr_tipo_id,
+        opi.ubicacion_id,
+        l.cantidad,
+        'ORDEN_PRODUCCION_PASO',
+        p_orden_paso_id
+    FROM mes.orden_produccion_paso_item oppi
+    JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
+    JOIN inventario.lote l ON l.id = opi.lote_id
+    WHERE oppi.orden_produccion_paso_id = p_orden_paso_id;
+
+    GET DIAGNOSTICS v_consumed = ROW_COUNT;
+
+    -- 4b. Create output lotes + ingress movements
     WITH input_items AS (
         SELECT
             (i->>'item_id')::INT AS item_id,
@@ -953,7 +1069,7 @@ FOR UPDATE;
             item_id, documento_tipo, documento_id,
             cantidad, detalles, propietario_id
         )
-        SELECT item_id, 'ORDEN_PRODUCCION', v_orden_id,
+        SELECT item_id, 'ORDEN_PRODUCCION_PASO', p_orden_paso_id,
                cantidad, v_detalles, v_propietario_id
         FROM input_items
 RETURNING id, item_id, cantidad    
@@ -969,8 +1085,8 @@ RETURNING id, item_id, cantidad
     v_ing_tipo_id,
     p_ubicacion_id,
     cantidad,
-    'ORDEN_PRODUCCION',
-    v_orden_id
+    'ORDEN_PRODUCCION_PASO',
+    p_orden_paso_id
 FROM insert_lotes;
 
     -- 5. Notifications
@@ -983,7 +1099,7 @@ FROM insert_lotes;
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
     WHERE r.code IN ('jefe_planta','calidad') AND v_usr_id <> ur.user_id;
 
-    RETURN format('%s lotes creados para orden #%s.', jsonb_array_length(p_output), v_orden_id);
+    RETURN format('%s rollos consumidos, %s lotes creados para orden #%s.', v_consumed, jsonb_array_length(p_output), v_orden_id);
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
@@ -1009,12 +1125,12 @@ DECLARE
     v_orden_id     bigint;
     v_maquina_id   int;
     v_op_nombre    text;
-    v_flg_final    boolean;
+    v_flg_genera_produccion    boolean;
     v_todos_completos boolean;
     v_prod_result  text;
 BEGIN
-    SELECT opp.estado, opp.orden_produccion_id, opp.maquina_asignada_id, o.nombre, opp.flg_final
-    INTO v_estado, v_orden_id, v_maquina_id, v_op_nombre, v_flg_final
+    SELECT opp.estado, opp.orden_produccion_id, opp.maquina_asignada_id, o.nombre, opp.flg_genera_produccion
+    INTO v_estado, v_orden_id, v_maquina_id, v_op_nombre, v_flg_genera_produccion
     FROM mes.orden_produccion_paso opp
     LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
     WHERE opp.id = p_paso_id;
@@ -1032,7 +1148,7 @@ BEGIN
     END IF;
 
     -- Register production output atomically (final step only)
-    IF v_flg_final AND p_datos->'produccion' IS NOT NULL AND jsonb_array_length(p_datos->'produccion') > 0 THEN
+    IF v_flg_genera_produccion AND p_datos->'produccion' IS NOT NULL AND jsonb_array_length(p_datos->'produccion') > 0 THEN
         v_prod_result := mes.registrar_produccion(
             p_paso_id,
             p_datos->'produccion',
@@ -1080,6 +1196,173 @@ EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
     RAISE LOG 'Error in finalizar_paso - User: %, ID: %, Error: %', v_usr_id, p_paso_id, v_message;
+    RAISE;
+END;
+$function$;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- INICIAR LAVADO — start a machine wash activity
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.iniciar_lavado(p_lavado_id BIGINT, p_datos jsonb DEFAULT '{}'::jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id      INT := get_user_id();
+    v_estado      orden_produccion_paso_estado_enum;
+    v_maquina_id  INT;
+BEGIN
+    SELECT estado, maquina_id
+    INTO v_estado, v_maquina_id
+    FROM mes.lavado_maquina
+    WHERE id = p_lavado_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Lavado con ID % no encontrado.', p_lavado_id;
+    END IF;
+    IF v_estado <> 'PENDIENTE' THEN
+        RAISE EXCEPTION 'Solo se puede iniciar un lavado en estado PENDIENTE. Estado actual: %', v_estado;
+    END IF;
+
+    UPDATE mes.lavado_maquina
+    SET estado      = 'EN_PROCESO',
+        fyh_inicio  = NOW(),
+        empleado_id = COALESCE((p_datos->>'empleado_id')::SMALLINT, empleado_id),
+        usr_mod     = v_usr_id,
+        fyh_mod     = NOW()
+    WHERE id = p_lavado_id;
+
+    UPDATE mes.maquina SET estado_actual = 'activa' WHERE id = v_maquina_id;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Lavado Iniciado',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' inició lavado de maquina #%s', v_maquina_id), 'info',
+           jsonb_build_object('objeto_tipo','lavado_maquina','lavado_id', p_lavado_id)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta') AND v_usr_id <> ur.user_id;
+
+    RETURN format('Lavado #%s iniciado correctamente.', p_lavado_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in iniciar_lavado - User: %, ID: %, Error: %', v_usr_id, p_lavado_id, v_message;
+    RAISE;
+END;
+$function$;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- FINALIZAR LAVADO — complete a machine wash, record chemical consumption
+-- p_datos.consumos[] optional: [{ item_id, cantidad, observacion? }]
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.finalizar_lavado(p_lavado_id BIGINT, p_datos jsonb DEFAULT '{}'::jsonb)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','inventario','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id      INT := get_user_id();
+    v_estado      orden_produccion_paso_estado_enum;
+    v_maquina_id  INT;
+    v_consumos    jsonb;
+    v_saldo       numeric;
+    v_egr_tipo_id smallint;
+    v_error_payload jsonb;
+BEGIN
+    SELECT estado, maquina_id
+    INTO v_estado, v_maquina_id
+    FROM mes.lavado_maquina
+    WHERE id = p_lavado_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Lavado con ID % no encontrado.', p_lavado_id;
+    END IF;
+    IF v_estado <> 'EN_PROCESO' THEN
+        RAISE EXCEPTION 'Solo se puede finalizar un lavado EN_PROCESO. Estado actual: %', v_estado;
+    END IF;
+
+    -- Register chemical consumption if provided
+    IF p_datos->'consumos' IS NOT NULL AND jsonb_array_length(p_datos->'consumos') > 0 THEN
+        SELECT id INTO v_egr_tipo_id
+        FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
+
+        -- Stock check
+        WITH consumos AS (
+            SELECT (i->>'item_id')::INT AS item_id, SUM((i->>'cantidad')::numeric) AS cantidad
+            FROM jsonb_array_elements(p_datos->'consumos') i GROUP BY 1
+        ),
+        errores AS (
+            SELECT c.item_id, it.nombre AS item_nombre, c.cantidad,
+                   COALESCE(SUM(sa.cantidad_disponible), 0) AS cantidad_disponible
+            FROM consumos c
+            LEFT JOIN inventario.vw_stock_actual sa ON sa.item_id = c.item_id
+            JOIN item it ON it.id = c.item_id
+            GROUP BY c.item_id, it.nombre, c.cantidad
+            HAVING COALESCE(SUM(sa.cantidad_disponible), 0) < c.cantidad
+        )
+        SELECT jsonb_agg(jsonb_build_object(
+            'item_id', item_id, 'item_nombre', item_nombre,
+            'saldo_disponible', cantidad_disponible, 'cantidad_requerida', cantidad
+        ))
+        INTO v_error_payload FROM errores;
+
+        IF v_error_payload IS NOT NULL THEN
+            RAISE EXCEPTION 'Stock insuficiente para registrar consumo de lavado'
+                USING DETAIL = v_error_payload::text;
+        END IF;
+
+        -- FIFO resolution + movements
+        v_consumos := mes.calcular_fifo(p_datos->'consumos');
+        INSERT INTO inventario.item_movimientos(
+            item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, cantidad,
+            documento_tipo, documento_id, observacion
+        )
+        SELECT
+            (v_consumo->>'item_id')::INT,
+            (v_consumo->>'lote_id')::INT,
+            v_egr_tipo_id,
+            (v_consumo->>'ubicacion_id')::INT,
+            (v_consumo->>'cantidad')::NUMERIC(12,2),
+            'LAVADO_MAQUINA',
+            p_lavado_id,
+            p_consumo->>'observacion'
+        FROM jsonb_array_elements(v_consumos) v_consumo
+        JOIN jsonb_array_elements(p_datos->'consumos') p_consumo
+            ON v_consumo->>'item_id' = p_consumo->>'item_id';
+    END IF;
+
+    UPDATE mes.lavado_maquina
+    SET estado  = 'COMPLETADO',
+        fyh_fin = NOW(),
+        usr_mod = v_usr_id,
+        fyh_mod = NOW()
+    WHERE id = p_lavado_id;
+
+    UPDATE mes.maquina SET estado_actual = 'espera' WHERE id = v_maquina_id;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Lavado Completado',
+           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
+                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           || format(' completó lavado de maquina #%s', v_maquina_id), 'info',
+           jsonb_build_object('objeto_tipo','lavado_maquina','lavado_id', p_lavado_id)
+    FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta') AND v_usr_id <> ur.user_id;
+
+    RETURN format('Lavado #%s completado.', p_lavado_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in finalizar_lavado - User: %, ID: %, Error: %', v_usr_id, p_lavado_id, v_message;
     RAISE;
 END;
 $function$;

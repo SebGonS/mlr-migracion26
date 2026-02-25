@@ -169,12 +169,12 @@ If a step has no consumptions (e.g., SECADO, PLANCHADO), omit `consumos` from `p
 
 ## 4. `registrar_produccion(orden_paso_id, output)` — Production Output
 
-**Trigger**: On the final step (`flg_final = true`), register finished product.
+**Trigger**: On the final step (`flg_genera_produccion = true`), register finished product.
 
 **Allowed states**: `EN_PROCESO` or `COMPLETADO` (can register output after step finishes).
 
 **Backend behavior**:
-- Validates paso is `flg_final = true` and in allowed state
+- Validates paso is `flg_genera_produccion = true` and in allowed state
 - Validates quantities don't exceed `partida_detalle` planned amounts
 - Creates new `inventario.lote` records (finished product)
 - Creates `PROD_ING` inventory movements (stock ingress)
@@ -298,4 +298,4 @@ Recipe inputs are frozen by state transitions, not by snapshots:
 | Rolls assigned during PENDIENTE (planning) | `generar_receta` needs roll count/weight to calculate chemical quantities. 1 lot = 1 roll. Rolls are assigned before recipe generation. |
 | `registrar_items_procesados` allows PENDIENTE/EN_PROCESO/COMPLETADO | PENDIENTE for planning (assign rolls), EN_PROCESO for tracking, COMPLETADO for corrections. |
 | `orden_produccion_paso_item` is NOT for consumables | This table tracks primary materials (rolls/fabric) through steps. Chemical consumption goes through `inventario.item_movimientos` via `registrar_consumo_paso`. |
-| Production output only on `flg_final` steps | `registrar_produccion` creates finished product lots. Only allowed on the final step of the production route. |
+| Production output only on `flg_genera_produccion` steps | `registrar_produccion` creates finished product lots. Only allowed on the final step of the production route. |

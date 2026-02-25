@@ -944,14 +944,14 @@ CREATE TABLE mes.orden_produccion_paso (
     tiempo_estandar int,
     relacion_bano numeric(5,2),
     -- The specific recipe for THIS step (Solves "multiple recipes" issue)
-    receta_id int references receta2(id), -- Foreign key to your existing Recipe Header table
+    receta_id int references receta.tenido(id),
     
     -- Status of THIS specific step
     estado orden_produccion_paso_estado_enum DEFAULT 'PENDIENTE',
     
     -- Timestamps for OEE
     empleado_id smallint references mes.empleado(id),
-    flg_final bool DEFAULT false,
+    flg_genera_produccion bool DEFAULT false,
     fyh_inicio timestamptz,
     fyh_fin timestamptz,
      usr_cre int,
@@ -1073,9 +1073,12 @@ CREATE TABLE calidad.inspeccion_foto (
 
 
 
+-- Polymorphic scheduling board: both production steps and machine wash activities
+-- actividad_tipo discriminates between entity types (not 'documento_tipo' — these are activities, not documents)
 CREATE TABLE mes.programacion (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    orden_produccion_paso_id bigint NOT NULL REFERENCES mes.orden_produccion_paso(id),
+    actividad_tipo TEXT NOT NULL,    -- 'ORDEN_PRODUCCION_PASO' | 'LAVADO_MAQUINA'
+    actividad_id   BIGINT NOT NULL,  -- FK to the respective entity (no DB-level FK — polymorphic)
     maquina_id int NOT NULL REFERENCES mes.maquina(id),
     fecha date NOT NULL,
     secuencia smallint NOT NULL,
@@ -1084,7 +1087,26 @@ CREATE TABLE mes.programacion (
     fyh_cre timestamptz DEFAULT now(),
     usr_mod int,
     fyh_mod timestamptz,
-    UNIQUE (maquina_id, fecha, secuencia)
+    UNIQUE (maquina_id, fecha, secuencia),
+    CONSTRAINT chk_programacion_actividad_tipo CHECK (actividad_tipo IN ('ORDEN_PRODUCCION_PASO','LAVADO_MAQUINA'))
+);
+
+-- Machine wash execution entity — mirrors orden_produccion_paso lifecycle for standalone wash activities
+-- Scheduled on mes.programacion with actividad_tipo = 'LAVADO_MAQUINA'
+-- Chemical consumption recorded in inventario.item_movimientos with documento_tipo = 'LAVADO_MAQUINA'
+CREATE TABLE mes.lavado_maquina (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    receta_id   INT NOT NULL REFERENCES receta.lavado_maquina(id),
+    maquina_id  INT NOT NULL REFERENCES mes.maquina(id),
+    estado      orden_produccion_paso_estado_enum NOT NULL DEFAULT 'PENDIENTE',
+    empleado_id SMALLINT REFERENCES mes.empleado(id),
+    fyh_inicio  TIMESTAMPTZ,
+    fyh_fin     TIMESTAMPTZ,
+    nota        TEXT,
+    usr_cre     INT,
+    fyh_cre     TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod     INT,
+    fyh_mod     TIMESTAMPTZ
 );
 
 CREATE TABLE doc.compra_detalle(
@@ -1667,7 +1689,7 @@ LEFT JOIN mes.orden_produccion op ON op.id=opp.orden_produccion_id
 LEFT JOIN doc.partida p ON p.id=op.partida_id
 LEFT JOIN cliente c ON l.propietario_id=c.id
 LEFT JOIN prioridad pr ON pr.id=prioridad_id
-WHERE l.estado_calidad='PENDIENTE' AND vi.item_tipo_codigo='ROLLO';
+WHERE l.estado_calidad='PENDIENTE' AND vi.item_tipo_codigo='ROLLO' AND documento_tipo='ORDEN_PRODUCCION_PASO';
 
 
 CREATE OR REPLACE VIEW calidad.vw_inspecciones AS
@@ -1708,7 +1730,7 @@ m.nombre AS maquina_nombre,
 opp.estado,
 opp.fyh_inicio,
 opp.fyh_fin,
-opp.flg_final
+opp.flg_genera_produccion
 FROM mes.orden_produccion_paso opp
 JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
 JOIN doc.partida p ON p.id = op.partida_id
@@ -1769,6 +1791,8 @@ LEFT JOIN inventario.ubicacion            ud  ON ud.id     = im.destino_ubicacio
 
 
 
+-- mes.lavado_maquina defined above (near mes.programacion)
+
 GRANT SELECT ON inventario.vw_item_proveedor_guia TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_rollos TO anon, authenticated;
 GRANT USAGE ON SCHEMA mes TO authenticated;
@@ -1791,3 +1815,11 @@ GRANT INSERT ON calidad.inspeccion TO authenticated;
 GRANT INSERT ON calidad.inspeccion_foto TO authenticated;
 
 GRANT UPDATE ON mes.operacion TO authenticated;
+
+
+
+-- Step 4: Replace functions
+-- (paste the CREATE OR REPLACE FUNCTION blocks from funciones/mes.sql:
+--   mes.get_programacion_diaria, mes.get_pasos_sin_programar,
+--   mes.get_actividades_sin_programar, mes.guardar_programacion,
+--   mes.iniciar_lavado, mes.finalizar_lavado)

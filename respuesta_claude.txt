@@ -2288,7 +2288,7 @@ orden_produccion (id=1, partida_id=1, tipo='NORMAL', estado='CREADA')
 │
 ├── orden_produccion_paso (secuencia=1, operacion_id='TENIDO', maquina_id=2, receta_id=7)
 ├── orden_produccion_paso (secuencia=2, operacion_id='HIDRO', maquina_id=5)
-├── orden_produccion_paso (secuencia=3, operacion_id='RAMA', maquina_id=8, flg_final=true)
+├── orden_produccion_paso (secuencia=3, operacion_id='RAMA', maquina_id=8, flg_genera_produccion=true)
 Specific lotes assigned. No changes needed — already works.
 
 4. PRODUCTION EXECUTION — Consume inputs, produce outputs
@@ -2301,7 +2301,7 @@ Step 1 (TENIDO) starts → consume raw rolls from warehouse:
 
 Rolls go through pasos 1→2→3...
 
-Step 3 (RAMA, flg_final) completes → produce dyed rolls:
+Step 3 (RAMA, flg_genera_produccion) completes → produce dyed rolls:
   NEW lote 200: (item_id=20 [Jersey teñido], documento_tipo='orden_produccion_paso',
                  documento_id=paso_3, cantidad=25.0, detalles={peso:25.0, ancho:1.80})
   NEW lote 201: (item_id=20, ..., cantidad=29.5, ...)
@@ -2495,7 +2495,7 @@ orden_produccion
 │   ├── paso_item (lote 100, cantidad=25.2, flg_consumido=true)  ← weight changed
 │   └── paso_item (lote 101, cantidad=29.7, flg_consumido=true)
 │
-├── paso 3 (RAMA, flg_final=true)
+├── paso 3 (RAMA, flg_genera_produccion=true)
 │   └── paso_item (lote 100, cantidad=24.8, flg_consumido=true)  ← final weight
 │       → triggers: new lote 200 (dyed), PROD_ING movement
 About lote.detalles: don't update the original lot. It's a historical record of what was received.

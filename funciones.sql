@@ -771,7 +771,7 @@ BEGIN
                                 
                                 -- Estado
                                 'estado', opp.estado,
-                                'flg_final', opp.flg_final,
+                                'flg_genera_produccion', opp.flg_genera_produccion,
                                 'fyh_inicio', opp.fyh_inicio,
                                 'fyh_fin', opp.fyh_fin,
                                 
@@ -882,10 +882,10 @@ BEGIN
                                 ), '[]'::jsonb)
                             ) ORDER BY l.fyh_cre
                         )
-                        FROM inventario.lote l
+                         FROM inventario.lote l
+                        JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id AND opp.id=l.documento_id AND l.documento_tipo='ORDEN_PRODUCCION_PASO'
                         LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
-                        WHERE l.documento_tipo = 'orden_produccion'
-                        AND l.documento_id = op.id
+                        WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
                     ), '[]'::jsonb)
                     
                 ) ORDER BY op.id
@@ -1025,7 +1025,7 @@ WITH orden_rollos AS (
     INSERT INTO mes.orden_produccion_paso(
         orden_produccion_id, secuencia, operacion_id,
         maquina_asignada_id, receta_id, ph,
-        temperatura, tiempo_estandar, relacion_bano,flg_final
+        temperatura, tiempo_estandar, relacion_bano,flg_genera_produccion
     )
     SELECT v_orden_id,
            (p->>'secuencia')::SMALLINT,
@@ -1036,7 +1036,7 @@ WITH orden_rollos AS (
            (p->>'temperatura')::NUMERIC,
            (p->>'tiempo_estandar')::INT,
            COALESCE((p->>'relacion_bano')::NUMERIC,m.relacion_bano),
-              (p->>'flg_final')::BOOLEAN
+              (p->>'flg_genera_produccion')::BOOLEAN
     FROM jsonb_array_elements(p_orden->'pasos') p
     LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT;
 
@@ -1099,7 +1099,7 @@ BEGIN
         RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
     END IF;
 
-    IF v_estado IN ('FINALIZADA','TECO','CERRADA','CANCELADA') THEN
+    IF v_estado IN ('TECO','CERRADA','CANCELADA') THEN
         RAISE EXCEPTION 'No se pueden modificar pasos de una orden en estado %.', v_estado;
     END IF;
 
@@ -1119,7 +1119,7 @@ BEGIN
             (p->>'temperatura')::NUMERIC      AS temperatura,
             (p->>'tiempo_estandar')::INT      AS tiempo_estandar,
             COALESCE((p->>'relacion_bano')::NUMERIC,m.relacion_bano) AS relacion_bano,
-            (p->>'flg_final')::BOOL           AS flg_final
+            (p->>'flg_genera_produccion')::BOOL           AS flg_genera_produccion
         FROM jsonb_array_elements(p_pasos) p
         LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT
     )
@@ -1127,12 +1127,12 @@ BEGIN
         orden_produccion_id, secuencia, operacion_id,
         maquina_asignada_id, empleado_id, receta_id,
         ph, temperatura, tiempo_estandar, relacion_bano,
-        flg_final, usr_cre
+        flg_genera_produccion, usr_cre
     )
     SELECT p_orden_id, d.secuencia, d.operacion_id,
            d.maquina_asignada_id, d.empleado_id, d.receta_id,
            d.ph, d.temperatura, d.tiempo_estandar, d.relacion_bano,
-           COALESCE(d.flg_final, false), v_usr_id
+           COALESCE(d.flg_genera_produccion, false), v_usr_id
     FROM datos d
     ON CONFLICT (orden_produccion_id, secuencia)
     DO UPDATE SET
@@ -1144,7 +1144,7 @@ BEGIN
         temperatura        = EXCLUDED.temperatura,
         tiempo_estandar    = EXCLUDED.tiempo_estandar,
         relacion_bano      = EXCLUDED.relacion_bano,
-        flg_final          = EXCLUDED.flg_final,
+        flg_genera_produccion          = EXCLUDED.flg_genera_produccion,
         usr_mod            = v_usr_id,
         fyh_mod            = NOW()
         WHERE mes.orden_produccion_paso.estado = 'PENDIENTE';
@@ -1218,7 +1218,7 @@ BEGIN
             'rendimiento',          p.rendimiento,
             'ancho',                p.ancho,
 
-            -- Partida detalles (needed for production output form on flg_final steps)
+            -- Partida detalles (needed for production output form on flg_genera_produccion steps)
             'detalles', COALESCE((
                 SELECT jsonb_agg(jsonb_build_object(
                     'id',           pd.id,
@@ -1265,7 +1265,7 @@ BEGIN
 
                     -- Estado
                     'estado',               opp.estado,
-                    'flg_final',            opp.flg_final,
+                    'flg_genera_produccion',            opp.flg_genera_produccion,
                     'fyh_inicio',           opp.fyh_inicio,
                     'fyh_fin',              opp.fyh_fin,
 
@@ -1392,9 +1392,9 @@ BEGIN
                 ) ORDER BY l.fyh_cre
             )
             FROM inventario.lote l
+            JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id AND opp.id=l.documento_id AND l.documento_tipo='ORDEN_PRODUCCION_PASO'
             LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
-            WHERE l.documento_tipo = 'orden_produccion'
-              AND l.documento_id = op.id
+            WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
         ), '[]'::jsonb)
 
     ) INTO v_result
