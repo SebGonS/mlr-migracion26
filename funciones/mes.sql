@@ -344,8 +344,10 @@ BEGIN
         'cliente',           cli.cliente,
         'orden_produccion_id', op.id,
         'tipo_receta',       tr.tipo_receta,
-        'tipo_articulo_id',  r.tipo_articulo_id,
-        'tipo_articulo',     a.tipo_articulo,
+        'articulo_id',       ar.id,
+        'articulo_tipo_id',  ar.articulo_tipo_id,
+        'articulo_tipo',     at.nombre,
+        'fibra',             ar.fibra,
         'peso',              v_peso,
         'cantidad',          v_cantidad,
         'cantidad_regular',  v_cantidad_regular,
@@ -397,8 +399,9 @@ BEGIN
     JOIN receta.tenido r          ON r.id  = opp.receta_id
     JOIN mes.orden_produccion op  ON op.id = opp.orden_produccion_id
     JOIN doc.partida p            ON p.id  = op.partida_id
-    LEFT JOIN tipo_receta tr      ON tr.id = r.tipo_receta_id
-    LEFT JOIN tipo_articulo a     ON a.id  = r.tipo_articulo_id
+    LEFT JOIN tipo_receta tr      ON tr.id  = r.tipo_receta_id
+    JOIN articulo ar              ON ar.id  = r.articulo_id
+    LEFT JOIN articulo_tipo at    ON at.id  = ar.articulo_tipo_id
     LEFT JOIN cliente cli         ON cli.id = p.cliente_id
     WHERE opp.id = p_paso_id;
 

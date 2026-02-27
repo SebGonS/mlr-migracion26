@@ -449,6 +449,62 @@ INSERT INTO colorante_tipo (nombre,codigo)
 VALUES ('directo','DIR'),('disperso','DISP'),('reactivo','RX');
 
 
+-- ───────────────────────────────────────
+-- Article classification
+-- ───────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS articulo_tipo (
+    id           SMALLINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre       TEXT     NOT NULL,
+    codigo_canon TEXT     NOT NULL UNIQUE
+);
+CREATE TRIGGER trg_bi_articulo_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON articulo_tipo
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
+
+CREATE TABLE IF NOT EXISTS articulo (
+    id               SMALLINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre           TEXT     NOT NULL,
+    codigo_canon     TEXT     NOT NULL UNIQUE,
+    grupo_articulo   TEXT,
+    articulo_tipo_id SMALLINT NOT NULL REFERENCES articulo_tipo(id),
+    fibra            SMALLINT NOT NULL  -- number of fiber types: 1=mono, 2=two-fiber blend
+);
+CREATE TRIGGER trg_bi_articulo_codigo_canon
+BEFORE INSERT OR UPDATE ON articulo
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- MIGRATION (dev env)
+-- Run against existing DB to align with DDL above.
+-- Legacy tables: tipo_articulo (→ articulo_tipo), articulo (add fibra + codigo_canon)
+-- ═══════════════════════════════════════════════════════════════
+
+-- Step 1: Rename tables and columns
+-- ALTER TABLE tipo_articulo RENAME TO articulo_tipo;
+-- ALTER TABLE articulo_tipo RENAME COLUMN tipo_articulo TO nombre;
+-- ALTER TABLE articulo RENAME COLUMN articulo TO nombre;
+-- ALTER TABLE articulo RENAME COLUMN tipo_articulo_id TO articulo_tipo_id;
+
+-- Step 2: Add codigo_canon and backfill
+-- ALTER TABLE articulo_tipo ADD COLUMN IF NOT EXISTS codigo_canon TEXT;
+-- UPDATE articulo_tipo SET codigo_canon = lower(unaccent(nombre));
+-- ALTER TABLE articulo_tipo ALTER COLUMN codigo_canon SET NOT NULL;
+-- CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_tipo_cc ON articulo_tipo(codigo_canon);
+-- ALTER TABLE articulo ADD COLUMN IF NOT EXISTS codigo_canon TEXT;
+-- UPDATE articulo SET codigo_canon = lower(unaccent(nombre));
+-- ALTER TABLE articulo ALTER COLUMN codigo_canon SET NOT NULL;
+-- CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_cc ON articulo(codigo_canon);
+
+-- Step 3: Add fibra and backfill from item_rollo_detalle
+-- Sanity check first (must return zero rows before proceeding):
+-- SELECT articulo_id, COUNT(DISTINCT fibra) FROM item_rollo_detalle GROUP BY articulo_id HAVING COUNT(DISTINCT fibra) > 1;
+-- ALTER TABLE articulo ADD COLUMN IF NOT EXISTS fibra SMALLINT;
+-- UPDATE articulo ar SET fibra = ird.fibra FROM item_rollo_detalle ird WHERE ird.articulo_id = ar.id;
+-- ALTER TABLE articulo ALTER COLUMN fibra SET NOT NULL;
+
+
 CREATE TABLE item_insumo_detalle(
    item_id INT PRIMARY KEY REFERENCES item(id),
    medida medida_enum NOT NULL,
@@ -1109,15 +1165,112 @@ CREATE TABLE mes.lavado_maquina (
     fyh_mod     TIMESTAMPTZ
 );
 
-CREATE TABLE doc.compra_detalle(
-  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  compra_id int NOT NULL, -- REFERENCES compra(id),
-  item_id int NOT NULL REFERENCES item(id),
-  cantidad numeric(12,2) NOT NULL CHECK (cantidad > 0),
-  precio_unitario numeric(12,4) NOT NULL CHECK (precio_unitario >= 0),
-  UNIQUE(compra_id, item_id)
+-- ═══════════════════════════════════════════════════════════════
+-- COMPRAS (Procurement)
+-- ═══════════════════════════════════════════════════════════════
+
+-- Enums
+DROP TYPE IF EXISTS tipo_pago_enum CASCADE;
+CREATE TYPE tipo_pago_enum AS ENUM (
+    'contado',   -- paid immediately
+    'credito',   -- open credit terms
+    'letras'     -- bills of exchange
 );
 
+DROP TYPE IF EXISTS estado_pago_enum CASCADE;
+CREATE TYPE estado_pago_enum AS ENUM (
+    'pendiente',
+    'parcial',
+    'pagado',
+    'anulado'
+);
+
+DROP TYPE IF EXISTS letra_estado_enum CASCADE;
+CREATE TYPE letra_estado_enum AS ENUM (
+    'pendiente',
+    'protestada',
+    'pagada',
+    'anulada'
+);
+
+-- ───────────────────────────────────────────────────────────────
+-- Supplier invoice (Comprobante de Pago SUNAT)
+-- Created before or after compra depending on when invoice arrives
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE doc.factura_proveedor (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    proveedor_id INT NOT NULL REFERENCES proveedor(id),
+    serie       TEXT NOT NULL,              -- e.g. 'F001'
+    numero      INT  NOT NULL,              -- e.g. 1234
+    fecha_emision       DATE NOT NULL,
+    fecha_vencimiento   DATE,
+    tipo_pago   tipo_pago_enum NOT NULL DEFAULT 'contado',
+    moneda      CHAR(3) NOT NULL DEFAULT 'USD',  -- PEN | USD
+    tipo_cambio NUMERIC(10,4),              -- fill if moneda = USD
+    subtotal    NUMERIC(12,2) NOT NULL DEFAULT 0,
+    igv         NUMERIC(12,2) NOT NULL DEFAULT 0,
+    total       NUMERIC(12,2) NOT NULL DEFAULT 0,
+    estado_pago estado_pago_enum NOT NULL DEFAULT 'pendiente',
+    observacion TEXT,
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT, fyh_mod TIMESTAMPTZ,
+    UNIQUE (proveedor_id, serie, numero)
+);
+
+-- ───────────────────────────────────────────────────────────────
+-- Purchase event — lightweight, guia drives inventory movements
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE doc.compra (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    proveedor_id INT NOT NULL REFERENCES proveedor(id),
+    factura_proveedor_id BIGINT REFERENCES doc.factura_proveedor(id),  -- nullable: invoice may arrive later
+    fecha       DATE NOT NULL DEFAULT CURRENT_DATE,
+    observacion TEXT,
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT, fyh_mod TIMESTAMPTZ,
+    flg_elm BOOLEAN NOT NULL DEFAULT FALSE,
+    usr_elm INT,  fyh_elm TIMESTAMPTZ
+);
+
+-- ───────────────────────────────────────────────────────────────
+-- Line items: what was agreed/received per compra
+-- No UNIQUE(compra_id, item_id) — same item at different prices is valid
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE doc.compra_detalle (
+    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    compra_id       BIGINT NOT NULL REFERENCES doc.compra(id),
+    item_id         INT    NOT NULL REFERENCES item(id),
+    cantidad        NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    precio_unitario NUMERIC(12,4) NOT NULL CHECK (precio_unitario >= 0),
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ───────────────────────────────────────────────────────────────
+-- Junction: which guias delivered goods for this compra
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE doc.compra_guia_remision (
+    compra_id        BIGINT NOT NULL REFERENCES doc.compra(id),
+    guia_remision_id BIGINT NOT NULL REFERENCES doc.guia_remision(id),
+    PRIMARY KEY (compra_id, guia_remision_id)
+);
+
+-- ───────────────────────────────────────────────────────────────
+-- Letras de cambio — payment instruments tied to an invoice
+-- ───────────────────────────────────────────────────────────────
+CREATE TABLE doc.letra (
+    id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    factura_proveedor_id BIGINT NOT NULL REFERENCES doc.factura_proveedor(id),
+    numero               TEXT,                          -- letra number if any
+    monto                NUMERIC(12,2) NOT NULL CHECK (monto > 0),
+    fecha_giro           DATE,
+    fecha_vencimiento    DATE NOT NULL,
+    banco                TEXT,
+    estado               letra_estado_enum NOT NULL DEFAULT 'pendiente',
+    fecha_pago           DATE,                          -- actual payment date
+    observacion          TEXT,
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT, fyh_mod TIMESTAMPTZ
+);
 
 GRANT USAGE ON SCHEMA doc TO authenticated;
 -- Grant SELECT on the view
@@ -1226,24 +1379,37 @@ CREATE OR REPLACE VIEW doc.vw_compras AS
 SELECT
     c.id,
     c.proveedor_id,
-    c.fecha_remision,
-    c.fyh_cre AS fecha_creacion,
+    p.proveedor AS proveedor_nombre,
+    c.fecha,
+    c.factura_proveedor_id,
+    fp.serie                            AS factura_serie,
+    fp.numero                           AS factura_numero,
+    fp.total                            AS factura_total,
+    fp.moneda                           AS factura_moneda,
+    fp.estado_pago,
+    fp.fecha_vencimiento,
 
     -- Totals from detail lines
-    COALESCE(det.total_items, 0) AS total_items,
-    COALESCE(det.monto_total, 0) AS monto_total,
+    COALESCE(det.total_items, 0)        AS total_items,
+    COALESCE(det.monto_total, 0)        AS monto_total,
 
-    -- Linked guias count
-    COALESCE(guias.total_guias, 0) AS total_guias,
+    -- Linked guias
+    COALESCE(guias.total_guias, 0)      AS total_guias,
 
+    -- Pending letras
+    COALESCE(letras.total_letras, 0)            AS total_letras,
+    COALESCE(letras.monto_letras_pendiente, 0)  AS monto_letras_pendiente,
+
+    c.observacion,
     c.usr_cre,
     c.fyh_cre
-FROM compra c
+FROM doc.compra c
+JOIN proveedor p ON p.id = c.proveedor_id
+LEFT JOIN doc.factura_proveedor fp ON fp.id = c.factura_proveedor_id
 
 LEFT JOIN LATERAL (
-    SELECT
-        COUNT(*)               AS total_items,
-        SUM(cd.cantidad * cd.precio_unitario) AS monto_total
+    SELECT COUNT(*)                            AS total_items,
+           SUM(cd.cantidad * cd.precio_unitario) AS monto_total
     FROM doc.compra_detalle cd
     WHERE cd.compra_id = c.id
 ) det ON true
@@ -1252,7 +1418,14 @@ LEFT JOIN LATERAL (
     SELECT COUNT(*) AS total_guias
     FROM doc.compra_guia_remision cgr
     WHERE cgr.compra_id = c.id
-) guias ON true;
+) guias ON true
+
+LEFT JOIN LATERAL (
+    SELECT COUNT(*)                                                   AS total_letras,
+           SUM(l.monto) FILTER (WHERE l.estado = 'pendiente')        AS monto_letras_pendiente
+    FROM doc.letra l
+    WHERE l.factura_proveedor_id = c.factura_proveedor_id
+) letras ON true;
 
 GRANT SELECT ON doc.vw_compras TO authenticated;
 

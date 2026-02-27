@@ -1,0 +1,297 @@
+-- =============================================================================
+-- MLR App — Authorization Setup for Supabase
+-- Run sections in order. Re-running is safe (CREATE OR REPLACE / IF NOT EXISTS).
+-- =============================================================================
+
+
+-- =============================================================================
+-- SECTION 0: get_user_id()
+-- Reads numeric id_usuario from the JWT claim baked in by the access token hook.
+-- Zero DB cost (no join). Used by every SECURITY DEFINER function and trigger.
+-- Must be defined before constraints.sql (which calls it in trigger functions).
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.get_user_id()
+RETURNS int
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT (auth.jwt()->>'id_usuario')::int;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_user_id TO authenticated, anon;
+
+
+-- =============================================================================
+-- SECTION 1: Custom Access Token Hook
+-- Fires on every login and token refresh.
+-- Injects user_permissions, user_roles, and id_usuario into the JWT.
+--
+-- After deploying: Supabase Dashboard → Authentication → Hooks
+--   → Custom Access Token → schema: public, function: custom_access_token_hook
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.custom_access_token_hook(event jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, iam
+AS $$
+DECLARE
+  claims        jsonb;
+  v_numeric_id  integer;
+  v_permissions text[];
+  v_role_codes  text[];
+BEGIN
+  -- Bridge auth UUID → numeric id_usuario
+  SELECT id_usuario INTO v_numeric_id
+  FROM public.profiles
+  WHERE id = (event->>'user_id')::uuid;
+
+  -- No profile = no permissions, id_usuario stays NULL.
+  -- The user will fail all permission checks but won't cause ghost audit records.
+  IF v_numeric_id IS NULL THEN
+    claims := event->'claims';
+    claims := jsonb_set(claims, '{user_permissions}', '[]'::jsonb);
+    claims := jsonb_set(claims, '{user_roles}',       '[]'::jsonb);
+    claims := jsonb_set(claims, '{id_usuario}',       'null'::jsonb);
+    RETURN jsonb_set(event, '{claims}', claims);
+  END IF;
+
+  -- Collect all permission codes across all roles
+  SELECT ARRAY_AGG(DISTINCT p.code) INTO v_permissions
+  FROM iam.user_rol ur
+  JOIN iam.rol_permiso rp ON rp.rol_id = ur.rol_id
+  JOIN iam.permiso p ON p.id = rp.permiso_id
+  WHERE ur.user_id = v_numeric_id;
+
+  -- Collect role codes
+  SELECT ARRAY_AGG(DISTINCT r.code) INTO v_role_codes
+  FROM iam.user_rol ur
+  JOIN iam.rol r ON r.id = ur.rol_id
+  WHERE ur.user_id = v_numeric_id;
+
+  claims := event->'claims';
+  claims := jsonb_set(claims, '{user_permissions}', COALESCE(to_jsonb(v_permissions), '[]'::jsonb));
+  claims := jsonb_set(claims, '{user_roles}',       COALESCE(to_jsonb(v_role_codes),  '[]'::jsonb));
+  claims := jsonb_set(claims, '{id_usuario}',       to_jsonb(v_numeric_id));
+
+  RETURN jsonb_set(event, '{claims}', claims);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.custom_access_token_hook TO supabase_auth_admin;
+REVOKE EXECUTE ON FUNCTION public.custom_access_token_hook FROM PUBLIC, authenticated, anon;
+
+
+-- =============================================================================
+-- SECTION 2: RLS Helper
+-- STABLE = result cached per query, not per row. Safe and efficient for RLS.
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.jwt_has_permission(permission_code text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT (auth.jwt()->'user_permissions') ? permission_code;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.jwt_has_permission TO authenticated;
+
+
+-- =============================================================================
+-- SECTION 3: RLS Policies
+-- Only SELECT policies. Writes go through SECURITY DEFINER functions (Section 4).
+-- Grouped by domain. Add new tables following the established pattern.
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- TIER 1: Catalog — open to all authenticated users (used in dropdowns)
+-- -----------------------------------------------------------------------------
+
+ALTER TABLE public.unidad            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.unidad_conversion ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_tipo         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.insumo_tipo       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.colorante_tipo    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.articulo_tipo     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.articulo          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.color             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cliente           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.proveedor         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.guia_remision_tipo   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.operacion            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.maquina_tipo         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.empleado_rol         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE calidad.tipo_defecto     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.item_movimiento_tipo ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "auth_read" ON public.unidad            FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON public.unidad_conversion FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON public.item_tipo         FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON public.insumo_tipo       FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON public.colorante_tipo    FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON public.articulo_tipo     FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON public.articulo          FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON public.color             FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON public.cliente           FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON public.proveedor         FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON doc.guia_remision_tipo   FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON mes.operacion            FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON mes.maquina_tipo         FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON mes.empleado_rol         FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON calidad.tipo_defecto     FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON inventario.item_movimiento_tipo FOR SELECT TO authenticated USING (true);
+
+
+-- -----------------------------------------------------------------------------
+-- TIER 2: Business tables — gated by domain permission
+-- -----------------------------------------------------------------------------
+
+-- ── Inventario ───────────────────────────────────────────────────────────────
+ALTER TABLE public.item                      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_insumo_detalle       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_rollo_detalle        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.almacen               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.ubicacion             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.lote                  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.item_movimientos      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.pesaje                ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "inventario_ver" ON public.item                 FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON public.item_insumo_detalle  FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON public.item_rollo_detalle   FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.almacen          FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.ubicacion        FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.lote             FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.item_movimientos FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.pesaje           FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+
+-- ── Comercial ─────────────────────────────────────────────────────────────────
+ALTER TABLE doc.partida                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.partida_detalle        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.guia_remision          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.guia_remision_detalle  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.compra                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.compra_detalle         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.compra_guia_remision   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.factura_proveedor      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.letra                  ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "comercial_ver" ON doc.partida               FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.partida_detalle       FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.guia_remision         FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.guia_remision_detalle FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.compra                FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.compra_detalle        FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.compra_guia_remision  FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.factura_proveedor     FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.letra                 FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+
+-- ── Producción ────────────────────────────────────────────────────────────────
+ALTER TABLE mes.maquina                      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.empleado                     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.ruta_plantilla               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.ruta_plantilla_detalle       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.orden_produccion             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.orden_produccion_paso        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.orden_produccion_item        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.orden_produccion_paso_item   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.programacion                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.lavado_maquina               ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "produccion_ver" ON mes.maquina                    FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.empleado                   FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.ruta_plantilla             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.ruta_plantilla_detalle     FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.orden_produccion           FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.orden_produccion_paso      FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.orden_produccion_item      FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.orden_produccion_paso_item FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.programacion               FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.lavado_maquina             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+
+-- ── Calidad ───────────────────────────────────────────────────────────────────
+ALTER TABLE calidad.inspeccion         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE calidad.inspeccion_defecto ENABLE ROW LEVEL SECURITY;
+ALTER TABLE calidad.inspeccion_foto    ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "calidad_ver" ON calidad.inspeccion         FOR SELECT TO authenticated USING (jwt_has_permission('calidad.ver'));
+CREATE POLICY "calidad_ver" ON calidad.inspeccion_defecto FOR SELECT TO authenticated USING (jwt_has_permission('calidad.ver'));
+CREATE POLICY "calidad_ver" ON calidad.inspeccion_foto    FOR SELECT TO authenticated USING (jwt_has_permission('calidad.ver'));
+
+
+-- -----------------------------------------------------------------------------
+-- TIER 3: Profiles & IAM
+-- -----------------------------------------------------------------------------
+
+ALTER TABLE public.profiles  ENABLE ROW LEVEL SECURITY;
+-- Own row always visible
+CREATE POLICY "own_row"       ON public.profiles FOR SELECT TO authenticated USING (auth.uid() = id);
+-- Admins see all rows (permissive policies OR together — correct behavior)
+CREATE POLICY "admin_read_all" ON public.profiles FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
+
+ALTER TABLE iam.rol ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "auth_read" ON iam.rol FOR SELECT TO authenticated USING (true);
+
+ALTER TABLE iam.permiso     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE iam.user_rol    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE iam.rol_permiso ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "configuracion_ver" ON iam.permiso     FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
+CREATE POLICY "configuracion_ver" ON iam.user_rol    FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
+CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
+
+
+-- =============================================================================
+-- SECTION 4: Permission guard pattern for SECURITY DEFINER write functions
+-- Paste the guard block at the top of each function's BEGIN body.
+-- auth.jwt() is accessible even inside SECURITY DEFINER (reads session claims).
+-- =============================================================================
+
+-- Guard snippet (copy into each function):
+--
+--   IF NOT jwt_has_permission('domain.action') THEN
+--     RAISE EXCEPTION 'Sin permiso: se requiere domain.action'
+--       USING ERRCODE = 'insufficient_privilege';
+--   END IF;
+
+-- Permission code reference:
+-- ┌─────────────────────────────────────────────┬────────────────────────────┐
+-- │ Function                                    │ Permission                 │
+-- ├─────────────────────────────────────────────┼────────────────────────────┤
+-- │ COMERCIAL                                                                │
+-- │  crear/editar partida                        │ comercial.crear/editar     │
+-- │  registrar/anular guia_remision              │ comercial.crear/editar     │
+-- │  crear_compra, vincular_*                    │ comercial.crear            │
+-- │  registrar_factura_proveedor                 │ comercial.crear            │
+-- │  registrar_letras, vincular_factura_compra   │ comercial.editar           │
+-- │  pagar_letra                                 │ comercial.editar           │
+-- ├─────────────────────────────────────────────┼────────────────────────────┤
+-- │ INVENTARIO                                                               │
+-- │  crear/editar item                           │ inventario.crear/editar    │
+-- │  ajuste inventario                           │ inventario.editar          │
+-- │  actualizar_pesos_*                          │ inventario.editar          │
+-- ├─────────────────────────────────────────────┼────────────────────────────┤
+-- │ PRODUCCIÓN                                                               │
+-- │  crear_orden_produccion                      │ produccion.crear           │
+-- │  actualizar_pasos_orden                      │ produccion.editar          │
+-- │  iniciar_paso, finalizar_paso                │ produccion.ejecutar        │
+-- │  registrar_consumo_paso                      │ produccion.ejecutar        │
+-- │  registrar_items_procesados                  │ produccion.ejecutar        │
+-- │  guardar_programacion                        │ produccion.programar       │
+-- │  iniciar_lavado, finalizar_lavado            │ produccion.ejecutar        │
+-- ├─────────────────────────────────────────────┼────────────────────────────┤
+-- │ CALIDAD                                                                  │
+-- │  crear/editar inspeccion                     │ calidad.crear/editar       │
+-- ├─────────────────────────────────────────────┼────────────────────────────┤
+-- │ CONFIGURACIÓN                                                            │
+-- │  gestión de usuarios/roles                   │ configuracion.admin        │
+-- │  crear maquina, operacion, ruta_plantilla    │ configuracion.admin        │
+-- └─────────────────────────────────────────────┴────────────────────────────┘

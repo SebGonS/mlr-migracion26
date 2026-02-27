@@ -705,3 +705,94 @@ CREATE TRIGGER trg_bi_inspeccion_foto_audit
 BEFORE INSERT ON calidad.inspeccion_foto
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+-- ═══════════════════════════════════════════════════════════════
+-- COMPRAS
+-- ═══════════════════════════════════════════════════════════════
+
+-----FACTURA PROVEEDOR
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
+ON doc.factura_proveedor
+FROM anon, authenticated;
+
+REVOKE UPDATE (usr_cre, fyh_cre)
+ON doc.factura_proveedor
+FROM anon, authenticated;
+
+CREATE TRIGGER trg_biud_factura_proveedor_audit
+BEFORE INSERT OR UPDATE OR DELETE ON doc.factura_proveedor
+FOR EACH ROW
+EXECUTE FUNCTION audit.fn_audit_row();
+
+CREATE TRIGGER trg_bi_factura_proveedor_audit
+BEFORE INSERT ON doc.factura_proveedor
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+CREATE TRIGGER trg_bu_factura_proveedor_audit
+BEFORE UPDATE ON doc.factura_proveedor
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+
+-----COMPRA
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod, usr_elm, fyh_elm)
+ON doc.compra
+FROM anon, authenticated;
+
+REVOKE UPDATE (usr_cre, fyh_cre)
+ON doc.compra
+FROM anon, authenticated;
+
+CREATE TRIGGER trg_biud_compra_audit
+BEFORE INSERT OR UPDATE OR DELETE ON doc.compra
+FOR EACH ROW
+EXECUTE FUNCTION audit.fn_audit_row();
+
+CREATE TRIGGER trg_bi_compra_audit
+BEFORE INSERT ON doc.compra
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+CREATE TRIGGER trg_bu_compra_audit
+BEFORE UPDATE ON doc.compra
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+
+CREATE TRIGGER trg_bu_compra_elm
+BEFORE UPDATE ON doc.compra
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_elm_fields();
+
+-----COMPRA DETALLE
+REVOKE INSERT (usr_cre, fyh_cre)
+ON doc.compra_detalle
+FROM anon, authenticated;
+
+CREATE TRIGGER trg_bi_compra_detalle_audit
+BEFORE INSERT ON doc.compra_detalle
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+-----LETRA
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod)
+ON doc.letra
+FROM anon, authenticated;
+
+REVOKE UPDATE (usr_cre, fyh_cre)
+ON doc.letra
+FROM anon, authenticated;
+
+CREATE TRIGGER trg_biud_letra_audit
+BEFORE INSERT OR UPDATE OR DELETE ON doc.letra
+FOR EACH ROW
+EXECUTE FUNCTION audit.fn_audit_row();
+
+CREATE TRIGGER trg_bi_letra_audit
+BEFORE INSERT ON doc.letra
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+CREATE TRIGGER trg_bu_letra_audit
+BEFORE UPDATE ON doc.letra
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_mod_fields();
