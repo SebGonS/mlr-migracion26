@@ -364,6 +364,19 @@ FROM color c
 WHERE color_x_cliente.color_id = c.id;
 
 -- ============================================================================
+-- 0. articulo_tipo  (new table — old name was tipo_articulo)
+-- ============================================================================
+INSERT INTO articulo_tipo (id, nombre, codigo_canon)
+OVERRIDING SYSTEM VALUE
+SELECT id, tipo_articulo AS nombre, lower(unaccent(tipo_articulo))
+FROM public.tipo_articulo;
+
+SELECT setval(
+    pg_get_serial_sequence('articulo_tipo', 'id'),
+    COALESCE((SELECT MAX(id) FROM articulo_tipo), 1)
+);
+
+-- ============================================================================
 -- 1. MASTER DATA MIGRATION - Public Schema
 -- ===========================================================================
 -- CREAR ROLLOS CRUDOS

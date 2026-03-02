@@ -40,7 +40,7 @@ FROM (
         -- Lavado maquina fields (null when actividad_tipo = 'ORDEN_PRODUCCION_PASO')
         'lavado_id',                 lm.id,
         'lavado_estado',             lm.estado,
-        'receta_lavado_maquina_id',  lm.receta_lavado_maquina_id
+        'receta_lavado_maquina_id',  lm.receta_id  -- FIX BUG5: was lm.receta_lavado_maquina_id (old column name)
     ) AS row_obj
     FROM mes.programacion prog
     LEFT JOIN mes.orden_produccion_paso opp  ON prog.actividad_tipo = 'ORDEN_PRODUCCION_PASO' AND opp.id = prog.actividad_id
@@ -143,7 +143,7 @@ FROM (
             'actividad_tipo',            'LAVADO_MAQUINA',
             'actividad_id',              lm.id,
             'lavado_id',                 lm.id,
-            'receta_lavado_maquina_id',  lm.receta_lavado_maquina_id,
+            'receta_lavado_maquina_id',  lm.receta_id,  -- FIX BUG5: was lm.receta_lavado_maquina_id
             'maquina_id',                lm.maquina_id,
             'nota',                      lm.nota
         ) AS row_obj

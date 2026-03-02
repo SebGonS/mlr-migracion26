@@ -1,0 +1,302 @@
+-- ═══════════════════════════════════════════════════════════════
+-- Step 5: New foundation tables
+-- Dependency order: unidad → item_tipo → item → item_*_detalle
+--                   inventario.almacen → ubicacion → lote → movimientos
+-- ═══════════════════════════════════════════════════════════════
+
+-- ── unidad ─────────────────────────────────────────────────────
+CREATE TABLE unidad (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    UNIQUE (codigo_canon),
+    nombre TEXT NOT NULL,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+CREATE TRIGGER trg_bi_unidad_codigo_canon
+BEFORE INSERT OR UPDATE ON unidad
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+INSERT INTO unidad (codigo, nombre) VALUES
+ ('kg',  'Kilogramo'),
+ ('g',   'Gramo'),
+ ('mg',  'Miligramo'),
+ ('ton', 'Tonelada'),
+ ('L',   'Litro'),
+ ('mL',  'Mililitro'),
+ ('UN',  'Unidad');
+
+-- ── unidad_conversion ──────────────────────────────────────────
+CREATE TABLE unidad_conversion (
+    de_unidad_id INT REFERENCES unidad(id),
+    a_unidad_id  INT REFERENCES unidad(id),
+    factor NUMERIC(18,6) NOT NULL,
+    PRIMARY KEY (de_unidad_id, a_unidad_id)
+);
+INSERT INTO unidad_conversion (de_unidad_id, a_unidad_id, factor) VALUES
+((SELECT id FROM unidad WHERE codigo = 'kg'),  (SELECT id FROM unidad WHERE codigo = 'g'),   1000.000000),
+((SELECT id FROM unidad WHERE codigo = 'g'),   (SELECT id FROM unidad WHERE codigo = 'kg'),  0.001000),
+((SELECT id FROM unidad WHERE codigo = 'g'),   (SELECT id FROM unidad WHERE codigo = 'mg'),  1000.000000),
+((SELECT id FROM unidad WHERE codigo = 'mg'),  (SELECT id FROM unidad WHERE codigo = 'g'),   0.001000),
+((SELECT id FROM unidad WHERE codigo = 'kg'),  (SELECT id FROM unidad WHERE codigo = 'ton'), 0.001000),
+((SELECT id FROM unidad WHERE codigo = 'ton'), (SELECT id FROM unidad WHERE codigo = 'kg'),  1000.000000),
+((SELECT id FROM unidad WHERE codigo = 'L'),   (SELECT id FROM unidad WHERE codigo = 'mL'),  1000.000000),
+((SELECT id FROM unidad WHERE codigo = 'mL'),  (SELECT id FROM unidad WHERE codigo = 'L'),   0.001000);
+
+-- ── item_tipo ──────────────────────────────────────────────────
+CREATE TABLE item_tipo (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    descripcion TEXT NOT NULL,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE(codigo_canon)
+);
+CREATE TRIGGER trg_bi_item_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON item_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+INSERT INTO item_tipo (codigo, descripcion) VALUES
+    ('ROLLO',  'Rollo de tela (materia prima o en proceso)'),
+    ('INSUMO', 'Insumo químico / colorante / auxiliar');
+
+-- ── insumo_tipo ────────────────────────────────────────────────
+CREATE TABLE insumo_tipo (
+    id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text,
+    descripcion text,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (codigo_canon)
+);
+CREATE TRIGGER trg_bi_insumo_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON insumo_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+INSERT INTO insumo_tipo (codigo, nombre) VALUES
+    ('QUIM',  'quimico'),
+    ('COLOR', 'colorante'),
+    ('AUX',   'auxiliar');
+
+-- ── colorante_tipo ─────────────────────────────────────────────
+CREATE TABLE colorante_tipo (
+    id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (codigo_canon)
+);
+CREATE TRIGGER trg_bi_colorante_tipo_codigo_canon   -- NOTE: different from tablas.sql which reused wrong name
+BEFORE INSERT OR UPDATE ON colorante_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+INSERT INTO colorante_tipo (nombre, codigo) VALUES
+    ('directo',  'DIR'),
+    ('disperso', 'DISP'),
+    ('reactivo', 'RX');
+
+-- ── item ───────────────────────────────────────────────────────
+CREATE TABLE item (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre TEXT NOT NULL,
+    item_tipo_id integer NOT NULL REFERENCES item_tipo(id),
+    unidad_id integer NOT NULL REFERENCES unidad(id),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    flg_elm boolean NOT NULL DEFAULT FALSE,
+    usr_elm int,
+    fyh_elm timestamptz,
+    UNIQUE(codigo_canon),
+    legacy_id int -- drop after migration
+);
+CREATE TRIGGER trg_bi_item_codigo_canon
+BEFORE INSERT OR UPDATE ON item
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── item_insumo_detalle ────────────────────────────────────────
+-- Requires medida_enum to exist (legacy type or defined in 02_enums.sql)
+CREATE TABLE item_insumo_detalle (
+    item_id INT PRIMARY KEY REFERENCES item(id),
+    medida medida_enum NOT NULL,
+    insumo_tipo_id smallint NOT NULL REFERENCES insumo_tipo(id),
+    colorante_tipo_id smallint REFERENCES colorante_tipo(id),
+    factor_stock NUMERIC(8,6) NOT NULL DEFAULT 1,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+
+-- ── item_rollo_detalle ─────────────────────────────────────────
+-- FIX (BUG 1): CREATE before any ALTER on this table.
+-- fibra column is NOT here — it lives on articulo (Step 4).
+CREATE TABLE item_rollo_detalle (
+    item_id INT PRIMARY KEY REFERENCES item(id),
+    articulo_id INT NOT NULL REFERENCES articulo(id),
+    flg_tenido boolean NOT NULL DEFAULT false,
+    flg_rib boolean NOT NULL DEFAULT FALSE,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+
+-- ── inventario.item_movimiento_tipo ────────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_item_movimiento_categoria AS
+SELECT
+    c.codigo::text AS codigo,
+    CASE c.codigo
+        WHEN 'COMPRA'         THEN 'Compras'
+        WHEN 'VENTA'          THEN 'Ventas'
+        WHEN 'PRODUCCION'     THEN 'Producción'
+        WHEN 'PROCESO_EXTERNO'THEN 'Proceso externo'
+        WHEN 'DEVOLUCION'     THEN 'Devoluciones'
+        WHEN 'AJUSTE'         THEN 'Ajustes'
+        WHEN 'TRANSFERENCIA'  THEN 'Transferencias'
+    END AS nombre
+FROM unnest(enum_range(NULL::inventario.item_movimiento_tipo_categoria_enum)) AS c(codigo);
+
+CREATE TABLE inventario.item_movimiento_tipo (
+    id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text NOT NULL,
+    categoria inventario.item_movimiento_tipo_categoria_enum NOT NULL,
+    factor SMALLINT NOT NULL CHECK (factor IN (1, -1, 0)),
+    descripcion text,
+    flg_afecta_stock    BOOLEAN NOT NULL DEFAULT true,
+    flg_valorizable     BOOLEAN NOT NULL DEFAULT true,
+    flg_recalcula_costo BOOLEAN NOT NULL DEFAULT false,
+    req_partner         BOOLEAN NOT NULL DEFAULT false,
+    req_origen          BOOLEAN NOT NULL DEFAULT false,
+    req_destino         BOOLEAN NOT NULL DEFAULT false,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    flg_elm boolean NOT NULL DEFAULT FALSE,
+    usr_elm int,
+    fyh_elm timestamptz,
+    UNIQUE(codigo_canon)
+);
+CREATE TRIGGER trg_bi_item_movimiento_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON inventario.item_movimiento_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- Seeds for item_movimiento_tipo (full list from tablas.sql)
+INSERT INTO inventario.item_movimiento_tipo
+(codigo, nombre, categoria, factor, flg_afecta_stock, flg_valorizable, flg_recalcula_costo, req_partner, req_origen, req_destino, descripcion)
+VALUES
+('COMPRA_ING',       'Compra – Recepción',                        'COMPRA',          1,  true,  true,  true,  true,  false, true,  'Ingreso por compra local o importación'),
+('VENTA_EGR',        'Venta – Despacho',                          'VENTA',           -1, true,  true,  false, true,  true,  false, 'Salida por venta a cliente'),
+('PROD_CONSUMO',     'Producción – Consumo MP',                   'PRODUCCION',      -1, true,  true,  false, false, true,  false, 'Consumo de materia prima hacia orden de producción'),
+('PROD_ING',         'Producción – Ingreso PT',                   'PRODUCCION',      1,  true,  true,  true,  false, false, true,  'Ingreso de producto terminado'),
+('EXT_ENVIO',        'Proceso Ext. – Envío',                      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Salida a maquilador'),
+('EXT_RETORNO',      'Proceso Ext. – Retorno',                    'PROCESO_EXTERNO', 1,  true,  true,  true,  true,  false, true,  'Retorno con valor agregado'),
+('INT_TRANSFER_ING', 'Transferencia Interna',                     'TRANSFERENCIA',   1,  true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
+('INT_TRANSFER_EGR', 'Transferencia Interna',                     'TRANSFERENCIA',   -1, true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
+('DEV_CLI_ING',      'Devolución Cliente',                        'DEVOLUCION',      1,  true,  true,  false, true,  false, true,  'Cliente devuelve'),
+('DEV_CLI_EGR',      'Devolución Cliente',                        'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Se devuelve al cliente'),
+('DEV_PROV_EGR',     'Devolución Proveedor',                      'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Salida por devolución a proveedor'),
+('SERV_ING',         'Servicio – Recepción Material Cliente',     'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Recepción de material de cliente'),
+('SERV_EGR',         'Servicio – Despacho Material Cliente',      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Despacho de material procesado al cliente'),
+('SERV_DEV_ING',     'Servicio – Devolución Material Cliente',    'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Cliente devuelve material procesado'),
+('AJUSTE_POS',       'Ajuste Inventario (+)',                     'AJUSTE',          1,  true,  true,  true,  false, false, true,  'Sobrante físico'),
+('AJUSTE_NEG',       'Ajuste Inventario (-)',                     'AJUSTE',          -1, true,  true,  false, false, true,  false, 'Faltante físico / Merma'),
+('PESAJE_POS',       'Pesaje – Corrección (+)',                   'AJUSTE',          1,  true,  false, false, false, false, true,  'Corrección de peso (real > declarado)'),
+('PESAJE_NEG',       'Pesaje – Corrección (-)',                   'AJUSTE',          -1, true,  false, false, false, true,  false, 'Corrección de peso (real < declarado)');
+
+-- ── inventario.almacen ────────────────────────────────────────
+CREATE TABLE inventario.almacen (
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre TEXT NOT NULL,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE(codigo_canon)
+);
+CREATE TRIGGER trg_bi_almacen_codigo_canon
+BEFORE INSERT OR UPDATE ON inventario.almacen
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── inventario.ubicacion ──────────────────────────────────────
+CREATE TABLE inventario.ubicacion (
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    almacen_id INT NOT NULL REFERENCES inventario.almacen(id),
+    codigo TEXT NOT NULL,
+    codigo_canon TEXT NOT NULL,
+    nombre TEXT NOT NULL,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (almacen_id, codigo_canon)
+);
+CREATE TRIGGER trg_bi_ubicacion_codigo_canon
+BEFORE INSERT OR UPDATE ON inventario.ubicacion
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── inventario.lote ───────────────────────────────────────────
+CREATE TABLE inventario.lote (
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    secuencia int NOT NULL,
+    item_id int NOT NULL REFERENCES item(id),
+    documento_tipo TEXT,
+    documento_id BIGINT,
+    cantidad numeric(10,2),
+    detalles JSONB,
+    estado_calidad calidad_estado_enum DEFAULT 'PENDIENTE',
+    propietario_id int NULL REFERENCES cliente(id),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+
+CREATE TABLE inventario.lote_secuencia_anual (
+    ano INT PRIMARY KEY,
+    ultimo_valor INT NOT NULL DEFAULT 0
+);
+
+-- ── inventario.item_movimientos ───────────────────────────────
+CREATE TABLE inventario.item_movimientos (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    item_id INT NOT NULL REFERENCES item(id),
+    lote_id int REFERENCES inventario.lote(id),
+    item_movimiento_tipo_id smallint REFERENCES inventario.item_movimiento_tipo(id) NOT NULL,
+    origen_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
+    destino_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
+    cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
+    documento_tipo TEXT,
+    documento_id int,
+    observacion TEXT,
+    usr_cre int,
+    fyh_cre timestamptz DEFAULT NOW()
+);

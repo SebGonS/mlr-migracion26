@@ -26,6 +26,8 @@ ON storage.objects FOR INSERT
 TO authenticated
 WITH CHECK (bucket_id = 'calidad');
 
+CREATE SCHEMA mes;
+
 -- Allow authenticated users to view QC images
 CREATE POLICY "Usuarios pueden ver iamgenes de QC"
 ON storage.objects FOR SELECT
@@ -80,7 +82,7 @@ CREATE TYPE calidad_estado_enum AS ENUM (
   'CUARENTENA'     -- blocked, decision pending
 );
 
--- CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE EXTENSION IF NOT EXISTS unaccent;
 
 CREATE OR REPLACE FUNCTION public.fn_trg_set_codigo_canon()
 RETURNS trigger
@@ -221,7 +223,7 @@ BEFORE INSERT OR UPDATE ON item
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
-CREATE SCHEMA inventario;
+CREATE SCHEMA IF NOT EXISTS inventario;  -- FIX BUG7: was CREATE SCHEMA (no IF NOT EXISTS)
 create TYPE inventario.item_movimiento_tipo_categoria_enum as enum (
     'COMPRA',
     'VENTA',
@@ -400,15 +402,6 @@ VALUES
  true, false, false, false, true, false,
  'Corrección de peso por pesaje real (peso real < declarado)');
 
-CREATE TABLE inventario.pesaje (
-    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    orden_produccion_id BIGINT REFERENCES mes.orden_produccion(id),
-    observacion TEXT,
-    usr_cre INT,
-    fyh_cre TIMESTAMPTZ DEFAULT NOW()
-);
-
-
 CREATE TABLE insumo_tipo(
     id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
@@ -458,9 +451,11 @@ CREATE TABLE IF NOT EXISTS articulo_tipo (
     nombre       TEXT     NOT NULL,
     codigo_canon TEXT     NOT NULL UNIQUE
 );
+-- FIX BUG3: articulo_tipo has no 'codigo' column — must use fn_trg_set_codigo_canon_from_nombre
+-- (reads NEW.nombre instead of NEW.codigo)
 CREATE TRIGGER trg_bi_articulo_tipo_codigo_canon
 BEFORE INSERT OR UPDATE ON articulo_tipo
-FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon_from_nombre();
 
 CREATE TABLE IF NOT EXISTS articulo (
     id               SMALLINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -470,9 +465,10 @@ CREATE TABLE IF NOT EXISTS articulo (
     articulo_tipo_id SMALLINT NOT NULL REFERENCES articulo_tipo(id),
     fibra            SMALLINT NOT NULL  -- number of fiber types: 1=mono, 2=two-fiber blend
 );
+-- FIX BUG3: articulo has no 'codigo' column — must use fn_trg_set_codigo_canon_from_nombre
 CREATE TRIGGER trg_bi_articulo_codigo_canon
 BEFORE INSERT OR UPDATE ON articulo
-FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon_from_nombre();
 
 
 -- ═══════════════════════════════════════════════════════════════
@@ -480,6 +476,8 @@ FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
 -- Run against existing DB to align with DDL above.
 -- Legacy tables: tipo_articulo (→ articulo_tipo), articulo (add fibra + codigo_canon)
 -- ═══════════════════════════════════════════════════════════════
+
+
 
 -- Step 1: Rename tables and columns
 -- ALTER TABLE tipo_articulo RENAME TO articulo_tipo;
@@ -503,6 +501,9 @@ FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
 -- ALTER TABLE articulo ADD COLUMN IF NOT EXISTS fibra SMALLINT;
 -- UPDATE articulo ar SET fibra = ird.fibra FROM item_rollo_detalle ird WHERE ird.articulo_id = ar.id;
 -- ALTER TABLE articulo ALTER COLUMN fibra SET NOT NULL;
+
+-- Step 4: fibra moved to articulo — drop redundant column from item_rollo_detalle
+-- FIX BUG1: moved to AFTER CREATE TABLE item_rollo_detalle (search for BUG1-MOVED below)
 
 
 CREATE TABLE item_insumo_detalle(
@@ -536,12 +537,13 @@ CREATE TABLE item_rollo_detalle(
    articulo_id INT NOT NULL references articulo(id),
    flg_tenido boolean NOT NULL default false,
    flg_rib boolean NOT NULL default FALSE,
-   fibra smallint NOT NULL,
    usr_cre int,
    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
    usr_mod int,
    fyh_mod TIMESTAMPTZ
 );
+-- BUG1-MOVED: drop fibra here (after table exists), not before
+ALTER TABLE item_rollo_detalle DROP COLUMN IF EXISTS fibra;
 
 
 CREATE OR REPLACE VIEW vw_items AS
@@ -593,7 +595,7 @@ BEFORE INSERT OR UPDATE ON inventario.ubicacion
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 CREATE SCHEMA doc;
-DROP TYPE IF EXISTS orden_produccion_estado_enum;
+DROP TYPE IF EXISTS orden_produccion_estado_enum CASCADE;  -- FIX BUG6: added CASCADE
 CREATE TYPE orden_produccion_estado_enum AS ENUM (
   'CREADA',        -- exists, no routing
   'PLANIFICADA',   -- route + resources defined
@@ -606,7 +608,7 @@ CREATE TYPE orden_produccion_estado_enum AS ENUM (
   'CERRADA',       -- administratively closed
   'CANCELADA'
 );
-DROP TYPE IF EXISTS partida_estado_enum;
+DROP TYPE IF EXISTS partida_estado_enum CASCADE;  -- FIX BUG6: added CASCADE
 CREATE TYPE partida_estado_enum AS ENUM (
   'CREADA',            -- captured, not yet accepted
   'CONFIRMADA',        -- approved by client
@@ -831,7 +833,7 @@ CREATE TABLE inventario.item_movimientos (
     fyh_cre timestamptz DEFAULT NOW()
 );
 
-CREATE SCHEMA mes;
+
 
 -- Production Order Status (ISA-95 Standard States)
 
@@ -870,7 +872,7 @@ INSERT INTO mes.operacion (codigo, nombre, requiere_receta) VALUES
 ('HIDRO',  'LAVADO_HIDRO', true),
 ('SEC',    'SECADO',       false),
 ('PLAN',   'PLANCHADO',   false),
-('PERCH',  'PERCHADO',    false)
+('PERCH',  'PERCHADO',    false),
 ('VOLT',   'VOLTEADO',     false);
 
 
@@ -996,6 +998,14 @@ CREATE TABLE mes.orden_produccion (
   fyh_fin timestamptz,
 
   usr_cre int
+);
+
+CREATE TABLE inventario.pesaje (
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    orden_produccion_id BIGINT REFERENCES mes.orden_produccion(id),
+    observacion TEXT,
+    usr_cre INT,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TYPE orden_produccion_paso_estado_enum as ENUM('PENDIENTE', 'EN_PROCESO', 'COMPLETADO', 'OMITIDO');
@@ -1611,7 +1621,7 @@ SELECT
     art.articulo,
     ird.flg_tenido,
     ird.flg_rib,
-    ird.fibra,
+    art.fibra,
     vc.color_id,
     vc.color,
     vc.tono,
@@ -1653,7 +1663,7 @@ EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0'
     art.articulo,
     ird.flg_tenido,
     ird.flg_rib,
-    ird.fibra,
+    art.fibra,
     vc.color_id,
     vc.color,
     vc.tono,
@@ -1694,7 +1704,7 @@ DISTINCT
 FROM doc.guia_remision gr 
 JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
 JOIN item i ON grd.item_id = i.id
-JOIN proveedor p ON p.id = gr.emisor_proveedor_id
+JOIN proveedor p ON p.id = gr.emisor_proveedor_id;
 
 
 CREATE OR REPLACE VIEW doc.partida_resumen_tenido AS
@@ -1702,7 +1712,7 @@ SELECT
     pd.partida_id,
     a.id AS articulo_id,
     a.articulo AS articulo_nombre,
-    ird.fibra,
+    a.fibra,
     COUNT(pd.item_id) AS total_rollos,
     SUM(pd.cantidad) AS cantidad_total,
     SUM(CASE WHEN ird.flg_rib = false THEN pd.cantidad ELSE 0 END) AS cantidad_regular,
@@ -1717,7 +1727,7 @@ ORDER BY 1, 2;
 CREATE VIEW mes.vw_maquinas AS
 SELECT m.id,m.codigo,m.nombre,m.maquina_tipo_id,mt.codigo maquina_tipo_codigo,mt.nombre maquina_tipo_nombre,m.relacion_bano
 FROM mes.maquina m
-LEFT JOIN mes.maquina_tipo mt ON mt.id=m.maquina_tipo_id
+LEFT JOIN mes.maquina_tipo mt ON mt.id=m.maquina_tipo_id;
 
 CREATE VIEW mes.vw_partida_produccion_rollos AS
     SELECT p.id AS partida_id,l.item_id,vi.item_codigo,vi.item_nombre,COUNT(*) AS cantidad_rollos 
@@ -1770,7 +1780,7 @@ SELECT
     art.articulo,
     ird.flg_tenido,
     ird.flg_rib,
-    ird.fibra,
+    art.fibra,
     p.tenido_id,
     t.tenido,
     p.ancho,
@@ -1824,13 +1834,8 @@ LEFT JOIN item_insumo_detalle iid ON iid.item_id=i.item_id
 LEFT JOIN insumo_tipo it ON it.id=iid.insumo_tipo_id
 LEFT JOIN colorante_tipo ct ON ct.id=iid.colorante_tipo_id;
 
-SELECT * FROM inventario.vw_stock_actual
-SELECT * FROM vw_items
 
 
-
-
-SELECT * FROM doc.partida
 
 CREATE OR REPLACE VIEW inventario.vw_lotes_disponibles AS
 SELECT vi.item_id,vi.item_codigo, vi.item_nombre,vi.item_tipo_id, vi.item_tipo_codigo, 

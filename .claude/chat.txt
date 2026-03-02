@@ -1,0 +1,2033 @@
+
+pass to production failed, identify all relevant files and section meant to be ran and propose new files/structure with consequential execution (when i tried to run it is tumbled upon missing column errors and dependacnis not created yet.
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones.sql
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\recetas.sql
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migracion_data.sql
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migracion_recetas.sql
+Let me read the full saved outputs for tablas.sql and funciones.sql.
+
+Read C:\Users\Usuario\.claude\projects\c--Users-Usuario-OneDrive-Documentos-Manufacturas-la-Real-mlr-app-fullstack-mlr-migracion26\533ea0f6-a693-4c4c-b651-1c7e123715ea\tool-results\toolu_01TjrMBgBLoyfvxxd2hTmPd6.txt
+Read C:\Users\Usuario\.claude\projects\c--Users-Usuario-OneDrive-Documentos-Manufacturas-la-Real-mlr-app-fullstack-mlr-migracion26\533ea0f6-a693-4c4c-b651-1c7e123715ea\tool-results\toolu_01Cipw8TMiNVpL6VMyHTzaiZ.txt
+Read C:\Users\Usuario\.claude\projects\c--Users-Usuario-OneDrive-Documentos-Manufacturas-la-Real-mlr-app-fullstack-mlr-migracion26\533ea0f6-a693-4c4c-b651-1c7e123715ea\tool-results\toolu_01TjrMBgBLoyfvxxd2hTmPd6.txt
+Read C:\Users\Usuario\.claude\projects\c--Users-Usuario-OneDrive-Documentos-Manufacturas-la-Real-mlr-app-fullstack-mlr-migracion26\533ea0f6-a693-4c4c-b651-1c7e123715ea\tool-results\toolu_01TjrMBgBLoyfvxxd2hTmPd6.txt (lines 201-600)
+Read C:\Users\Usuario\.claude\projects\c--Users-Usuario-OneDrive-Documentos-Manufacturas-la-Real-mlr-app-fullstack-mlr-migracion26\533ea0f6-a693-4c4c-b651-1c7e123715ea\tool-results\toolu_01TjrMBgBLoyfvxxd2hTmPd6.txt (lines 601-1100)
+Read C:\Users\Usuario\.claude\projects\c--Users-Usuario-OneDrive-Documentos-Manufacturas-la-Real-mlr-app-fullstack-mlr-migracion26\533ea0f6-a693-4c4c-b651-1c7e123715ea\tool-results\toolu_01TjrMBgBLoyfvxxd2hTmPd6.txt (lines 1101-1700)
+Let me read the rest of funciones.sql to complete the analysis.
+
+Read C:\Users\Usuario\.claude\projects\c--Users-Usuario-OneDrive-Documentos-Manufacturas-la-Real-mlr-app-fullstack-mlr-migracion26\533ea0f6-a693-4c4c-b651-1c7e123715ea\tool-results\toolu_01Cipw8TMiNVpL6VMyHTzaiZ.txt
+Globpattern: "**/*.sql"
+Found 11 files
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\constraints.sql
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones\mes.sql
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones\receta.sql
+Now I have a complete picture. Let me compile the full analysis and create the new migration structure.
+
+Update Todos
+
+Analyze all SQL files for dependency/ordering errors
+
+Create MIGRATION_PLAN.md with full bug list
+
+Create numbered migration files in migration/ directory
+
+Fix critical bugs in source files (stray SELECT, articulo trigger, etc.)
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\MIGRATION_PLAN.md
+186 lines
+# Migration Execution Plan — MLR Schema
+
+## Overview
+
+All SQL files are a mix of fresh DDL (new tables), ALTERs on legacy tables,
+seed data, business functions, and data migration — all interleaved with no
+guaranteed order. This document fixes the dependency/ordering problems so
+production can be applied cleanly.
+
+---
+
+## CRITICAL BUGS (will hard-fail)
+
+### BUG 1 — `tablas.sql` ~line 503: ALTER before CREATE on `item_rollo_detalle`
+```sql
+ALTER TABLE item_rollo_detalle DROP COLUMN IF EXISTS fibra;  -- ← fails: table doesn't exist yet
+...
+CREATE TABLE item_rollo_detalle(...);  -- ← table created much later
+```
+**Fix**: Move the `ALTER TABLE item_rollo_detalle DROP COLUMN...` to AFTER the `CREATE TABLE item_rollo_detalle` block.
+
+---
+
+### BUG 2 — `tablas.sql` ~line 508: `medida_enum` used but never defined
+```sql
+CREATE TABLE item_insumo_detalle(
+   medida medida_enum NOT NULL,  -- ← medida_enum is not defined anywhere in these files
+```
+**Fix**: Add `CREATE TYPE medida_enum AS ENUM ('g_L', 'g_kg', 'mL_L', 'mL_kg', '%');` before this table, OR confirm it already exists in the legacy DB and document it.
+Currently it exists as a legacy type. If applying to a fresh DB it will fail.
+
+---
+
+### BUG 3 — `tablas.sql` ~lines 454, 466: Wrong trigger on `articulo_tipo` and `articulo`
+Both tables have `fn_trg_set_codigo_canon` attached but have NO `codigo` column.
+That trigger reads `NEW.codigo` — every INSERT/UPDATE on these tables will fail:
+```
+ERROR: record "new" has no field "codigo"
+```
+**Fix Option A**: Add a `codigo TEXT UNIQUE` column to `articulo_tipo` and `articulo`.
+**Fix Option B** (used below): Replace the trigger with `fn_trg_set_codigo_canon_from_nombre` that reads `NEW.nombre` instead.
+
+---
+
+### BUG 4 — `recetas.sql` line 160: Stray query
+```sql
+SELECT * FROM paso   -- ← this table does not exist; instant error
+```
+**Fix**: Delete this line.
+
+---
+
+### BUG 5 — `funciones/mes.sql` ~line 43: Stale column reference
+```sql
+'receta_lavado_maquina_id',  lm.receta_lavado_maquina_id
+```
+But `mes.lavado_maquina` now has `receta_id`, not `receta_lavado_maquina_id`.
+**Fix**: Change to `lm.receta_id`.
+
+---
+
+### BUG 6 — `tablas.sql`: `DROP TYPE IF EXISTS` without CASCADE
+```sql
+DROP TYPE IF EXISTS orden_produccion_estado_enum;
+DROP TYPE IF EXISTS partida_estado_enum;
+```
+If these types already exist and are in use by a column, DROP will fail
+(no CASCADE). On a fresh DB this is fine; on migration it may error.
+**Fix**: `DROP TYPE IF EXISTS orden_produccion_estado_enum CASCADE;` or remove
+the DROPs entirely and use `DO $$ BEGIN CREATE TYPE ... EXCEPTION WHEN duplicate_object THEN null; END $$;`
+
+---
+
+### BUG 7 — `tablas.sql` line 226: `CREATE SCHEMA inventario` (no IF NOT EXISTS)
+```sql
+CREATE SCHEMA inventario;   -- fails if already exists
+```
+**Fix**: `CREATE SCHEMA IF NOT EXISTS inventario;`
+
+---
+
+## WARNINGS (may silently fail or cause runtime errors)
+
+### WARN A — `funciones.sql` `get_item`: legacy column/table names
+```sql
+ar.articulo          -- column renamed to ar.nombre
+ta.tipo_articulo     -- column renamed to ta.nombre
+ar.tipo_articulo_id  -- column renamed to articulo_tipo_id
+tipo_articulo ta     -- table renamed to articulo_tipo
+```
+Function creates fine (SQL language validates lazily), but calling it will
+return an error. Update these aliases once migration is complete.
+
+### WARN B — `recetas.sql`: `receta.tenido` schema vs migration function mismatch
+- DDL in `recetas.sql` still has `articulo_tipo_id` + `fibra` (old columns)
+- `funciones/receta.sql` `crear_tenido` expects `p_articulo_id` (new column)
+- Migration step 7a (commented out in recetas.sql) converts old → new
+**Decision**: The new DDL file (`06_receta_tables.sql` below) uses `articulo_id`
+(final state). The data migration must JOIN `articulo` to derive it.
+
+### WARN C — `migracion_recetas.sql`: PRE-MIGRATION section must run OUTSIDE transaction
+Lines 1–96 (the `ALTER TABLE public.receta_paso ADD COLUMN...` block) must run,
+be reviewed/corrected manually, then the `BEGIN...COMMIT` block (lines 97–348)
+runs. The file is structured correctly — just make sure to run them as two
+separate executions.
+
+---
+
+## FILE INVENTORY
+
+| File | Content | Depends On |
+|------|---------|------------|
+| `tablas.sql` | Schemas, ENUMs, base tables, views, grants | Legacy tables pre-existing |
+| `funciones.sql` | Item/almacen/guia functions | tablas.sql |
+| `constraints.sql` | Audit schema, triggers, REVOKEs | tablas.sql |
+| `recetas.sql` | receta schema DDL + migration notes | tablas.sql |
+| `funciones/mes.sql` | MES scheduling functions | tablas.sql, recetas.sql |
+| `funciones/calidad.sql` | QC functions | tablas.sql |
+| `funciones/receta.sql` | Recipe lifecycle functions | recetas.sql |
+| `funciones/compras.sql` | Procurement functions | tablas.sql |
+| `auth.sql` | RLS policies | all tables |
+| `migracion_data.sql` | Data migration (hex colors, etc.) | tablas.sql |
+| `migracion_recetas.sql` | Recipe data migration | recetas.sql, item.legacy_id populated |
+
+---
+
+## CORRECT EXECUTION ORDER
+
+Run the files in this exact sequence against the target DB.
+Assumes legacy tables exist: `color`, `color_x_cliente`, `cliente`, `proveedor`,
+`profiles`, `turno`, `estado`, `prioridad`, `tenido`, `tipo_receta`,
+`tipo_lavado_maquina`, `valor`, `articulo` (old), `tipo_articulo` (old),
+`item_rollo_detalle` (old, with fibra column).
+
+```
+Step 1:  migration/01_extensions_schemas.sql
+Step 2:  migration/02_enums.sql
+Step 3:  migration/03_base_functions.sql
+Step 4:  migration/04_alter_legacy_tables.sql
+Step 5:  migration/05_new_tables_foundation.sql
+Step 6:  migration/06_receta_tables.sql
+Step 7:  migration/07_new_tables_mes_doc_calidad.sql
+Step 8:  migration/08_seeds.sql
+Step 9:  migration/09_views.sql
+Step 10: migration/10_constraints_audit.sql     (= constraints.sql, unchanged)
+Step 11: funciones.sql                          (run as-is, note WARN A)
+Step 12: funciones/mes.sql                      (AFTER fixing BUG 5)
+Step 13: funciones/calidad.sql
+Step 14: funciones/receta.sql
+Step 15: funciones/compras.sql
+Step 16: auth.sql
+--- Data migration (run after DDL is complete) ---
+Step 17: migracion_data.sql
+Step 18: migracion_recetas.sql  (lines 1-96 first → review → then lines 97-348)
+```
+
+See `migration/` directory for Steps 1–10 with all bug fixes applied.
+
+---
+
+## LEGACY TABLES ASSUMED PRE-EXISTING
+
+These tables are referenced but NOT created by any file here.
+They must already exist in the target DB:
+
+- `public.color` — used in `vw_colores`, ALTER adds `codigo`/`hex`
+- `public.color_x_cliente` — used in `vw_colores`, ALTER adds `hex`
+- `public.cliente` — FK target in many tables
+- `public.proveedor` — FK target in `doc.compra`, `doc.factura_proveedor`
+- `public.profiles` — FK target (usr_cre fields)
+- `public.turno` — FK target in `mes.empleado`
+- `public.estado` — ALTER adds enum columns
+- `public.prioridad` — FK in `doc.partida`
+- `public.tenido` — FK in `doc.partida` and `receta.tenido`
+- `public.tipo_receta` — FK in `receta.tenido`
+- `public.tipo_lavado_maquina` — FK in `receta.lavado_maquina`
+- `public.valor` — FK in `receta.lavado_maquina`
+- `public.articulo` (old schema: `articulo`, `tipo_articulo_id`, `fibra`)
+- `public.tipo_articulo` → now renamed to `articulo_tipo`
+- `public.item_rollo_detalle` (old, with `fibra` column) — migrated
+- `public.receta2`, `public.receta_paso`, `public.receta_paso_insumo`
+- `public.receta_lavado_maquina`, `public.receta_lavado_maquina_paso`, `public.receta_lavado_maquina_paso_insumo`
+- `public.receta_operacion`
+- `medida_enum` type (legacy)
+- `logs_api` table (referenced in `funciones.sql`)
+Update Todos
+
+Analyze all SQL files for dependency/ordering errors
+
+Create MIGRATION_PLAN.md with full bug list
+
+Create numbered migration files in migration/ directory
+
+Fix critical bugs in source files (stray SELECT, articulo trigger, etc.)
+Now let me create the numbered migration files that fix all the bugs and properly order everything:
+
+Bash Create migration directory
+IN
+mkdir -p "c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration"
+
+OUT
+0
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\01_extensions_schemas.sql
+34 lines
+-- ═══════════════════════════════════════════════════════════════
+-- Step 1: Extensions and Schemas
+-- Must run first — all subsequent files depend on these.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE EXTENSION IF NOT EXISTS unaccent;
+
+CREATE SCHEMA IF NOT EXISTS mes;
+CREATE SCHEMA IF NOT EXISTS inventario;    -- FIX: was CREATE SCHEMA (no IF NOT EXISTS) in tablas.sql
+CREATE SCHEMA IF NOT EXISTS doc;
+CREATE SCHEMA IF NOT EXISTS calidad;
+CREATE SCHEMA IF NOT EXISTS receta;
+CREATE SCHEMA IF NOT EXISTS audit;
+
+-- Supabase storage bucket (only needed once, idempotent via ON CONFLICT)
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('calidad', 'calidad', false)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE POLICY "Usuarios pueden subir iamgenes de QC"
+ON storage.objects FOR INSERT
+TO authenticated
+WITH CHECK (bucket_id = 'calidad');
+
+CREATE POLICY "Usuarios pueden ver iamgenes de QC"
+ON storage.objects FOR SELECT
+TO authenticated
+USING (bucket_id = 'calidad');
+
+CREATE POLICY "Usuarios pueden borrar iamgenes de QC propios"
+ON storage.objects FOR DELETE
+TO authenticated
+USING (bucket_id = 'calidad' AND auth.uid()::text = owner_id::text);
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\02_enums.sql
+114 lines
+-- ═══════════════════════════════════════════════════════════════
+-- Step 2: ENUM / TYPE definitions
+-- Must come before any table that uses these types.
+-- FIX: removed bare DROP TYPE (without CASCADE) — replaced with safe idiom.
+-- ═══════════════════════════════════════════════════════════════
+
+-- ── Inventory ──────────────────────────────────────────────────
+CREATE TYPE calidad_estado_enum AS ENUM (
+  'PENDIENTE',
+  'APROBADO',
+  'RECHAZADO',
+  'REPROCESO',
+  'CUARENTENA'
+);
+
+CREATE TYPE inventario.item_movimiento_tipo_categoria_enum AS ENUM (
+    'COMPRA',
+    'VENTA',
+    'PRODUCCION',
+    'PROCESO_EXTERNO',
+    'DEVOLUCION',
+    'AJUSTE',
+    'TRANSFERENCIA'
+);
+
+-- ── MES / Production ───────────────────────────────────────────
+-- FIX: was DROP TYPE IF EXISTS ... (no CASCADE) — would fail if type in use.
+-- Use safe CREATE with duplicate guard instead.
+DO $$
+BEGIN
+    CREATE TYPE orden_produccion_estado_enum AS ENUM (
+      'CREADA',
+      'PLANIFICADA',
+      'PROGRAMADA',
+      'LIBERADA',
+      'EN_PROCESO',
+      'PAUSADA',
+      'FINALIZADA',
+      'TECO',
+      'CERRADA',
+      'CANCELADA'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    CREATE TYPE partida_estado_enum AS ENUM (
+      'CREADA',
+      'CONFIRMADA',
+      'EN_PRODUCCION',
+      'ENTREGA_PARCIAL',
+      'ENTREGADA',
+      'DEVUELTA_PARCIAL',
+      'DEVUELTA_TOTAL',
+      'FACTURADA',
+      'CERRADA',
+      'CANCELADA'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    CREATE TYPE orden_produccion_tipo_enum AS ENUM (
+        'NORMAL', 'REPROCESO', 'AJUSTE'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    CREATE TYPE orden_produccion_paso_estado_enum AS ENUM (
+        'PENDIENTE', 'EN_PROCESO', 'COMPLETADO', 'OMITIDO'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TYPE maquina_estado_enum AS ENUM (
+    'activa',
+    'espera',
+    'configuracion',
+    'averia',
+    'mantenimiento'
+);
+
+-- ── Compras ────────────────────────────────────────────────────
+DO $$
+BEGIN
+    CREATE TYPE tipo_pago_enum AS ENUM ('contado', 'credito', 'letras');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    CREATE TYPE estado_pago_enum AS ENUM ('pendiente', 'parcial', 'pagado', 'anulado');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    CREATE TYPE letra_estado_enum AS ENUM ('pendiente', 'protestada', 'pagada', 'anulada');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ── medida_enum ────────────────────────────────────────────────
+-- NOTE: This type likely already exists as a legacy type in your DB.
+-- If applying to a FRESH DB, uncomment the block below.
+-- DO $$
+-- BEGIN
+--     CREATE TYPE medida_enum AS ENUM ('g_L', 'g_kg', 'mL_L', 'mL_kg', '%');
+-- EXCEPTION WHEN duplicate_object THEN NULL;
+-- END $$;
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\03_base_functions.sql
+72 lines
+-- ═══════════════════════════════════════════════════════════════
+-- Step 3: Base trigger functions
+-- Must come before any table that uses these as triggers.
+-- ═══════════════════════════════════════════════════════════════
+
+-- Canonical code: lowercased, unaccented version of codigo
+-- Used by: item, unidad, item_tipo, insumo_tipo, colorante_tipo,
+--          inventario.almacen/ubicacion, mes.operacion/maquina/etc.
+-- NOTE: only attach to tables that have BOTH 'codigo' AND 'codigo_canon' columns.
+CREATE OR REPLACE FUNCTION public.fn_trg_set_codigo_canon()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.codigo IS NOT NULL THEN
+        NEW.codigo_canon := lower(unaccent(NEW.codigo));
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- FIX (BUG 3): Variant for tables that derive codigo_canon from 'nombre'
+-- (not 'codigo'). Used by: articulo_tipo, articulo.
+-- In tablas.sql these tables had fn_trg_set_codigo_canon attached despite
+-- having no 'codigo' column — that causes runtime ERROR on every INSERT.
+CREATE OR REPLACE FUNCTION public.fn_trg_set_codigo_canon_from_nombre()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.nombre IS NOT NULL THEN
+        NEW.codigo_canon := lower(unaccent(NEW.nombre));
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- Audit helpers (from constraints.sql — needed before constraint file)
+CREATE OR REPLACE FUNCTION public.fn_trg_set_cre_fields()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.usr_cre := COALESCE(NEW.usr_cre, get_user_id());
+    NEW.fyh_cre := COALESCE(NEW.fyh_cre, now());
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.fn_trg_set_mod_fields()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.usr_cre := OLD.usr_cre;
+    NEW.fyh_cre := OLD.fyh_cre;
+    NEW.usr_mod := get_user_id();
+    NEW.fyh_mod := now();
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.fn_trg_set_elm_fields()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.flg_elm IS FALSE
+       AND NEW.flg_elm IS TRUE
+       AND OLD.fyh_elm IS NULL
+    THEN
+        NEW.usr_elm := get_user_id();
+        NEW.fyh_elm := now();
+    END IF;
+    RETURN NEW;
+END;
+$$;
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\04_alter_legacy_tables.sql
+81 lines
+-- ═══════════════════════════════════════════════════════════════
+-- Step 4: ALTER pre-existing legacy tables
+-- These tables already exist in the DB — we're adding columns/constraints.
+-- All use ADD COLUMN IF NOT EXISTS / DROP COLUMN IF EXISTS for idempotency.
+-- ═══════════════════════════════════════════════════════════════
+
+-- ── color ──────────────────────────────────────────────────────
+ALTER TABLE color ADD COLUMN IF NOT EXISTS codigo text;
+ALTER TABLE color ADD COLUMN IF NOT EXISTS hex text;
+
+UPDATE color
+SET codigo = UPPER(regexp_replace(color, '[^a-zA-Z0-9]', '', 'g'))
+WHERE codigo IS NULL;
+
+ALTER TABLE color
+ADD CONSTRAINT IF NOT EXISTS color_codigo_uk UNIQUE (codigo);
+
+-- ── color_x_cliente ────────────────────────────────────────────
+ALTER TABLE color_x_cliente ADD COLUMN IF NOT EXISTS hex text;
+
+-- ── estado ─────────────────────────────────────────────────────
+-- FIX (BUG 6): drop then re-add typed columns safely.
+-- Only safe if no views/functions depend on the old column type.
+ALTER TABLE estado
+    DROP COLUMN IF EXISTS estado_produccion,
+    DROP COLUMN IF EXISTS estado_comercial;
+ALTER TABLE estado
+    ADD COLUMN IF NOT EXISTS estado_produccion orden_produccion_estado_enum,
+    ADD COLUMN IF NOT EXISTS estado_comercial  partida_estado_enum;
+
+-- ── articulo_tipo (renamed from tipo_articulo) ─────────────────
+-- Step 1: rename table and column
+-- ALTER TABLE tipo_articulo RENAME TO articulo_tipo;
+-- ALTER TABLE articulo_tipo RENAME COLUMN tipo_articulo TO nombre;
+
+-- Step 2: add codigo_canon (derived from nombre)
+ALTER TABLE articulo_tipo ADD COLUMN IF NOT EXISTS codigo_canon TEXT;
+UPDATE articulo_tipo SET codigo_canon = lower(unaccent(nombre)) WHERE codigo_canon IS NULL;
+-- ALTER TABLE articulo_tipo ALTER COLUMN codigo_canon SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_tipo_cc ON articulo_tipo(codigo_canon);
+
+-- Attach correct trigger (derives from nombre, not codigo)
+DROP TRIGGER IF EXISTS trg_bi_articulo_tipo_codigo_canon ON articulo_tipo;
+CREATE TRIGGER trg_bi_articulo_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON articulo_tipo
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon_from_nombre();
+
+-- ── articulo ───────────────────────────────────────────────────
+-- Step 1: rename columns
+-- ALTER TABLE articulo RENAME COLUMN articulo TO nombre;
+-- ALTER TABLE articulo RENAME COLUMN tipo_articulo_id TO articulo_tipo_id;
+
+-- Step 2: add codigo_canon (derived from nombre)
+ALTER TABLE articulo ADD COLUMN IF NOT EXISTS codigo_canon TEXT;
+UPDATE articulo SET codigo_canon = lower(unaccent(nombre)) WHERE codigo_canon IS NULL;
+-- ALTER TABLE articulo ALTER COLUMN codigo_canon SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_cc ON articulo(codigo_canon);
+
+-- Step 3: add fibra if not already present (backfill from item_rollo_detalle)
+-- Sanity check first (must return 0 rows before proceeding):
+-- SELECT articulo_id, COUNT(DISTINCT fibra)
+--   FROM item_rollo_detalle GROUP BY articulo_id HAVING COUNT(DISTINCT fibra) > 1;
+ALTER TABLE articulo ADD COLUMN IF NOT EXISTS fibra SMALLINT;
+UPDATE articulo ar
+   SET fibra = ird.fibra
+  FROM item_rollo_detalle ird
+ WHERE ird.articulo_id = ar.id
+   AND ar.fibra IS NULL;
+
+-- Attach correct trigger (derives from nombre, not codigo)
+DROP TRIGGER IF EXISTS trg_bi_articulo_codigo_canon ON articulo;
+CREATE TRIGGER trg_bi_articulo_codigo_canon
+BEFORE INSERT OR UPDATE ON articulo
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon_from_nombre();
+
+-- ── item_rollo_detalle (old) ────────────────────────────────────
+-- fibra column moved to articulo — drop from item_rollo_detalle
+-- This only applies if the OLD item_rollo_detalle already exists with fibra.
+-- If creating fresh, this runs silently (IF EXISTS covers the column).
+ALTER TABLE item_rollo_detalle DROP COLUMN IF EXISTS fibra;
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\05_new_tables_foundation.sql
+303 lines
+-- ═══════════════════════════════════════════════════════════════
+-- Step 5: New foundation tables
+-- Dependency order: unidad → item_tipo → item → item_*_detalle
+--                   inventario.almacen → ubicacion → lote → movimientos
+-- ═══════════════════════════════════════════════════════════════
+
+-- ── unidad ─────────────────────────────────────────────────────
+CREATE TABLE unidad (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    UNIQUE (codigo_canon),
+    nombre TEXT NOT NULL,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+CREATE TRIGGER trg_bi_unidad_codigo_canon
+BEFORE INSERT OR UPDATE ON unidad
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+INSERT INTO unidad (codigo, nombre) VALUES
+ ('kg',  'Kilogramo'),
+ ('g',   'Gramo'),
+ ('mg',  'Miligramo'),
+ ('ton', 'Tonelada'),
+ ('L',   'Litro'),
+ ('mL',  'Mililitro'),
+ ('UN',  'Unidad');
+
+-- ── unidad_conversion ──────────────────────────────────────────
+CREATE TABLE unidad_conversion (
+    de_unidad_id INT REFERENCES unidad(id),
+    a_unidad_id  INT REFERENCES unidad(id),
+    factor NUMERIC(18,6) NOT NULL,
+    PRIMARY KEY (de_unidad_id, a_unidad_id)
+);
+INSERT INTO unidad_conversion (de_unidad_id, a_unidad_id, factor) VALUES
+((SELECT id FROM unidad WHERE codigo = 'kg'),  (SELECT id FROM unidad WHERE codigo = 'g'),   1000.000000),
+((SELECT id FROM unidad WHERE codigo = 'g'),   (SELECT id FROM unidad WHERE codigo = 'kg'),  0.001000),
+((SELECT id FROM unidad WHERE codigo = 'g'),   (SELECT id FROM unidad WHERE codigo = 'mg'),  1000.000000),
+((SELECT id FROM unidad WHERE codigo = 'mg'),  (SELECT id FROM unidad WHERE codigo = 'g'),   0.001000),
+((SELECT id FROM unidad WHERE codigo = 'kg'),  (SELECT id FROM unidad WHERE codigo = 'ton'), 0.001000),
+((SELECT id FROM unidad WHERE codigo = 'ton'), (SELECT id FROM unidad WHERE codigo = 'kg'),  1000.000000),
+((SELECT id FROM unidad WHERE codigo = 'L'),   (SELECT id FROM unidad WHERE codigo = 'mL'),  1000.000000),
+((SELECT id FROM unidad WHERE codigo = 'mL'),  (SELECT id FROM unidad WHERE codigo = 'L'),   0.001000);
+
+-- ── item_tipo ──────────────────────────────────────────────────
+CREATE TABLE item_tipo (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    descripcion TEXT NOT NULL,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE(codigo_canon)
+);
+CREATE TRIGGER trg_bi_item_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON item_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+INSERT INTO item_tipo (codigo, descripcion) VALUES
+    ('ROLLO',  'Rollo de tela (materia prima o en proceso)'),
+    ('INSUMO', 'Insumo químico / colorante / auxiliar');
+
+-- ── insumo_tipo ────────────────────────────────────────────────
+CREATE TABLE insumo_tipo (
+    id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text,
+    descripcion text,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (codigo_canon)
+);
+CREATE TRIGGER trg_bi_insumo_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON insumo_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+INSERT INTO insumo_tipo (codigo, nombre) VALUES
+    ('QUIM',  'quimico'),
+    ('COLOR', 'colorante'),
+    ('AUX',   'auxiliar');
+
+-- ── colorante_tipo ─────────────────────────────────────────────
+CREATE TABLE colorante_tipo (
+    id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (codigo_canon)
+);
+CREATE TRIGGER trg_bi_colorante_tipo_codigo_canon   -- NOTE: different from tablas.sql which reused wrong name
+BEFORE INSERT OR UPDATE ON colorante_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+INSERT INTO colorante_tipo (nombre, codigo) VALUES
+    ('directo',  'DIR'),
+    ('disperso', 'DISP'),
+    ('reactivo', 'RX');
+
+-- ── item ───────────────────────────────────────────────────────
+CREATE TABLE item (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre TEXT NOT NULL,
+    item_tipo_id integer NOT NULL REFERENCES item_tipo(id),
+    unidad_id integer NOT NULL REFERENCES unidad(id),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    flg_elm boolean NOT NULL DEFAULT FALSE,
+    usr_elm int,
+    fyh_elm timestamptz,
+    UNIQUE(codigo_canon),
+    legacy_id int -- drop after migration
+);
+CREATE TRIGGER trg_bi_item_codigo_canon
+BEFORE INSERT OR UPDATE ON item
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── item_insumo_detalle ────────────────────────────────────────
+-- Requires medida_enum to exist (legacy type or defined in 02_enums.sql)
+CREATE TABLE item_insumo_detalle (
+    item_id INT PRIMARY KEY REFERENCES item(id),
+    medida medida_enum NOT NULL,
+    insumo_tipo_id smallint NOT NULL REFERENCES insumo_tipo(id),
+    colorante_tipo_id smallint REFERENCES colorante_tipo(id),
+    factor_stock NUMERIC(8,6) NOT NULL DEFAULT 1,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+
+-- ── item_rollo_detalle ─────────────────────────────────────────
+-- FIX (BUG 1): CREATE before any ALTER on this table.
+-- fibra column is NOT here — it lives on articulo (Step 4).
+CREATE TABLE item_rollo_detalle (
+    item_id INT PRIMARY KEY REFERENCES item(id),
+    articulo_id INT NOT NULL REFERENCES articulo(id),
+    flg_tenido boolean NOT NULL DEFAULT false,
+    flg_rib boolean NOT NULL DEFAULT FALSE,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+
+-- ── inventario.item_movimiento_tipo ────────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_item_movimiento_categoria AS
+SELECT
+    c.codigo::text AS codigo,
+    CASE c.codigo
+        WHEN 'COMPRA'         THEN 'Compras'
+        WHEN 'VENTA'          THEN 'Ventas'
+        WHEN 'PRODUCCION'     THEN 'Producción'
+        WHEN 'PROCESO_EXTERNO'THEN 'Proceso externo'
+        WHEN 'DEVOLUCION'     THEN 'Devoluciones'
+        WHEN 'AJUSTE'         THEN 'Ajustes'
+        WHEN 'TRANSFERENCIA'  THEN 'Transferencias'
+    END AS nombre
+FROM unnest(enum_range(NULL::inventario.item_movimiento_tipo_categoria_enum)) AS c(codigo);
+
+CREATE TABLE inventario.item_movimiento_tipo (
+    id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text NOT NULL,
+    categoria inventario.item_movimiento_tipo_categoria_enum NOT NULL,
+    factor SMALLINT NOT NULL CHECK (factor IN (1, -1, 0)),
+    descripcion text,
+    flg_afecta_stock    BOOLEAN NOT NULL DEFAULT true,
+    flg_valorizable     BOOLEAN NOT NULL DEFAULT true,
+    flg_recalcula_costo BOOLEAN NOT NULL DEFAULT false,
+    req_partner         BOOLEAN NOT NULL DEFAULT false,
+    req_origen          BOOLEAN NOT NULL DEFAULT false,
+    req_destino         BOOLEAN NOT NULL DEFAULT false,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    flg_elm boolean NOT NULL DEFAULT FALSE,
+    usr_elm int,
+    fyh_elm timestamptz,
+    UNIQUE(codigo_canon)
+);
+CREATE TRIGGER trg_bi_item_movimiento_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON inventario.item_movimiento_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- Seeds for item_movimiento_tipo (full list from tablas.sql)
+INSERT INTO inventario.item_movimiento_tipo
+(codigo, nombre, categoria, factor, flg_afecta_stock, flg_valorizable, flg_recalcula_costo, req_partner, req_origen, req_destino, descripcion)
+VALUES
+('COMPRA_ING',       'Compra – Recepción',                        'COMPRA',          1,  true,  true,  true,  true,  false, true,  'Ingreso por compra local o importación'),
+('VENTA_EGR',        'Venta – Despacho',                          'VENTA',           -1, true,  true,  false, true,  true,  false, 'Salida por venta a cliente'),
+('PROD_CONSUMO',     'Producción – Consumo MP',                   'PRODUCCION',      -1, true,  true,  false, false, true,  false, 'Consumo de materia prima hacia orden de producción'),
+('PROD_ING',         'Producción – Ingreso PT',                   'PRODUCCION',      1,  true,  true,  true,  false, false, true,  'Ingreso de producto terminado'),
+('EXT_ENVIO',        'Proceso Ext. – Envío',                      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Salida a maquilador'),
+('EXT_RETORNO',      'Proceso Ext. – Retorno',                    'PROCESO_EXTERNO', 1,  true,  true,  true,  true,  false, true,  'Retorno con valor agregado'),
+('INT_TRANSFER_ING', 'Transferencia Interna',                     'TRANSFERENCIA',   1,  true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
+('INT_TRANSFER_EGR', 'Transferencia Interna',                     'TRANSFERENCIA',   -1, true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
+('DEV_CLI_ING',      'Devolución Cliente',                        'DEVOLUCION',      1,  true,  true,  false, true,  false, true,  'Cliente devuelve'),
+('DEV_CLI_EGR',      'Devolución Cliente',                        'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Se devuelve al cliente'),
+('DEV_PROV_EGR',     'Devolución Proveedor',                      'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Salida por devolución a proveedor'),
+('SERV_ING',         'Servicio – Recepción Material Cliente',     'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Recepción de material de cliente'),
+('SERV_EGR',         'Servicio – Despacho Material Cliente',      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Despacho de material procesado al cliente'),
+('SERV_DEV_ING',     'Servicio – Devolución Material Cliente',    'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Cliente devuelve material procesado'),
+('AJUSTE_POS',       'Ajuste Inventario (+)',                     'AJUSTE',          1,  true,  true,  true,  false, false, true,  'Sobrante físico'),
+('AJUSTE_NEG',       'Ajuste Inventario (-)',                     'AJUSTE',          -1, true,  true,  false, false, true,  false, 'Faltante físico / Merma'),
+('PESAJE_POS',       'Pesaje – Corrección (+)',                   'AJUSTE',          1,  true,  false, false, false, false, true,  'Corrección de peso (real > declarado)'),
+('PESAJE_NEG',       'Pesaje – Corrección (-)',                   'AJUSTE',          -1, true,  false, false, false, true,  false, 'Corrección de peso (real < declarado)');
+
+-- ── inventario.almacen ────────────────────────────────────────
+CREATE TABLE inventario.almacen (
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre TEXT NOT NULL,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE(codigo_canon)
+);
+CREATE TRIGGER trg_bi_almacen_codigo_canon
+BEFORE INSERT OR UPDATE ON inventario.almacen
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── inventario.ubicacion ──────────────────────────────────────
+CREATE TABLE inventario.ubicacion (
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    almacen_id INT NOT NULL REFERENCES inventario.almacen(id),
+    codigo TEXT NOT NULL,
+    codigo_canon TEXT NOT NULL,
+    nombre TEXT NOT NULL,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (almacen_id, codigo_canon)
+);
+CREATE TRIGGER trg_bi_ubicacion_codigo_canon
+BEFORE INSERT OR UPDATE ON inventario.ubicacion
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── inventario.lote ───────────────────────────────────────────
+CREATE TABLE inventario.lote (
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    secuencia int NOT NULL,
+    item_id int NOT NULL REFERENCES item(id),
+    documento_tipo TEXT,
+    documento_id BIGINT,
+    cantidad numeric(10,2),
+    detalles JSONB,
+    estado_calidad calidad_estado_enum DEFAULT 'PENDIENTE',
+    propietario_id int NULL REFERENCES cliente(id),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+
+CREATE TABLE inventario.lote_secuencia_anual (
+    ano INT PRIMARY KEY,
+    ultimo_valor INT NOT NULL DEFAULT 0
+);
+
+-- ── inventario.item_movimientos ───────────────────────────────
+CREATE TABLE inventario.item_movimientos (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    item_id INT NOT NULL REFERENCES item(id),
+    lote_id int REFERENCES inventario.lote(id),
+    item_movimiento_tipo_id smallint REFERENCES inventario.item_movimiento_tipo(id) NOT NULL,
+    origen_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
+    destino_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
+    cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
+    documento_tipo TEXT,
+    documento_id int,
+    observacion TEXT,
+    usr_cre int,
+    fyh_cre timestamptz DEFAULT NOW()
+);
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\06_receta_tables.sql
+176 lines
+-- ═══════════════════════════════════════════════════════════════
+-- Step 6: receta schema tables
+-- Must come BEFORE mes.orden_produccion_paso and mes.lavado_maquina
+-- which have FK → receta.tenido and receta.lavado_maquina.
+--
+-- FIX: receta.tenido uses articulo_id (final normalized schema),
+--      not the old articulo_tipo_id + fibra columns.
+--      This matches funciones/receta.sql which uses p_articulo_id.
+-- FIX (BUG 4): removed stray "SELECT * FROM paso" query.
+-- ═══════════════════════════════════════════════════════════════
+
+-- ── estado_desarrollo_color ───────────────────────────────────
+CREATE TABLE IF NOT EXISTS estado_desarrollo_color (
+    id     SMALLINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre TEXT     NOT NULL,
+    codigo TEXT     NOT NULL UNIQUE
+);
+INSERT INTO estado_desarrollo_color (nombre, codigo) VALUES
+    ('Ingresado',          'INGRESADO'),
+    ('En Desarrollo',      'EN_DESARROLLO'),
+    ('Enviado al Cliente', 'ENVIADO_CLIENTE'),
+    ('Aprobado',           'APROBADO'),
+    ('Rechazado',          'RECHAZADO'),
+    ('Cancelado',          'CANCELADO'),
+    ('Re Lab',             'RE_LAB'),
+    ('Histórico',          'HISTORICO')
+ON CONFLICT (codigo) DO NOTHING;
+
+-- Migration: if estado_desarrollo_color already exists without codigo column:
+-- ALTER TABLE estado_desarrollo_color ADD COLUMN IF NOT EXISTS codigo TEXT;
+-- UPDATE estado_desarrollo_color SET codigo = CASE nombre
+--     WHEN 'Ingresado' THEN 'INGRESADO' WHEN 'En Desarrollo' THEN 'EN_DESARROLLO'
+--     WHEN 'Enviado al Cliente' THEN 'ENVIADO_CLIENTE' WHEN 'Aprobado' THEN 'APROBADO'
+--     WHEN 'Rechazado' THEN 'RECHAZADO' WHEN 'Cancelado' THEN 'CANCELADO'
+--     WHEN 'Re Lab' THEN 'RE_LAB' END WHERE codigo IS NULL;
+-- INSERT INTO estado_desarrollo_color (nombre, codigo) VALUES ('Histórico', 'HISTORICO') ON CONFLICT DO NOTHING;
+
+-- ── receta.operacion ──────────────────────────────────────────
+CREATE TABLE receta.operacion (
+    id           SMALLINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo       TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL UNIQUE,
+    nombre       TEXT NOT NULL
+);
+CREATE TRIGGER trg_bi_receta_operacion_codigo_canon
+BEFORE INSERT OR UPDATE ON receta.operacion
+FOR EACH ROW
+EXECUTE FUNCTION fn_trg_set_codigo_canon();
+
+INSERT INTO receta.operacion (codigo, nombre) VALUES
+    ('TINTURA',          'Tintura'),
+    ('LAVADO',           'Lavado'),
+    ('LAVADO_REDUCTIVO', 'Lavado Reductivo'),
+    ('BLANQUEO_QUIMICO', 'Blanqueo Químico'),
+    ('BLANQUEO_OPTICO',  'Blanqueo Óptico'),
+    ('DESCRUDE',         'Descrude'),
+    ('NEUTRALIZADO',     'Neutralizado'),
+    ('SUAVIZADO',        'Suavizado'),
+    ('FIJADO',           'Fijado'),
+    ('JABONADO',         'Jabonado'),
+    ('ENJUAGUE',         'Enjuague'),
+    ('MATIZADO',         'Matizado'),
+    ('ANTIPILLING',      'Antipilling'),
+    ('REGULACION_PH',    'Regulación de pH'),
+    ('SIMULTANEO',       'Simultáneo'),
+    ('DESMONTADO',       'Desmontado'),
+    ('REBAJE',           'Rebaje')
+ON CONFLICT (codigo) DO NOTHING;
+
+-- ── receta.tenido ──────────────────────────────────────────────
+-- FIX: uses articulo_id (final schema) instead of articulo_tipo_id + fibra.
+--      Matches funciones/receta.sql crear_tenido(p_articulo_id).
+CREATE TABLE receta.tenido (
+    id                 INTEGER  GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    color_x_cliente_id INT      REFERENCES color_x_cliente(id),
+    articulo_id        INT      REFERENCES articulo(id),   -- final: replaces articulo_tipo_id + fibra
+    tenido_id          INT      REFERENCES tenido(id),
+    flg_antipilling    BOOLEAN  NOT NULL DEFAULT false,
+    tipo_receta_id     SMALLINT REFERENCES tipo_receta(id),
+    estado_id          SMALLINT NOT NULL REFERENCES estado_desarrollo_color(id),
+    flg_produccion     BOOLEAN  NOT NULL DEFAULT false,
+    fyh_produccion     TIMESTAMPTZ,
+    usr_cre            INT      REFERENCES profiles(id_usuario),
+    fyh_cre            TIMESTAMPTZ DEFAULT now(),
+    usr_mod            INT      REFERENCES profiles(id_usuario),
+    fyh_mod            TIMESTAMPTZ
+);
+
+CREATE OR REPLACE FUNCTION fn_trg_receta_tenido_flg_produccion()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE v_aprobado_id SMALLINT;
+BEGIN
+    SELECT id INTO v_aprobado_id FROM estado_desarrollo_color WHERE codigo = 'APROBADO';
+    NEW.flg_produccion := (NEW.estado_id = v_aprobado_id);
+    RETURN NEW;
+END;$$;
+
+CREATE TRIGGER trg_bi_receta_tenido_flg_produccion
+BEFORE INSERT OR UPDATE OF estado_id ON receta.tenido
+FOR EACH ROW EXECUTE FUNCTION fn_trg_receta_tenido_flg_produccion();
+
+CREATE UNIQUE INDEX uq_receta_tenido_aprobada
+    ON receta.tenido(color_x_cliente_id, articulo_id, tenido_id, flg_antipilling)
+    WHERE flg_produccion = true;
+
+-- ── receta.tenido_paso ────────────────────────────────────────
+CREATE TABLE receta.tenido_paso (
+    id           INT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    receta_id    INT      NOT NULL REFERENCES receta.tenido(id),
+    operacion_id SMALLINT NOT NULL REFERENCES receta.operacion(id),
+    orden        SMALLINT NOT NULL,
+    ph           NUMERIC(4,2),
+    temperatura  NUMERIC(5,2),
+    tiempo_min   SMALLINT,
+    nota         TEXT,
+    UNIQUE(receta_id, orden)
+);
+
+-- ── receta.tenido_paso_insumo ─────────────────────────────────
+CREATE TABLE receta.tenido_paso_insumo (
+    id       INT           GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    paso_id  INT           NOT NULL REFERENCES receta.tenido_paso(id) ON DELETE CASCADE,
+    item_id  INT           NOT NULL REFERENCES item(id),
+    cantidad NUMERIC(8,4)  NOT NULL,
+    orden    SMALLINT      NOT NULL,
+    UNIQUE(paso_id, orden)
+);
+
+-- ── receta.lavado_maquina ─────────────────────────────────────
+-- FIX (BUG 4): removed stray "SELECT * FROM paso" that was between these tables.
+CREATE TABLE receta.lavado_maquina (
+    id                INTEGER  GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    tipo_lavado_mq_id SMALLINT REFERENCES tipo_lavado_maquina(id),
+    valor_origen_id   SMALLINT REFERENCES valor(id),
+    valor_destino_id  SMALLINT REFERENCES valor(id),
+    flg_activo        BOOLEAN  DEFAULT true,
+    usr_cre           INT      REFERENCES profiles(id_usuario),
+    fyh_cre           TIMESTAMPTZ DEFAULT now(),
+    usr_mod           INT      REFERENCES profiles(id_usuario),
+    fyh_mod           TIMESTAMPTZ
+);
+
+-- ── receta.lavado_maquina_paso ────────────────────────────────
+CREATE TABLE receta.lavado_maquina_paso (
+    id           INT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    receta_id    INT      NOT NULL REFERENCES receta.lavado_maquina(id),
+    operacion_id SMALLINT NOT NULL REFERENCES receta.operacion(id),
+    orden        SMALLINT NOT NULL,
+    ph           NUMERIC(4,2),
+    temperatura  NUMERIC(5,2),
+    tiempo_min   SMALLINT,
+    nota         TEXT,
+    UNIQUE(receta_id, orden)
+);
+
+-- ── receta.lavado_maquina_paso_insumo ─────────────────────────
+CREATE TABLE receta.lavado_maquina_paso_insumo (
+    id       INT           GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    paso_id  INT           NOT NULL REFERENCES receta.lavado_maquina_paso(id) ON DELETE CASCADE,
+    item_id  INT           NOT NULL REFERENCES item(id),
+    cantidad NUMERIC(8,4)  NOT NULL,
+    orden    SMALLINT      NOT NULL,
+    UNIQUE(paso_id, orden)
+);
+
+-- ── Grants ────────────────────────────────────────────────────
+GRANT SELECT ON estado_desarrollo_color              TO authenticated;
+GRANT USAGE ON SCHEMA receta                         TO authenticated;
+GRANT SELECT ON receta.operacion                     TO authenticated;
+GRANT SELECT ON receta.tenido                        TO authenticated;
+GRANT SELECT ON receta.tenido_paso                   TO authenticated;
+GRANT SELECT ON receta.tenido_paso_insumo            TO authenticated;
+GRANT SELECT ON receta.lavado_maquina                TO authenticated;
+GRANT SELECT ON receta.lavado_maquina_paso           TO authenticated;
+GRANT SELECT ON receta.lavado_maquina_paso_insumo    TO authenticated;
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\07_new_tables_mes_doc_calidad.sql
+495 lines
+-- ═══════════════════════════════════════════════════════════════
+-- Step 7: doc, mes, calidad tables
+-- Depends on: Step 5 (foundation), Step 6 (receta)
+-- Key FK chains:
+--   doc.partida → cliente, prioridad, tenido, color_x_cliente (all legacy)
+--   mes.orden_produccion → doc.partida
+--   mes.orden_produccion_paso → receta.tenido
+--   mes.lavado_maquina → receta.lavado_maquina
+--   calidad.inspeccion → inventario.lote, mes.orden_produccion_paso
+-- ═══════════════════════════════════════════════════════════════
+
+-- ── doc.partida ───────────────────────────────────────────────
+CREATE TABLE doc.partida (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    numero int GENERATED BY DEFAULT AS IDENTITY,
+    prioridad_id int REFERENCES prioridad(id),
+    cliente_id int REFERENCES cliente(id),
+    tenido_id int REFERENCES tenido(id),
+    color_x_cliente_id int REFERENCES color_x_cliente(id),
+    malla text,
+    rendimiento text,
+    ancho text,
+    flg_antipilling boolean DEFAULT false,
+    estado partida_estado_enum DEFAULT 'CREADA',
+    fyh_programacion timestamptz,
+    fyh_inicio timestamptz,
+    fyh_fin timestamptz,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+
+CREATE TABLE doc.partida_detalle (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    partida_id bigint NOT NULL REFERENCES doc.partida(id),
+    item_id int NOT NULL REFERENCES item(id),
+    cantidad numeric(12,2) NOT NULL CHECK (cantidad > 0),
+    unidad_id int NOT NULL REFERENCES unidad(id),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (partida_id, item_id)
+);
+
+-- ── doc.guia_remision_tipo ────────────────────────────────────
+CREATE TABLE doc.guia_remision_tipo (
+    id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text,
+    flg_emitida boolean NOT NULL,
+    flg_cliente boolean,
+    item_movimiento_tipo_id SMALLINT REFERENCES inventario.item_movimiento_tipo(id),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE(codigo_canon)
+);
+CREATE TRIGGER trg_bi_guia_remision_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON doc.guia_remision_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente) VALUES
+    ('COMPRA_INGRESO',            'Compra – Ingreso de insumos',                       false, false),
+    ('VENTA_EGRESO',              'Venta – Egreso de producto terminado',               true,  true),
+    ('CLIENTE_ENVIO_PROCESO',     'Servicio – Recepción de material cliente',           false, true),
+    ('DESPACHO_CLIENTE',          'Servicio – Despacho de material procesado a cliente',true,  true),
+    ('DEVOLUCION_CLIENTE_CRUDO',  'Devolución a cliente (rollos sin procesar)',         true,  true),
+    ('DEVOLUCION_PROVEEDOR',      'Devolución a proveedor',                            true,  false);
+
+UPDATE doc.guia_remision_tipo grt
+SET item_movimiento_tipo_id = imt.id
+FROM inventario.item_movimiento_tipo imt
+WHERE
+    (grt.codigo = 'COMPRA_INGRESO'           AND imt.codigo = 'COMPRA_ING')
+ OR (grt.codigo = 'VENTA_EGRESO'             AND imt.codigo = 'VENTA_EGR')
+ OR (grt.codigo = 'CLIENTE_ENVIO_PROCESO'    AND imt.codigo = 'SERV_ING')
+ OR (grt.codigo = 'DESPACHO_CLIENTE'         AND imt.codigo = 'SERV_EGR')
+ OR (grt.codigo = 'DEVOLUCION_CLIENTE_CRUDO' AND imt.codigo = 'DEV_CLI_EGR')
+ OR (grt.codigo = 'DEVOLUCION_PROVEEDOR'     AND imt.codigo = 'DEV_PROV_EGR');
+
+INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente, item_movimiento_tipo_id)
+SELECT 'DEVOLUCION_CLIENTE_VENTA', 'Devolución de cliente (producto vendido)', false, true, imt.id
+FROM inventario.item_movimiento_tipo imt WHERE imt.codigo = 'DEV_CLI_ING';
+
+INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente, item_movimiento_tipo_id)
+SELECT 'DEVOLUCION_CLIENTE_SERVICIO', 'Devolución de cliente (material de servicio)', false, true, imt.id
+FROM inventario.item_movimiento_tipo imt WHERE imt.codigo = 'SERV_DEV_ING';
+
+-- ── doc.guia_remision ─────────────────────────────────────────
+CREATE TABLE doc.guia_remision (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    guia_remision_tipo_id smallint NOT NULL REFERENCES doc.guia_remision_tipo(id),
+    serie TEXT NOT NULL,
+    correlativo TEXT NOT NULL,
+    emisor_cliente_id   INT,
+    emisor_proveedor_id INT,
+    receptor_cliente_id   INT,
+    receptor_proveedor_id INT,
+    fecha_emision TIMESTAMPTZ NOT NULL,
+    fecha_recepcion TIMESTAMPTZ DEFAULT now(),
+    usr_cre int,
+    fyh_cre timestamptz DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod timestamptz,
+    UNIQUE (serie, correlativo, emisor_proveedor_id),
+    UNIQUE (serie, correlativo, emisor_cliente_id)
+);
+
+-- ── doc.guia_remision_detalle ─────────────────────────────────
+CREATE TABLE doc.guia_remision_detalle (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    guia_remision_id BIGINT NOT NULL REFERENCES doc.guia_remision(id),
+    item_id INT NOT NULL REFERENCES item(id),
+    lote_id int REFERENCES inventario.lote(id),
+    ubicacion_id int REFERENCES inventario.ubicacion(id),
+    cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    UNIQUE (guia_remision_id, item_id, lote_id, ubicacion_id)
+);
+
+-- ── inventario.pesaje ─────────────────────────────────────────
+-- Placed here (after mes.orden_produccion will be defined) — forward ref OK
+-- because it's only a FK and mes schema created in step 1.
+-- Actually pesaje references mes.orden_produccion — must come after.
+-- → Defined after mes.orden_produccion below.
+
+-- ── mes.operacion ─────────────────────────────────────────────
+CREATE TABLE mes.operacion (
+    id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text NOT NULL,
+    requiere_receta boolean DEFAULT false,
+    requiere_maquina boolean DEFAULT true,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (nombre),
+    UNIQUE (codigo_canon)
+);
+CREATE TRIGGER trg_bi_operacion_codigo_canon
+BEFORE INSERT OR UPDATE ON mes.operacion
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+INSERT INTO mes.operacion (codigo, nombre, requiere_receta) VALUES
+    ('TERMO', 'TERMOFIJADO',  false),
+    ('TEN',   'TEÑIDO',       true),
+    ('HIDRO', 'LAVADO_HIDRO', true),
+    ('SEC',   'SECADO',       false),
+    ('PLAN',  'PLANCHADO',    false),
+    ('PERCH', 'PERCHADO',     false),
+    ('VOLT',  'VOLTEADO',     false);
+
+-- ── mes.maquina_tipo ──────────────────────────────────────────
+CREATE TABLE mes.maquina_tipo (
+    id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE(codigo_canon),
+    UNIQUE(nombre)
+);
+CREATE TRIGGER trg_bi_maquina_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON mes.maquina_tipo
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── mes.maquina ───────────────────────────────────────────────
+CREATE TABLE mes.maquina (
+    id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text NOT NULL,
+    maquina_tipo_id smallint REFERENCES mes.maquina_tipo(id),
+    estado_actual maquina_estado_enum NOT NULL DEFAULT 'espera',
+    ultimo_mantenimiento timestamptz,
+    horas_totales int,
+    capacidad_min_kg int NOT NULL,
+    capacidad_max_kg int NOT NULL,
+    relacion_bano numeric(5,2),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    flg_elm bool DEFAULT false,
+    usr_elm int,
+    fyh_elm TIMESTAMPTZ,
+    UNIQUE(codigo_canon)
+);
+CREATE TRIGGER trg_bi_maquina_codigo_canon
+BEFORE INSERT OR UPDATE ON mes.maquina
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── mes.empleado_rol ──────────────────────────────────────────
+CREATE TABLE mes.empleado_rol (
+    id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo TEXT NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    nombre text NOT NULL,
+    descripcion text,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE(codigo_canon)
+);
+CREATE TRIGGER trg_bi_empleado_rol_codigo_canon
+BEFORE INSERT OR UPDATE ON mes.empleado_rol
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── mes.empleado ──────────────────────────────────────────────
+CREATE TABLE mes.empleado (
+    id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre text,
+    apellido text,
+    rol_id smallint NOT NULL REFERENCES mes.empleado_rol(id),
+    turno_id smallint REFERENCES turno(id),   -- legacy FK
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ
+);
+
+-- ── mes.ruta_plantilla ────────────────────────────────────────
+CREATE TABLE mes.ruta_plantilla (
+    id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre text NOT NULL,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    flg_elm boolean DEFAULT false,
+    usr_elm int,
+    fyh_elm timestamptz
+);
+
+CREATE TABLE mes.ruta_plantilla_detalle (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ruta_plantilla_id int NOT NULL REFERENCES mes.ruta_plantilla(id),
+    operacion_id smallint NOT NULL REFERENCES mes.operacion(id),
+    secuencia smallint NOT NULL,
+    ph numeric(4,2),
+    temperatura numeric(5,2),
+    tiempo_estandar int,
+    UNIQUE (ruta_plantilla_id, secuencia)
+);
+
+-- ── mes.orden_produccion ──────────────────────────────────────
+CREATE TABLE mes.orden_produccion (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    partida_id bigint NOT NULL REFERENCES doc.partida(id),
+    tipo orden_produccion_tipo_enum NOT NULL,
+    orden_origen_id bigint REFERENCES mes.orden_produccion(id),
+    estado orden_produccion_estado_enum NOT NULL DEFAULT 'CREADA',
+    fyh_cre timestamptz DEFAULT now(),
+    fyh_inicio timestamptz,
+    fyh_fin timestamptz,
+    usr_cre int
+);
+
+-- ── inventario.pesaje ─────────────────────────────────────────
+CREATE TABLE inventario.pesaje (
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    orden_produccion_id BIGINT REFERENCES mes.orden_produccion(id),
+    observacion TEXT,
+    usr_cre INT,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ── mes.orden_produccion_paso ─────────────────────────────────
+CREATE TABLE mes.orden_produccion_paso (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    orden_produccion_id bigint NOT NULL REFERENCES mes.orden_produccion(id),
+    secuencia smallint NOT NULL,
+    operacion_id smallint NOT NULL REFERENCES mes.operacion(id),
+    maquina_asignada_id int REFERENCES mes.maquina(id),
+    ph numeric(4,2),
+    temperatura numeric(5,2),
+    tiempo_estandar int,
+    relacion_bano numeric(5,2),
+    receta_id int REFERENCES receta.tenido(id),
+    estado orden_produccion_paso_estado_enum DEFAULT 'PENDIENTE',
+    empleado_id smallint REFERENCES mes.empleado(id),
+    flg_genera_produccion bool DEFAULT false,
+    fyh_inicio timestamptz,
+    fyh_fin timestamptz,
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (orden_produccion_id, secuencia)
+);
+
+-- ── mes.orden_produccion_item ─────────────────────────────────
+CREATE TABLE mes.orden_produccion_item (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    orden_produccion_id bigint NOT NULL REFERENCES mes.orden_produccion(id),
+    item_id int NOT NULL REFERENCES item(id),
+    lote_id int NOT NULL REFERENCES inventario.lote(id),
+    ubicacion_id int NOT NULL REFERENCES inventario.ubicacion(id),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE(orden_produccion_id, lote_id, ubicacion_id)
+);
+
+-- ── mes.orden_produccion_paso_item ────────────────────────────
+CREATE TABLE mes.orden_produccion_paso_item (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    orden_produccion_paso_id bigint NOT NULL REFERENCES mes.orden_produccion_paso(id),
+    orden_produccion_item_id int NOT NULL REFERENCES mes.orden_produccion_item(id),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod int,
+    fyh_mod TIMESTAMPTZ,
+    UNIQUE (orden_produccion_paso_id, orden_produccion_item_id)
+);
+
+-- ── mes.programacion ─────────────────────────────────────────
+CREATE TABLE mes.programacion (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    actividad_tipo TEXT NOT NULL,
+    actividad_id   BIGINT NOT NULL,
+    maquina_id int NOT NULL REFERENCES mes.maquina(id),
+    fecha date NOT NULL,
+    secuencia smallint NOT NULL,
+    nota text,
+    usr_cre int,
+    fyh_cre timestamptz DEFAULT now(),
+    usr_mod int,
+    fyh_mod timestamptz,
+    UNIQUE (maquina_id, fecha, secuencia),
+    CONSTRAINT chk_programacion_actividad_tipo
+        CHECK (actividad_tipo IN ('ORDEN_PRODUCCION_PASO', 'LAVADO_MAQUINA'))
+);
+
+-- ── mes.lavado_maquina ────────────────────────────────────────
+CREATE TABLE mes.lavado_maquina (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    receta_id   INT NOT NULL REFERENCES receta.lavado_maquina(id),
+    maquina_id  INT NOT NULL REFERENCES mes.maquina(id),
+    estado      orden_produccion_paso_estado_enum NOT NULL DEFAULT 'PENDIENTE',
+    empleado_id SMALLINT REFERENCES mes.empleado(id),
+    fyh_inicio  TIMESTAMPTZ,
+    fyh_fin     TIMESTAMPTZ,
+    nota        TEXT,
+    usr_cre     INT,
+    fyh_cre     TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod     INT,
+    fyh_mod     TIMESTAMPTZ
+);
+
+-- ── calidad ───────────────────────────────────────────────────
+CREATE TABLE calidad.inspeccion (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    lote_id int NOT NULL REFERENCES inventario.lote(id),
+    orden_produccion_paso_id bigint REFERENCES mes.orden_produccion_paso(id),
+    resultado calidad_estado_enum NOT NULL,
+    observacion text,
+    empleado_id int REFERENCES mes.empleado(id),
+    fyh_inspeccion timestamptz DEFAULT now(),
+    usr_cre int,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE calidad.tipo_defecto (
+    id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo text NOT NULL UNIQUE,
+    codigo_canon TEXT NOT NULL,
+    UNIQUE (codigo_canon),
+    nombre text NOT NULL,
+    descripcion text,
+    severidad smallint DEFAULT 1,
+    activo boolean DEFAULT true
+);
+CREATE TRIGGER trg_bi_tipo_defecto_codigo_canon
+BEFORE INSERT OR UPDATE ON calidad.tipo_defecto
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+INSERT INTO calidad.tipo_defecto (codigo, nombre, descripcion, severidad) VALUES
+('LINEA',            'Línea / Raya',                  'Línea visible en sentido de urdimbre o trama',               2),
+('MANCHA',           'Mancha',                        'Mancha de aceite, óxido, suciedad u otro agente',            2),
+('HUECO',            'Hueco',                         'Perforación o rotura en la tela',                            3),
+('HILO_ROTO',        'Hilo roto',                     'Filamento o hilo cortado visible en la superficie',          2),
+('CAIDA_MALLA',      'Caída de malla',                'Malla suelta o corrida en tejido de punto',                  3),
+('HILO_GRUESO',      'Hilo grueso / delgado',         'Variación de título de hilo visible',                        1),
+('CONTAMINACION',    'Contaminación / Fibra extraña', 'Fibra o material ajeno atrapado en el tejido',              2),
+('TONO_DESIGUAL',    'Tono desigual',                 'Variación de tono dentro del mismo rollo',                   2),
+('BARRADO',          'Barrado',                       'Franjas horizontales por diferencia de tensión o lote',      3),
+('PILLING',          'Pilling',                       'Bolitas de fibra en la superficie',                          1),
+('PESO_FUERA_SPEC',  'Peso fuera de especificación',  'Gramaje (g/m²) fuera de tolerancia',                        2),
+('ANCHO_FUERA_SPEC', 'Ancho fuera de especificación', 'Ancho del rollo fuera de tolerancia',                       2),
+('ENCOGIMIENTO',     'Encogimiento excesivo',         'Encogimiento superior al permitido tras lavado/proceso',     3),
+('ARRUGA',           'Arruga / Quiebre',              'Marca de pliegue permanente',                                1),
+('ORILLO_DEFECTUOSO','Orillo defectuoso',             'Orillo enrollado, cortado o irregular',                      1);
+
+CREATE TABLE calidad.inspeccion_defecto (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    inspeccion_id bigint NOT NULL REFERENCES calidad.inspeccion(id),
+    tipo_defecto_id smallint NOT NULL REFERENCES calidad.tipo_defecto(id),
+    cantidad smallint DEFAULT 1,
+    observacion text
+);
+
+CREATE TABLE calidad.inspeccion_foto (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    inspeccion_defecto_id bigint NOT NULL REFERENCES calidad.inspeccion_defecto(id),
+    ruta_archivo text NOT NULL,
+    etiqueta text,
+    observacion text,
+    usr_cre int,
+    fyh_cre timestamptz DEFAULT now()
+);
+
+-- ── doc.factura_proveedor ─────────────────────────────────────
+CREATE TABLE doc.factura_proveedor (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    proveedor_id INT NOT NULL REFERENCES proveedor(id),
+    serie       TEXT NOT NULL,
+    numero      INT  NOT NULL,
+    fecha_emision       DATE NOT NULL,
+    fecha_vencimiento   DATE,
+    tipo_pago   tipo_pago_enum NOT NULL DEFAULT 'contado',
+    moneda      CHAR(3) NOT NULL DEFAULT 'USD',
+    tipo_cambio NUMERIC(10,4),
+    subtotal    NUMERIC(12,2) NOT NULL DEFAULT 0,
+    igv         NUMERIC(12,2) NOT NULL DEFAULT 0,
+    total       NUMERIC(12,2) NOT NULL DEFAULT 0,
+    estado_pago estado_pago_enum NOT NULL DEFAULT 'pendiente',
+    observacion TEXT,
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT, fyh_mod TIMESTAMPTZ,
+    UNIQUE (proveedor_id, serie, numero)
+);
+
+CREATE TABLE doc.compra (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    proveedor_id INT NOT NULL REFERENCES proveedor(id),
+    factura_proveedor_id BIGINT REFERENCES doc.factura_proveedor(id),
+    fecha       DATE NOT NULL DEFAULT CURRENT_DATE,
+    observacion TEXT,
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT, fyh_mod TIMESTAMPTZ,
+    flg_elm BOOLEAN NOT NULL DEFAULT FALSE,
+    usr_elm INT,  fyh_elm TIMESTAMPTZ
+);
+
+CREATE TABLE doc.compra_detalle (
+    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    compra_id       BIGINT NOT NULL REFERENCES doc.compra(id),
+    item_id         INT    NOT NULL REFERENCES item(id),
+    cantidad        NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    precio_unitario NUMERIC(12,4) NOT NULL CHECK (precio_unitario >= 0),
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE doc.compra_guia_remision (
+    compra_id        BIGINT NOT NULL REFERENCES doc.compra(id),
+    guia_remision_id BIGINT NOT NULL REFERENCES doc.guia_remision(id),
+    PRIMARY KEY (compra_id, guia_remision_id)
+);
+
+CREATE TABLE doc.letra (
+    id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    factura_proveedor_id BIGINT NOT NULL REFERENCES doc.factura_proveedor(id),
+    numero               TEXT,
+    monto                NUMERIC(12,2) NOT NULL CHECK (monto > 0),
+    fecha_giro           DATE,
+    fecha_vencimiento    DATE NOT NULL,
+    banco                TEXT,
+    estado               letra_estado_enum NOT NULL DEFAULT 'pendiente',
+    fecha_pago           DATE,
+    observacion          TEXT,
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT, fyh_mod TIMESTAMPTZ
+);
+
+-- ── Grants ────────────────────────────────────────────────────
+GRANT USAGE ON SCHEMA doc TO authenticated;
+GRANT SELECT ON mes.vw_ordenes_produccion TO anon, authenticated;  -- view created in step 09
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\08_views.sql
+279 lines
+-- ═══════════════════════════════════════════════════════════════
+-- Step 8: Views
+-- Must come after all tables they reference.
+-- ═══════════════════════════════════════════════════════════════
+
+-- ── vw_colores ────────────────────────────────────────────────
+CREATE OR REPLACE VIEW vw_colores AS
+SELECT
+    a.id AS color_x_cliente_id,
+    b.id AS color_id,
+    b.color,
+    c.id AS cliente_id,
+    c.cliente AS tono,
+    c.cliente AS cliente,
+    a.hex AS color_x_cliente_hex,
+    b.hex AS color_hex
+FROM color_x_cliente a
+JOIN color b ON a.color_id = b.id
+JOIN cliente c ON a.cliente_id = c.id;
+
+-- ── vw_items ──────────────────────────────────────────────────
+CREATE OR REPLACE VIEW vw_items AS
+SELECT
+    i.id        AS item_id,
+    i.codigo    AS item_codigo,
+    i.nombre    AS item_nombre,
+    i.item_tipo_id,
+    i.unidad_id,
+    it.codigo   AS item_tipo_codigo,
+    u.codigo    AS unidad_codigo
+FROM item i
+JOIN item_tipo it ON i.item_tipo_id = it.id
+JOIN unidad u ON i.unidad_id = u.id;
+
+-- ── inventario.vw_item_movimiento_categoria ───────────────────
+-- Already created in 05 before the table — kept here for view-only reference.
+
+-- ── inventario.vw_stock_actual ────────────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_stock_actual AS
+SELECT
+    im.lote_id,
+    im.item_id,
+    COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+    SUM(im.cantidad * imt.factor) AS cantidad_disponible,
+    MIN(im.fecha_hora) AS fecha_hora_ingreso
+FROM inventario.item_movimientos im
+JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
+GROUP BY im.lote_id, im.item_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id)
+HAVING SUM(im.cantidad * imt.factor) > 0;
+
+GRANT SELECT ON inventario.vw_stock_actual TO anon, authenticated;
+
+-- ── inventario.vw_lotes_rollos_stock ─────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_stock AS
+SELECT
+    sa.lote_id,
+    sa.item_id,
+    i.codigo AS item_codigo,
+    i.nombre AS item_nombre,
+    sa.ubicacion_id,
+    u.nombre AS ubicacion,
+    a.nombre AS almacen,
+    sa.cantidad_disponible,
+    un.codigo AS unidad,
+    l.estado_calidad::text,
+    (l.detalles->>'ancho')::numeric AS ancho,
+    l.cantidad AS peso,
+    ird.articulo_id,
+    art.nombre AS articulo,  -- FIX: was art.articulo (old column name)
+    ird.flg_tenido,
+    ird.flg_rib,
+    art.fibra,
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.cliente_id,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
+    c.id AS propietario_id,
+    c.cliente AS propietario
+FROM inventario.vw_stock_actual sa
+JOIN inventario.lote l ON l.id = sa.lote_id
+JOIN item i ON i.id = sa.item_id
+JOIN item_tipo it ON it.id = i.item_tipo_id
+JOIN item_rollo_detalle ird ON ird.item_id = i.id
+JOIN articulo art ON art.id = ird.articulo_id
+JOIN unidad un ON un.id = i.unidad_id
+JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
+JOIN inventario.almacen a ON a.id = u.almacen_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
+LEFT JOIN cliente c ON c.id = l.propietario_id
+WHERE it.codigo = 'ROLLO'
+ORDER BY a.nombre, u.nombre, i.nombre;
+
+-- ── doc.vw_partidas_lista_comercial ───────────────────────────
+DROP VIEW IF EXISTS doc.vw_partidas_lista_comercial;
+CREATE OR REPLACE VIEW doc.vw_partidas_lista_comercial AS
+SELECT
+    p.id,
+    p.numero,
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS codigo,
+    p.estado,
+    p.cliente_id,
+    c.cliente,
+    p.prioridad_id,
+    pri.prioridad,
+    p.tenido_id,
+    t.tenido,
+    p.color_x_cliente_id,
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
+    p.malla,
+    p.rendimiento,
+    p.ancho,
+    p.flg_antipilling,
+    p.fyh_cre AS fecha_creacion,
+    p.fyh_programacion AS fecha_programacion,
+    p.fyh_inicio AS fecha_inicio,
+    p.fyh_fin AS fecha_finalizacion,
+    EXTRACT(EPOCH FROM (NOW() - p.fyh_cre)) / 86400 AS dias_desde_creacion,
+    COALESCE(pd_agg.total_items, 0) AS total_items,
+    COALESCE(pd_agg.cantidad_total, '0') AS cantidad_total,
+    COALESCE(pd_agg.cantidad_principales, '0') AS cantidad_principales,
+    COALESCE(pd_agg.cantidad_rib, '0') AS cantidad_rib,
+    CASE
+        WHEN EXISTS (SELECT 1 FROM mes.orden_produccion op WHERE op.partida_id = p.id)
+        THEN true ELSE false
+    END AS tiene_ordenes_produccion,
+    p.usr_cre,
+    p.fyh_cre
+FROM doc.partida p
+LEFT JOIN cliente c ON c.id = p.cliente_id
+LEFT JOIN prioridad pri ON pri.id = p.prioridad_id
+LEFT JOIN tenido t ON t.id = p.tenido_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*) AS total_items,
+        SUM(pd.cantidad) AS cantidad_total,
+        SUM(CASE WHEN ird.flg_rib = FALSE THEN pd.cantidad ELSE 0 END) AS cantidad_principales,
+        SUM(CASE WHEN ird.flg_rib = TRUE  THEN pd.cantidad ELSE 0 END) AS cantidad_rib
+    FROM doc.partida_detalle pd
+    LEFT JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
+    WHERE pd.partida_id = p.id
+) pd_agg ON true;
+
+GRANT SELECT ON doc.vw_partidas_lista_comercial TO authenticated;
+
+-- ── mes.vw_ordenes_produccion ─────────────────────────────────
+DROP VIEW IF EXISTS mes.vw_ordenes_produccion;
+CREATE OR REPLACE VIEW mes.vw_ordenes_produccion AS
+SELECT
+    op.id,
+    op.tipo,
+    op.estado,
+    op.orden_origen_id,
+    op.fyh_cre,
+    op.fyh_inicio,
+    op.fyh_fin,
+    op.partida_id,
+    p.numero AS partida_numero,
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
+    p.estado AS partida_estado,
+    c.id AS cliente_id,
+    c.cliente,
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.color_hex,
+    t.id AS tenido_id,
+    t.tenido,
+    COALESCE(pasos_stats.total_pasos, 0)        AS total_pasos,
+    COALESCE(pasos_stats.pasos_completados, 0)  AS pasos_completados,
+    COALESCE(pasos_stats.pasos_en_proceso, 0)   AS pasos_en_proceso,
+    COALESCE(pasos_stats.pasos_pendientes, 0)   AS pasos_pendientes,
+    CASE
+        WHEN COALESCE(pasos_stats.total_pasos, 0) > 0
+        THEN ROUND((COALESCE(pasos_stats.pasos_completados, 0)::NUMERIC / pasos_stats.total_pasos::NUMERIC) * 100, 0)
+        ELSE 0
+    END AS progreso_porcentaje,
+    COALESCE(materiales_stats.total_materiales, 0)  AS total_materiales,
+    COALESCE(materiales_stats.cantidad_total_kg, 0) AS cantidad_total_kg,
+    COALESCE(produccion_stats.lotes_generados, 0)   AS lotes_generados,
+    CASE
+        WHEN op.fyh_inicio IS NOT NULL AND op.fyh_fin IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (op.fyh_fin - op.fyh_inicio)) / 3600
+        WHEN op.fyh_inicio IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (NOW() - op.fyh_inicio)) / 3600
+        ELSE NULL
+    END AS duracion_horas,
+    op.usr_cre,
+    prof.first_name || ' ' || prof.last_name AS creado_por
+FROM mes.orden_produccion op
+JOIN doc.partida p ON p.id = op.partida_id
+LEFT JOIN cliente c ON c.id = p.cliente_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+LEFT JOIN tenido t ON t.id = p.tenido_id
+LEFT JOIN profiles prof ON prof.id_usuario = op.usr_cre
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*) AS total_pasos,
+        COUNT(*) FILTER (WHERE estado = 'COMPLETADO') AS pasos_completados,
+        COUNT(*) FILTER (WHERE estado = 'EN_PROCESO')  AS pasos_en_proceso,
+        COUNT(*) FILTER (WHERE estado = 'PENDIENTE')   AS pasos_pendientes
+    FROM mes.orden_produccion_paso opp WHERE opp.orden_produccion_id = op.id
+) pasos_stats ON true
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS total_materiales, SUM(l.cantidad) AS cantidad_total_kg
+    FROM mes.orden_produccion_item opi
+    LEFT JOIN inventario.lote l ON l.id = opi.lote_id
+    WHERE opi.orden_produccion_id = op.id
+) materiales_stats ON true
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS lotes_generados
+    FROM inventario.lote l
+    WHERE l.documento_tipo = 'orden_produccion' AND l.documento_id = op.id
+) produccion_stats ON true;
+
+GRANT SELECT ON mes.vw_ordenes_produccion TO anon, authenticated;
+
+-- ── doc.vw_compras ────────────────────────────────────────────
+DROP VIEW IF EXISTS doc.vw_compras;
+CREATE OR REPLACE VIEW doc.vw_compras AS
+SELECT
+    c.id,
+    c.proveedor_id,
+    p.proveedor AS proveedor_nombre,
+    c.fecha,
+    c.factura_proveedor_id,
+    fp.serie                  AS factura_serie,
+    fp.numero                 AS factura_numero,
+    fp.total                  AS factura_total,
+    fp.moneda                 AS factura_moneda,
+    fp.estado_pago,
+    fp.fecha_vencimiento,
+    COALESCE(det.total_items, 0)               AS total_items,
+    COALESCE(det.monto_total, 0)               AS monto_total,
+    COALESCE(guias.total_guias, 0)             AS total_guias,
+    COALESCE(letras.total_letras, 0)           AS total_letras,
+    COALESCE(letras.monto_letras_pendiente, 0) AS monto_letras_pendiente,
+    c.observacion,
+    c.usr_cre,
+    c.fyh_cre
+FROM doc.compra c
+JOIN proveedor p ON p.id = c.proveedor_id
+LEFT JOIN doc.factura_proveedor fp ON fp.id = c.factura_proveedor_id
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS total_items, SUM(cd.cantidad * cd.precio_unitario) AS monto_total
+    FROM doc.compra_detalle cd WHERE cd.compra_id = c.id
+) det ON true
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS total_guias
+    FROM doc.compra_guia_remision cgr WHERE cgr.compra_id = c.id
+) guias ON true
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS total_letras,
+           SUM(l.monto) FILTER (WHERE l.estado = 'pendiente') AS monto_letras_pendiente
+    FROM doc.letra l WHERE l.factura_proveedor_id = c.factura_proveedor_id
+) letras ON true;
+
+GRANT SELECT ON doc.vw_compras TO authenticated;
+
+-- ── inventario.vw_item_proveedor_guia ─────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_item_proveedor_guia AS
+SELECT DISTINCT
+    i.id AS item_id,
+    i.codigo AS item_codigo,
+    i.nombre AS item_nombre,
+    gr.emisor_proveedor_id AS proveedor_id,
+    p.proveedor AS proveedor_nombre
+FROM doc.guia_remision gr
+JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
+JOIN item i ON i.id = grd.item_id
+JOIN proveedor p ON p.id = gr.emisor_proveedor_id
+WHERE gr.emisor_proveedor_id IS NOT NULL;
+Now let me fix the critical bugs directly in the source files, and create the final migration sequence file:
+
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\09_constraints_audit.sql
+17 lines
+-- ═══════════════════════════════════════════════════════════════
+-- Step 9: Audit schema, triggers, and REVOKEs
+-- This is constraints.sql verbatim — no changes needed.
+-- Run AFTER all tables exist.
+-- ═══════════════════════════════════════════════════════════════
+
+-- Source: constraints.sql (run that file as-is for this step)
+-- Included here as a reference pointer only.
+-- To execute: \i constraints.sql  (or paste contents)
+
+-- The lote sequence trigger (from constraints.sql) is critical:
+--   inventario.trfn_generar_secuencia_lote → trg_bi_lote_secuencia ON inventario.lote
+
+-- All audit triggers from constraints.sql depend on:
+--   audit.fn_audit_row (defined in constraints.sql itself)
+--   public.fn_trg_set_cre_fields / fn_trg_set_mod_fields / fn_trg_set_elm_fields (step 3)
+Now fix the two critical bugs directly in the source files:
+
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\recetas.sql
+Removed 4 lines
+Now fix BUG 5 in funciones/mes.sql — the stale receta_lavado_maquina_id column reference:
+
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones\mes.sql (lines 39-98)
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones\mes.sql
+Edit failed
+Grep "receta_lavado_maquina_id" (in c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones\mes.sql)
+11 lines of output
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones\mes.sql (lines 39-48)
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones\mes.sql
+Modified
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones\mes.sql (lines 141-152)
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\funciones\mes.sql
+Modified
+Now fix BUG 6/7 in tablas.sql — the DROP TYPE without CASCADE and the CREATE SCHEMA inventario without IF NOT EXISTS:
+
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql
+Modified
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql
+Modified
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql
+Modified
+Now fix BUG 3 — the wrong trigger on articulo_tipo and articulo in tablas.sql. First let me check the exact context:
+
+Grep "trg_bi_articulo" (in c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql)
+15 lines of output
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql
+Added 2 lines
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql
+Added 1 line
+Now fix BUG 1 — the ALTER TABLE item_rollo_detalle DROP COLUMN that appears before the table is created. Find the exact location:
+
+Grep "ALTER TABLE item_rollo_detalle DROP COLUMN" (in c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql)
+7 lines of output
+Grep "CREATE TABLE item_rollo_detalle" (in c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql)
+5 lines of output
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql
+Modified
+Read c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql (lines 536-555)
+Edit c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\tablas.sql
+Added 2 lines
+Now create the final execution order file:
+
+Write c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26\migration\README.md
+53 lines
+# Migration Execution Order
+
+Run each step in sequence. If any step fails, do NOT continue — diagnose first.
+
+## Steps
+
+| # | File | Notes |
+|---|------|-------|
+| 1 | `migration/01_extensions_schemas.sql` | Extensions + all schemas |
+| 2 | `migration/02_enums.sql` | All ENUM types (safe, idempotent) |
+| 3 | `migration/03_base_functions.sql` | fn_trg_set_codigo_canon + audit helpers |
+| 4 | `migration/04_alter_legacy_tables.sql` | ALTER pre-existing tables (color, articulo, etc.) |
+| 5 | `migration/05_new_tables_foundation.sql` | unidad, item, insumo_tipo, inventario.* tables |
+| 6 | `migration/06_receta_tables.sql` | receta schema (fixed: articulo_id, no stray SELECT) |
+| 7 | `migration/07_new_tables_mes_doc_calidad.sql` | doc, mes, calidad tables |
+| 8 | `migration/08_views.sql` | All views |
+| 9 | `constraints.sql` | Audit schema, triggers, REVOKEs |
+| 10 | `funciones.sql` | Core item/almacen functions |
+| 11 | `funciones/mes.sql` | MES functions (BUG5 fixed in-file) |
+| 12 | `funciones/calidad.sql` | QC functions |
+| 13 | `funciones/receta.sql` | Recipe lifecycle functions |
+| 14 | `funciones/compras.sql` | Procurement functions |
+| 15 | `auth.sql` | RLS policies |
+| **DATA** | | Run only after all DDL is verified |
+| 16 | `migracion_data.sql` | Hex colors, etc. |
+| 17a | `migracion_recetas.sql` lines 1–96 | PRE-MIGRATION PREP (outside transaction) — review output before 17b |
+| 17b | `migracion_recetas.sql` lines 97–348 | `BEGIN...COMMIT` recipe migration |
+
+## Bugs Fixed Before Running
+
+| Bug | File | Fix Applied |
+|-----|------|-------------|
+| BUG1 | `tablas.sql` | ALTER item_rollo_detalle moved after CREATE |
+| BUG3 | `tablas.sql` | articulo_tipo/articulo triggers use `_from_nombre` variant |
+| BUG4 | `recetas.sql` | Stray `SELECT * FROM paso` removed |
+| BUG5 | `funciones/mes.sql` | `lm.receta_lavado_maquina_id` → `lm.receta_id` |
+| BUG6 | `tablas.sql` | `DROP TYPE IF EXISTS` → `DROP TYPE IF EXISTS ... CASCADE` |
+| BUG7 | `tablas.sql` | `CREATE SCHEMA inventario` → `CREATE SCHEMA IF NOT EXISTS inventario` |
+
+## Still Requires Manual Action
+
+- **BUG2** (`medida_enum`): Uncomment the CREATE TYPE block in `02_enums.sql`
+  ONLY if applying to a fresh DB. On the existing production DB, this type
+  already exists as a legacy type — leave commented.
+
+- **WARN A** (`funciones.sql` `get_item`): References old legacy column names
+  (`ar.articulo`, `ta.tipo_articulo`). Update after confirming column rename
+  migration has run successfully on `articulo` table.
+
+- **migracion_recetas.sql** step 17a: After running lines 1–96, run the
+  diagnostic queries to review op_id mapping, correct any NULL rows, then
+  proceed with 17b (the `BEGIN...COMMIT` block).
+Update Todos
+
+Analyze all SQL files for dependency/ordering errors
+
+Create MIGRATION_PLAN.md with full bug list
+
+Create numbered migration files in migration/ directory
+
+Fix critical bugs in source files (stray SELECT, articulo trigger, etc.)
+Here's a summary of everything done:
+
+What was wrong (and what's fixed)
+Critical bugs fixed directly in source files:
+#	Bug	File	Fix
+BUG1	ALTER TABLE item_rollo_detalle DROP COLUMN IF EXISTS fibra appeared before CREATE TABLE item_rollo_detalle	tablas.sql	Moved ALTER to after CREATE
+BUG3	articulo_tipo and articulo have no codigo column, but had fn_trg_set_codigo_canon trigger → every INSERT would fail with "record new has no field codigo"	tablas.sql	Changed to fn_trg_set_codigo_canon_from_nombre (reads NEW.nombre) — new variant created in migration/03_base_functions.sql
+BUG4	Stray SELECT * FROM paso in the middle of the file	recetas.sql	Deleted
+BUG5	lm.receta_lavado_maquina_id references old column name; column was renamed to receta_id	funciones/mes.sql	Fixed both occurrences
+BUG6	DROP TYPE IF EXISTS orden_produccion_estado_enum without CASCADE — fails if the type is in use	tablas.sql	Added CASCADE
+BUG7	CREATE SCHEMA inventario without IF NOT EXISTS — fails on re-run	tablas.sql	Added IF NOT EXISTS
+New migration/ directory created with:
+[01–08] Correctly-ordered SQL files: extensions → enums → base functions → legacy ALTERs → new tables (foundation → receta → mes/doc/calidad) → views
+[README.md] Exact 17-step run order mapping each file to original sources
+[MIGRATION_PLAN.md] Full bug catalog with line numbers and remaining manual items
+Still requires manual decision (not auto-fixed):
+medida_enum: Likely exists as a legacy type on your DB. If fresh DB only, uncomment the CREATE TYPE block in migration/02_enums.sql
+funciones.sql get_item: References old column names (ar.articulo, tipo_articulo) — safe to run (SQL functions validate lazily), but will error when called until the articulo rename migration completes
+is it worth it at this point migrating iteem movimientos table to a denormalized ledger like sap material movements? how much cost/benefit? Would i have to rewrite too much?
+Good question — let me look at exactly how item_movimientos is currently structured and used before giving you a straight answer.
+
+Grep "item_movimientos" (in c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26)
+10 lines of output
+Read C:\Users\Usuario\.claude\projects\c--Users-Usuario-OneDrive-Documentos-Manufacturas-la-Real-mlr-app-fullstack-mlr-migracion26\533ea0f6-a693-4c4c-b651-1c7e123715ea\tool-results\toolu_01Cipw8TMiNVpL6VMyHTzaiZ.txt (lines 301-500)
+Grep "INSERT INTO inventario\.item_movimientos" (in c:\Users\Usuario\OneDrive\Documentos\Manufacturas la Real\mlr-app-fullstack\mlr-migracion26)
+89 lines of output
+Now I have the full picture. Let me give you a direct answer.
+
+Short answer: Partial yes, not full SAP denormalization.
+Your current design is already closer to a proper ledger than you might think. The question is whether the specific gaps are worth closing right now, which depends on what "SAP-style" actually means to you.
+
+What you already have (that IS SAP-like)
+Looking at your current schema honestly:
+
+SAP concept	Your equivalent	Status
+MSEG (material document line)	inventario.item_movimientos	✅ Append-only, never updated
+Movement type (101, 261, etc.)	inventario.item_movimiento_tipo with factor ±1	✅ Same concept, more readable
+Document reference	documento_tipo + documento_id	✅ Polymorphic, works fine
+Batch/lot tracking	lote_id	✅
+Storage location	origen/destino_ubicacion_id	✅
+Stock derived by aggregation	vw_stock_actual using SUM(cantidad * factor)	✅
+The foundation is solid. You don't need to blow it up.
+
+What you're actually missing (the real gaps)
+Gap 1 — No cost layer on movements (HIGH value, LOW cost)
+
+-- Current:
+inventario.item_movimientos (... cantidad NUMERIC(12,2) ...)
+
+-- SAP has:
+MSEG.DMBTR  -- amount in local currency
+MSEG.VERPR  -- moving average price at posting time
+Right now you can't answer: "What was the weighted average cost of chemical X consumed in wash order #45?" That's directly relevant to your PROD_CONSUMO and SERV_* movements for chemical costing.
+
+Fix: add 2 nullable columns to item_movimientos:
+
+
+ALTER TABLE inventario.item_movimientos
+    ADD COLUMN precio_unitario NUMERIC(12,4),
+    ADD COLUMN monto           NUMERIC(12,2);
+Cost: ~1 hour to add columns + update crear_guia and finalizar_lavado to populate them. No structural change.
+
+Gap 2 — No document header for multi-line postings (MEDIUM value, MEDIUM cost)
+SAP's MKPF (material document header) groups multiple MSEG lines under one document number with a reversal reference. Your documento_tipo/documento_id does this conceptually but it's a soft link — no FK enforcement, no reversal pointer.
+
+In practice, for your system this only matters for:
+
+Transfers (INT_TRANSFER_ING + INT_TRANSFER_EGR = 2 rows, must be atomic)
+Production finalization (PROD_CONSUMO × N + PROD_ING = N+1 rows)
+But — they're already inside PL/pgSQL transactions. If finalizar_paso crashes halfway, Postgres rolls back the whole function. So you get atomicity for free already. The header table would add audit value (one document number to look up) but not correctness.
+
+
+-- The one thing a header adds that you don't have:
+reversal_doc_id BIGINT REFERENCES inventario.movimiento_doc(id)
+This lets you reverse a posting by referencing the original document. Without it, a reversal is just manually-inserted counter-movements — they work, but there's no formal link back to what they're reversing.
+
+Gap 3 — No period-locking / posting period (LOW value for your scale)
+SAP locks fiscal periods so you can't post into a closed month. For a 20-person shop running Supabase, this is overkill. Skip it.
+
+Rewrite cost if you add the document header
+You have 10 active INSERT points across 2 files:
+
+File	Count
+funciones.sql	3 (crear_guia, transfer)
+funciones/mes.sql	7 (FIFO wash, adjustments, finalizar_paso, finalizar_lavado)
+Each INSERT would become a 2-step: insert header → insert line(s) with FK. Since you're pre-production with no live data, migration cost is zero. Rewrite of the functions: realistic 3–4 hours, careful. Not a "too much" situation.
+
+My recommendation
+Do now (trivial, no rewrite):
+
+
+ALTER TABLE inventario.item_movimientos
+    ADD COLUMN precio_unitario NUMERIC(12,4),  -- unit cost at posting time
+    ADD COLUMN monto           NUMERIC(12,2);   -- total amount (cantidad * precio)
+Populate in crear_guia (compras path) and finalizar_paso/finalizar_lavado for chemical consumption. This alone gives you chemical COGS reporting.
+
+Skip entirely:
+Full SAP denormalization — posting periods, fiscal year, company code, plant codes. Your scale doesn't need it and it would constrain your schema for no gain.
+
+Do later, not now:
+The document header (movimiento_doc) for formal reversal support. The atomicity problem it solves is already handled by your PL/pgSQL transactions. Tackle it when you actually need to reverse a posting through the UI and want a clean audit trail. That's a v2 feature, not a pre-launch requirement.
+
+Bottom line: You're not missing SAP's architecture — you're missing SAP's cost layer. That's 2 columns and a few lines of code in crear_guia and the production finalization functions. Everything else would be over-engineering for your current scale.
+

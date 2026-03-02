@@ -46,7 +46,7 @@ jsonb_build_object(
             'articulo',ar.articulo,
             'tipo_articulo_id', ta.id,
             'tipo_articulo', ta.tipo_articulo,
-            'fibra', ir.fibra,
+            'fibra', ar.fibra,
             'flg_tenido', ir.flg_tenido,
             'flg_rib', ir.flg_rib
           )
@@ -122,13 +122,12 @@ DECLARE
     v_sqlstate  text;
     v_usr_id int := get_user_id();
 BEGIN
-    IF p_item ? 'articulo_id' AND p_item ? 'fibra' THEN
+    IF p_item ? 'articulo_id' THEN
     BEGIN
-        INSERT INTO item_rollo_detalle (item_id, articulo_id, fibra, flg_tenido, flg_rib)
+        INSERT INTO item_rollo_detalle (item_id, articulo_id, flg_tenido, flg_rib)
         VALUES (
             p_item_id,
             (p_item->>'articulo_id')::INT,
-            (p_item->>'fibra')::SMALLINT,
             COALESCE((p_item->>'flg_tenido')::BOOLEAN, FALSE),
             COALESCE((p_item->>'flg_rib')::BOOLEAN, FALSE)
         );
@@ -147,7 +146,7 @@ BEGIN
         END;
     ELSE
        RAISE EXCEPTION
-        'Los campos articulo_id y fibra son obligatorios para crear un item de tipo rollo';
+        'El campo articulo_id es obligatorio para crear un item de tipo rollo';
     END IF;
     RETURN format('Detalle de rollo para item_id %s creado correctamente.', p_item_id);
 END;
