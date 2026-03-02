@@ -378,8 +378,8 @@ BEGIN
                                 'cantidad',             rtpi.cantidad,
                                 'medida',               iid.medida,
                                 'cantidad_requerida_kg', CASE
-                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen
-                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10
+                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen * iid.factor_stock
+                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10 * iid.factor_stock
                                 END
                             ) ORDER BY rtpi.orden
                         )

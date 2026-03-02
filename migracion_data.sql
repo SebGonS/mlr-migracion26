@@ -1176,7 +1176,172 @@ WHERE i.id=inventario.lote.id and item_id IS NULL
 --     JOIN inventario inv ON inv.entrada_inventario_detalle_id = eid.id
 -- )SELECT COUNT(*) FROM ec;
 
-----CONFIGURAR GUIAS y 
+-- ============================================================================
+-- MIGRAR COMPRAS
+-- ============================================================================
+-- Must run BEFORE the guia block below: doc.compra_guia_remision has FK → doc.compra(id)
+-- and the guia block already inserts into doc.compra_guia_remision using public.compra.id
+-- values, so doc.compra must exist with preserved IDs first.
+--
+-- Legacy shape (public schema):
+--   compra            → header with factura text, guia_remision text, payment all-in-one
+--   compra_x_insumo   → line items (insumo_id, cantidad, precio_x_kg_usd)
+--   letra_compra      → payment letters tied to compra_id
+--
+-- New shape (doc schema):
+--   factura_proveedor → split out from compra; letras now hang off factura, not compra
+--   compra            → lightweight header; factura_proveedor_id nullable (invoice may arrive later)
+--   compra_detalle    → line items; insumo_id resolved → item_id via item.legacy_id
+--   compra_guia_remision → junction written by the guia block below; no action needed here
+--   letra             → re-linked from compra → factura_proveedor chain
+-- ============================================================================
+
+-- Step 1: doc.factura_proveedor
+-- Sourced from public.compra rows that have a parseable 'SERIE-CORRELATIVO' factura.
+-- subtotal/igv breakdown is not available in legacy data; total carries the full amount.
+-- Rows with missing or malformed factura are skipped (they produce a compra with NULL factura_proveedor_id).
+-- Run the orphan check query below before go-live to assess the gap.
+INSERT INTO doc.factura_proveedor (
+    proveedor_id,
+    serie,
+    numero,
+    fecha_emision,
+    fecha_vencimiento,
+    tipo_pago,
+    moneda,
+    subtotal,
+    igv,
+    total,
+    estado_pago,
+    usr_cre,
+    fyh_cre
+)
+SELECT
+    c.proveedor_id,
+    SPLIT_PART(c.factura, '-', 1)                    AS serie,
+    SPLIT_PART(c.factura, '-', 2)::INT               AS numero,
+    COALESCE(c.fecha_giro, c.fecha_remision)         AS fecha_emision,
+    c.fecha_vencimiento,
+    c.tipo_pago,
+    'USD'::CHAR(3),
+    0              AS subtotal,   -- no legacy breakdown available
+    0              AS igv,
+    c.total_usd    AS total,
+    c.estado_pago,
+    NULLIF(c.usr_cre, 'authenticated')::INT,
+    c.fyh_cre_tz
+FROM public.compra c
+WHERE c.factura IS NOT NULL
+  AND c.factura LIKE '%-%'         -- must be parseable as SERIE-CORRELATIVO
+  AND c.proveedor_id IS NOT NULL;
+
+-- Orphan check: compras with a factura that couldn't be parsed → no factura_proveedor created
+-- SELECT id, factura FROM public.compra WHERE factura IS NOT NULL AND factura NOT LIKE '%-%';
+
+
+-- Step 2: doc.compra  (OVERRIDING SYSTEM VALUE preserves public.compra.id for FK compatibility)
+-- factura_proveedor_id is NULL for compras that had no factura or an unparseable one.
+INSERT INTO doc.compra (
+    id,
+    proveedor_id,
+    factura_proveedor_id,
+    fecha,
+    usr_cre,
+    fyh_cre
+)
+OVERRIDING SYSTEM VALUE
+SELECT
+    c.id,
+    c.proveedor_id,
+    fp.id,
+    COALESCE(c.fecha_remision, c.fyh_cre_tz::DATE) AS fecha,
+    NULLIF(c.usr_cre, 'authenticated')::INT,
+    c.fyh_cre_tz
+FROM public.compra c
+LEFT JOIN doc.factura_proveedor fp
+    ON  fp.proveedor_id = c.proveedor_id
+    AND fp.serie        = SPLIT_PART(c.factura, '-', 1)
+    AND fp.numero       = SPLIT_PART(c.factura, '-', 2)::INT
+WHERE c.proveedor_id IS NOT NULL;
+
+SELECT setval(
+    pg_get_serial_sequence('doc.compra', 'id'),
+    (SELECT MAX(id) FROM doc.compra)
+);
+
+
+-- Step 3: doc.compra_detalle  (from public.compra_x_insumo)
+-- insumo_id → item_id resolved via item.legacy_id populated in the insumo migration above.
+-- Rows where legacy_id has no match are silently dropped; run the gap check below first.
+INSERT INTO doc.compra_detalle (
+    compra_id,
+    item_id,
+    cantidad,
+    precio_unitario,
+    fyh_cre
+)
+SELECT
+    cxi.compra_id,
+    it.id,
+    cxi.cantidad,
+    cxi.precio_x_kg_usd,
+    NOW()
+FROM public.compra_x_insumo cxi
+JOIN item it ON it.legacy_id = cxi.insumo_id
+WHERE cxi.compra_id IN (SELECT id FROM doc.compra);
+
+-- Gap check: line items whose insumo_id didn't resolve to any item
+-- SELECT cxi.compra_id, cxi.insumo_id
+-- FROM public.compra_x_insumo cxi
+-- LEFT JOIN item it ON it.legacy_id = cxi.insumo_id
+-- WHERE it.id IS NULL;
+
+
+-- Step 4: doc.letra  (from public.letra_compra)
+-- Old letras were tied to compra_id; new letras require factura_proveedor_id.
+-- Migration path: letra_compra.compra_id → doc.compra.factura_proveedor_id.
+-- Letras on compras with no linked factura_proveedor cannot be migrated automatically;
+-- run the unmigrated check below and handle manually if the count is significant.
+-- Enum mapping: 'emitida' → 'pendiente'  (closest semantic match in new enum)
+--               'pagada'  → 'pagada'
+INSERT INTO doc.letra (
+    factura_proveedor_id,
+    numero,
+    monto,
+    fecha_giro,
+    fecha_vencimiento,
+    estado,
+    fecha_pago,
+    observacion,
+    fyh_cre
+)
+SELECT
+    dc.factura_proveedor_id,
+    lc.numero_letra,
+    lc.monto_usd,
+    lc.fecha_emision         AS fecha_giro,
+    lc.fecha_vencimiento,
+    CASE lc.estado
+        WHEN 'emitida' THEN 'pendiente'::letra_estado_enum
+        WHEN 'pagada'  THEN 'pagada'::letra_estado_enum
+        ELSE                'pendiente'::letra_estado_enum
+    END,
+    lc.fecha_pago,
+    lc.observaciones,
+    COALESCE(lc.fyh_cre_tz, lc.fyh_cre::TIMESTAMPTZ)
+FROM public.letra_compra lc
+JOIN doc.compra dc ON dc.id = lc.compra_id
+WHERE dc.factura_proveedor_id IS NOT NULL;
+
+-- Unmigrated letras: compras that had letras but no linked factura
+-- SELECT lc.id, lc.compra_id, lc.numero_letra, lc.monto_usd
+-- FROM public.letra_compra lc
+-- JOIN doc.compra dc ON dc.id = lc.compra_id
+-- WHERE dc.factura_proveedor_id IS NULL;
+
+-- ============================================================================
+
+----CONFIGURAR GUIAS y
 -- TRUNCATE TABLE doc.guia_remision_detalle,doc.guia_remision,doc.compra_guia_remision;
 WITH 
 ec as(
@@ -1358,6 +1523,5 @@ SELECT
     i.fyh_cre
 FROM inventario.lote i
 WHERE i.cantidad > 0
--- ============================================================================
--- MIGRAR MOVIMIENTOS DE INVENTARIO Y VINCULARLOS ADECUADAMENTE
--- ============================================================================
+
+

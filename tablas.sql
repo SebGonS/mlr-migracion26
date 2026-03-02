@@ -510,11 +510,25 @@ CREATE TABLE item_insumo_detalle(
    medida medida_enum NOT NULL,
    insumo_tipo_id smallint NOT NULL references insumo_tipo(id),
    colorante_tipo_id smallint references colorante_tipo(id),
+   -- Conversion factor: recipe quantities are in diluted-form units;
+   -- multiply by factor_stock to get actual kg to draw from inventory.
+   -- Default 1 (no conversion). Example: if stored concentrated 6×, set 1.0/6.0.
+   factor_stock NUMERIC(8,6) NOT NULL DEFAULT 1,
    usr_cre int,
    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
    usr_mod int,
    fyh_mod TIMESTAMPTZ
 );
+
+-- ─────────────────────────────────────────────────────────────
+-- Migration (dev env): add factor_stock to item_insumo_detalle
+-- ─────────────────────────────────────────────────────────────
+-- ALTER TABLE item_insumo_detalle
+--     ADD COLUMN IF NOT EXISTS factor_stock NUMERIC(8,6) NOT NULL DEFAULT 1;
+--
+-- Set 1/6 for the concentrated insumo that recipes reference in diluted units.
+-- Verify the item first: SELECT id, codigo, nombre FROM item WHERE id = 13;
+-- UPDATE item_insumo_detalle SET factor_stock = 1.0/6.0 WHERE item_id = 13;
 
 ---el rib es un tipo de item
 CREATE TABLE item_rollo_detalle(
