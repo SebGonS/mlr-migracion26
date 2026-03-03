@@ -812,26 +812,106 @@ CREATE TABLE doc.guia_remision_detalle (
 
 
 
+-- One nextval() per posting function call — all rows from the same call share this id (≈ SAP MBLNR)
+CREATE SEQUENCE IF NOT EXISTS inventario.mov_doc_seq START 1;
+
 CREATE TABLE inventario.item_movimientos (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    item_id INT NOT NULL REFERENCES item(id),           -- rollo crudo, rib, terminado
+    doc_movimiento_id BIGINT NOT NULL,                  -- posting event grouping key (≈ SAP MBLNR)
+    item_id INT NOT NULL REFERENCES item(id),
     lote_id int references inventario.lote(id),
     item_movimiento_tipo_id smallint references inventario.item_movimiento_tipo(id) NOT NULL,
-    -- movimiento_tipo TEXT NOT NULL CHECK (movimiento_tipo IN (
-    --     'INGRESO',
-    --     'EGRESO',
-    -- )),
     origen_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
     destino_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
     cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    precio_unitario NUMERIC(12,4),                      -- NULL for non-valorizable movements (flg_valorizable=false)
+    monto NUMERIC(14,2) GENERATED ALWAYS AS (cantidad * precio_unitario) STORED,
     fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    documento_tipo TEXT,          -- 'GUIA', 'LOTE', 'AJUSTE', etc. DOCUMENT CAUSING THE MOVEMENT
-    documento_id int,            -- identifier or number ID OF THE ROW FOR THE DOCUMENT IN THE CORRESPONDING DOCUMENT TYPE's TABLE
+    documento_tipo TEXT,                                -- business document that caused this movement
+    documento_id int,
     observacion TEXT,
     usr_cre int,
     fyh_cre timestamptz DEFAULT NOW()
 );
+
+-- ── inventario.item_valoracion (Moving Average Price store — mirrors SAP MBEW) ──
+-- One row per item. Updated automatically by trigger on item_movimientos.
+-- precio_promedio = (stock_valorado / stock_qty). Used by issue movements to stamp cost.
+CREATE TABLE inventario.item_valoracion (
+    item_id         INT            PRIMARY KEY REFERENCES item(id),
+    precio_promedio NUMERIC(12,4)  NOT NULL DEFAULT 0,  -- Moving Average Price (MAP)
+    stock_qty       NUMERIC(12,2)  NOT NULL DEFAULT 0,  -- Total qty currently valued
+    stock_valorado  NUMERIC(16,4)  NOT NULL DEFAULT 0,  -- Total monetary value on hand
+    fyh_mod         TIMESTAMPTZ    DEFAULT now()
+);
+
+-- MAP trigger: recalculates item_valoracion after every valued movement
+CREATE OR REPLACE FUNCTION inventario.fn_trg_actualizar_map()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_flg_valorizable boolean;
+    v_flg_recalcula   boolean;
+    v_factor          smallint;
+    v_map             numeric(12,4);
+    v_stock_qty       numeric(12,2);
+    v_stock_valorado  numeric(16,4);
+BEGIN
+    -- Fast exit for non-valorizable movements (precio_unitario not set)
+    IF NEW.precio_unitario IS NULL THEN RETURN NEW; END IF;
+
+    SELECT imt.flg_valorizable, imt.flg_recalcula_costo, imt.factor
+    INTO v_flg_valorizable, v_flg_recalcula, v_factor
+    FROM inventario.item_movimiento_tipo imt
+    WHERE imt.id = NEW.item_movimiento_tipo_id;
+
+    IF NOT v_flg_valorizable THEN RETURN NEW; END IF;
+
+    -- Ensure row exists, then lock it to serialize concurrent postings for the same item
+    INSERT INTO inventario.item_valoracion (item_id, precio_promedio, stock_qty, stock_valorado)
+    VALUES (NEW.item_id, 0, 0, 0)
+    ON CONFLICT (item_id) DO NOTHING;
+
+    SELECT precio_promedio, stock_qty, stock_valorado
+    INTO v_map, v_stock_qty, v_stock_valorado
+    FROM inventario.item_valoracion
+    WHERE item_id = NEW.item_id
+    FOR UPDATE;  -- row-level lock: serializes concurrent movements for the same item
+
+    IF v_factor > 0 THEN
+        IF v_flg_recalcula THEN
+            -- Weighted average recalculation (COMPRA_ING, PROD_ING, AJUSTE_POS with price)
+            v_stock_valorado := v_stock_valorado + (NEW.cantidad * NEW.precio_unitario);
+            v_stock_qty      := v_stock_qty + NEW.cantidad;
+            v_map            := CASE WHEN v_stock_qty > 0
+                                     THEN ROUND(v_stock_valorado / v_stock_qty, 4) ELSE 0 END;
+        ELSE
+            -- Enters at current MAP (DEV_CLI_ING, INT_TRANSFER_ING, EXT_RETORNO, etc.)
+            v_stock_valorado := v_stock_valorado + (NEW.cantidad * v_map);
+            v_stock_qty      := v_stock_qty + NEW.cantidad;
+            -- MAP stays the same
+        END IF;
+    ELSE
+        -- EGRESO: reduce stock at current MAP (caller already set precio_unitario = MAP)
+        v_stock_valorado := GREATEST(0, v_stock_valorado - (NEW.cantidad * v_map));
+        v_stock_qty      := GREATEST(0, v_stock_qty - NEW.cantidad);
+        IF v_stock_qty = 0 THEN v_stock_valorado := 0; END IF;
+        -- MAP stays the same until next valued receipt
+    END IF;
+
+    INSERT INTO inventario.item_valoracion (item_id, precio_promedio, stock_qty, stock_valorado, fyh_mod)
+    VALUES (NEW.item_id, v_map, v_stock_qty, v_stock_valorado, now())
+    ON CONFLICT (item_id) DO UPDATE
+        SET precio_promedio = EXCLUDED.precio_promedio,
+            stock_qty       = EXCLUDED.stock_qty,
+            stock_valorado  = EXCLUDED.stock_valorado,
+            fyh_mod         = EXCLUDED.fyh_mod;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_ai_item_movimientos_map
+AFTER INSERT ON inventario.item_movimientos
+FOR EACH ROW EXECUTE FUNCTION inventario.fn_trg_actualizar_map();
 
 
 

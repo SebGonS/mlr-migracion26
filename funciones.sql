@@ -1509,13 +1509,13 @@ DECLARE
     v_hint      text;
     v_context   text;
     v_sqlstate  text;
-    v_guia_id   INT;
-    v_guia_tipo guia_remision_tipo%ROWTYPE;
-    -- v_item_movimiento_tipo item_movimiento_tipo%ROWTYPE;
-    v_usr_id int := get_user_id();
-    v_lote_id int;
-    v_error_payload jsonb;
-    v_fecha_mov TIMESTAMPTZ;
+    v_guia_id           INT;
+    v_guia_tipo         guia_remision_tipo%ROWTYPE;
+    v_doc_movimiento_id BIGINT;
+    v_usr_id            int := get_user_id();
+    v_lote_id           int;
+    v_error_payload     jsonb;
+    v_fecha_mov         TIMESTAMPTZ;
 BEGIN
  -- guard condition
  SELECT * INTO v_guia_tipo FROM guia_remision_tipo WHERE id = (p_guia->>'guia_remision_tipo_id')::SMALLINT;
@@ -1530,6 +1530,8 @@ BEGIN
     ELSE COALESCE((p_guia->>'fecha_recepcion')::TIMESTAMPTZ, now())
 END;
 
+-- Single posting document id shared by all movements from this guia call
+SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
 
 IF v_guia_tipo.flg_emitida THEN
         -- SELECT im.lote_id,COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id),SUM(CASE WHEN im.movimiento_tipo = 'EGRESO' THEN -im.cantidad WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad ELSE 0 END) FROM inventario.item_movimientos im
@@ -1627,6 +1629,13 @@ END IF;
     )
     RETURNING id INTO v_guia_id;
 
+-- Link guia to compra if compra_id is provided (purchase receipts only)
+IF p_guia ? 'compra_id' THEN
+    INSERT INTO doc.compra_guia_remision (compra_id, guia_remision_id)
+    VALUES ((p_guia->>'compra_id')::BIGINT, v_guia_id)
+    ON CONFLICT DO NOTHING;
+END IF;
+
 IF v_guia_tipo.flg_emitida THEN
     
     INSERT INTO doc.guia_remision_detalle (guia_remision_id , item_id, cantidad,lote_id,ubicacion_id)
@@ -1638,17 +1647,18 @@ IF v_guia_tipo.flg_emitida THEN
         (item->>'ubicacion_id')::INT
     FROM jsonb_array_elements(p_guia->'items') AS item;
     -- For issued guides, create item movements as EGRESO from warehouse
-    INSERT INTO inventario.item_movimientos 
+    INSERT INTO inventario.item_movimientos
     (
-        item_id, 
-        lote_id, 
+        doc_movimiento_id, item_id,
+        lote_id,
         item_movimiento_tipo_id,
         origen_ubicacion_id,
         destino_ubicacion_id,
         cantidad, fecha_hora, documento_tipo, documento_id)
     SELECT
+        v_doc_movimiento_id,
         (item->>'item_id')::INT,
-        (item->>'lote_id')::INT, 
+        (item->>'lote_id')::INT,
         v_guia_tipo.item_movimiento_tipo_id,
         (p_guia->>'origen_ubicacion_id')::INT,
         NULL, -- destination is external
@@ -1660,10 +1670,11 @@ IF v_guia_tipo.flg_emitida THEN
 ELSE
  -- Items WITH lote_id → existing lots (devolution)
     INSERT INTO inventario.item_movimientos
-        (item_id, lote_id, item_movimiento_tipo_id,
+        (doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
          destino_ubicacion_id, cantidad, fecha_hora,
          documento_tipo, documento_id)
     SELECT
+        v_doc_movimiento_id,
         (item->>'item_id')::INT,
         (item->>'lote_id')::INT,
         v_guia_tipo.item_movimiento_tipo_id,
@@ -1721,14 +1732,20 @@ nuevos_lotes AS(
         nl.id --id del lote recien creado
         FROM nuevos_lotes nl
 )
-INSERT INTO inventario.item_movimientos (item_id, lote_id, item_movimiento_tipo_id, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id)
+INSERT INTO inventario.item_movimientos (doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id, origen_ubicacion_id, destino_ubicacion_id, cantidad, precio_unitario, fecha_hora, documento_tipo, documento_id)
     SELECT
+        v_doc_movimiento_id,
         nl.item_id,
-        nl.id, --id del lote recien creado
+        nl.id,
         v_guia_tipo.item_movimiento_tipo_id,
         NULL, -- origin is external
         (p_guia->>'destino_ubicacion_id')::INT,
         nl.cantidad,
+        -- For COMPRA_ING: look up unit price from compra_detalle; NULL for non-purchase guias
+        (SELECT cd.precio_unitario FROM doc.compra_detalle cd
+         WHERE cd.compra_id = (p_guia->>'compra_id')::BIGINT
+           AND cd.item_id = nl.item_id
+         ORDER BY cd.id LIMIT 1),
         v_fecha_mov,
         'GUIA_REMISION',
         v_guia_id

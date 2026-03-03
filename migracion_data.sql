@@ -1520,10 +1520,20 @@ WHERE ei.motivo IN ('ajuste','reconteo') AND inventario.lote.id = i.id;
 -- WHERE ei.motivo IN ('ajuste','reconteo') AND ci.id IS NOT NULL
 
 --REGISTRAR MOVIMIENTO INICIAL
-INSERT INTO inventario.item_movimientos(
-    item_id, lote_id, item_movimiento_tipo_id, destino_ubicacion_id,cantidad,documento_tipo, documento_id, observacion,usr_cre, fyh_cre
+WITH doc_posting AS (
+    -- One doc_movimiento_id per distinct source document (mirrors one function call = one ID)
+    SELECT DISTINCT
+        documento_tipo,
+        documento_id,
+        nextval('inventario.mov_doc_seq') AS doc_movimiento_id
+    FROM inventario.lote
+    WHERE cantidad > 0
 )
-SELECT 
+INSERT INTO inventario.item_movimientos(
+    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id, destino_ubicacion_id, cantidad, documento_tipo, documento_id, observacion, usr_cre, fyh_cre
+)
+SELECT
+    dp.doc_movimiento_id,
     i.item_id,
     i.id,
     CASE WHEN i.documento_tipo = 'guia_remision' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING') ELSE (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS') END,
@@ -1535,6 +1545,9 @@ SELECT
     i.usr_cre,
     i.fyh_cre
 FROM inventario.lote i
+JOIN doc_posting dp
+  ON dp.documento_tipo IS NOT DISTINCT FROM i.documento_tipo
+ AND dp.documento_id   IS NOT DISTINCT FROM i.documento_id
 WHERE i.cantidad > 0
 
 

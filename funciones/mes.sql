@@ -528,11 +528,12 @@ SET search_path TO 'iam','public','inventario','mes'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id    int := get_user_id();
-    v_consumos   jsonb;
-    v_saldo     numeric;
-    v_egr_tipo_id smallint;
-    v_error_payload jsonb;
+    v_usr_id            int := get_user_id();
+    v_consumos          jsonb;
+    v_saldo             numeric;
+    v_egr_tipo_id       smallint;
+    v_error_payload     jsonb;
+    v_doc_movimiento_id BIGINT;
 BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('registrar_consumo_paso', v_usr_id, jsonb_build_object('paso_id', p_paso_id, 'consumos', p_consumos));
@@ -580,16 +581,20 @@ FROM errores;
     END IF;
 
 v_consumos:= mes.calcular_fifo(p_consumos);
+        SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
         INSERT INTO inventario.item_movimientos(
-            item_id, lote_id, item_movimiento_tipo_id,
-            origen_ubicacion_id, cantidad,
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, cantidad, precio_unitario,
             documento_tipo, documento_id, observacion
-        ) SELECT 
+        ) SELECT
+            v_doc_movimiento_id,
             (v_consumo->>'item_id')::INT,
             (v_consumo->>'lote_id')::INT,
             v_egr_tipo_id,
             (v_consumo->>'ubicacion_id')::INT,
             (v_consumo->>'cantidad')::NUMERIC(12,2),
+            (SELECT iv.precio_promedio FROM inventario.item_valoracion iv
+             WHERE iv.item_id = (v_consumo->>'item_id')::INT),
             'ORDEN_PRODUCCION_PASO',
             p_paso_id,
             p_consumo->>'observacion'
@@ -678,13 +683,14 @@ SET search_path TO 'iam','public','mes','inventario'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id    int := get_user_id();
-    v_estado    orden_produccion_estado_enum;
-    v_count     int;
-    v_pesaje_id int;
-    v_peso_prorate numeric;
-    v_pesaje_pos_id smallint;
-    v_pesaje_neg_id smallint;
+    v_usr_id            int := get_user_id();
+    v_estado            orden_produccion_estado_enum;
+    v_count             int;
+    v_pesaje_id         int;
+    v_peso_prorate      numeric;
+    v_pesaje_pos_id     smallint;
+    v_pesaje_neg_id     smallint;
+    v_doc_movimiento_id BIGINT;
 BEGIN
     SELECT estado INTO v_estado
     FROM mes.orden_produccion WHERE id = p_orden_id;
@@ -716,13 +722,16 @@ BEGIN
     VALUES (p_orden_id)
     RETURNING id INTO v_pesaje_id;
 
+    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
+
     -- Create adjustment movements for differences
     INSERT INTO inventario.item_movimientos (
-        item_id, lote_id, item_movimiento_tipo_id,
+        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
         origen_ubicacion_id, destino_ubicacion_id,
         cantidad, documento_tipo, documento_id
     )
     SELECT
+        v_doc_movimiento_id,
         l.item_id,
         l.id,
         CASE WHEN v_peso_prorate > l.cantidad THEN v_pesaje_pos_id ELSE v_pesaje_neg_id END,
@@ -768,12 +777,13 @@ SET search_path TO 'iam', 'public', 'mes', 'inventario'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id  int := get_user_id();
-    v_estado  orden_produccion_estado_enum;
-    v_count   int;
-    v_pesaje_id int;
-    v_pesaje_pos_id smallint;
-    v_pesaje_neg_id smallint;
+    v_usr_id            int := get_user_id();
+    v_estado            orden_produccion_estado_enum;
+    v_count             int;
+    v_pesaje_id         int;
+    v_pesaje_pos_id     smallint;
+    v_pesaje_neg_id     smallint;
+    v_doc_movimiento_id BIGINT;
 BEGIN
     SELECT estado INTO v_estado
     FROM mes.orden_produccion WHERE id = p_orden_id;
@@ -796,6 +806,8 @@ BEGIN
     VALUES (p_orden_id, v_usr_id)
     RETURNING id INTO v_pesaje_id;
 
+    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
+
     WITH
     input_items AS (
         SELECT (i->>'id')::BIGINT AS opi_id, (i->>'peso_kg')::NUMERIC AS peso_nuevo
@@ -817,11 +829,12 @@ BEGIN
     ),
     movimientos AS (
         INSERT INTO inventario.item_movimientos (
-            item_id, lote_id, item_movimiento_tipo_id,
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
             origen_ubicacion_id, destino_ubicacion_id,
             cantidad, documento_tipo, documento_id
         )
         SELECT
+            v_doc_movimiento_id,
             ld.item_id, ld.lote_id,
             CASE WHEN ld.diferencia > 0 THEN v_pesaje_pos_id ELSE v_pesaje_neg_id END,
             CASE WHEN ld.diferencia < 0 THEN ld.ubicacion_id ELSE NULL END,
@@ -947,15 +960,16 @@ SET search_path TO 'iam','notification','public','inventario','mes','doc'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id        int := get_user_id();
-    v_orden_id      bigint;
-    v_partida_id    bigint;
-    v_detalles      jsonb;
-    v_propietario_id int;
-    v_ing_tipo_id   smallint;
-    v_egr_tipo_id   smallint;
-    v_consumed      int;
-    v_error_payload jsonb;
+    v_usr_id            int := get_user_id();
+    v_orden_id          bigint;
+    v_partida_id        bigint;
+    v_detalles          jsonb;
+    v_propietario_id    int;
+    v_ing_tipo_id       smallint;
+    v_egr_tipo_id       smallint;
+    v_consumed          int;
+    v_error_payload     jsonb;
+    v_doc_movimiento_id BIGINT;
 BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('registrar_produccion', v_usr_id, jsonb_build_object(
@@ -1039,13 +1053,17 @@ FOR UPDATE;
     SELECT id INTO v_egr_tipo_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
 
+    -- Single posting id shared by backflush + output movements
+    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
+
     -- 4a. Backflush: consume input rolls assigned to this paso
     INSERT INTO inventario.item_movimientos(
-        item_id, lote_id, item_movimiento_tipo_id,
+        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
         origen_ubicacion_id, cantidad,
         documento_tipo, documento_id
     )
     SELECT
+        v_doc_movimiento_id,
         opi.item_id,
         opi.lote_id,
         v_egr_tipo_id,
@@ -1075,14 +1093,15 @@ FOR UPDATE;
         SELECT item_id, 'ORDEN_PRODUCCION_PASO', p_orden_paso_id,
                cantidad, v_detalles, v_propietario_id
         FROM input_items
-RETURNING id, item_id, cantidad    
+RETURNING id, item_id, cantidad
 )
     INSERT INTO inventario.item_movimientos(
-        item_id, lote_id, item_movimiento_tipo_id,
+        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
         destino_ubicacion_id, cantidad,
         documento_tipo, documento_id
     )
     SELECT
+    v_doc_movimiento_id,
     item_id,
     id,                -- ← this is the lote_id
     v_ing_tipo_id,
@@ -1272,13 +1291,14 @@ SET search_path TO 'iam','notification','public','inventario','mes'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id      INT := get_user_id();
-    v_estado      orden_produccion_paso_estado_enum;
-    v_maquina_id  INT;
-    v_consumos    jsonb;
-    v_saldo       numeric;
-    v_egr_tipo_id smallint;
-    v_error_payload jsonb;
+    v_usr_id            INT := get_user_id();
+    v_estado            orden_produccion_paso_estado_enum;
+    v_maquina_id        INT;
+    v_consumos          jsonb;
+    v_saldo             numeric;
+    v_egr_tipo_id       smallint;
+    v_error_payload     jsonb;
+    v_doc_movimiento_id BIGINT;
 BEGIN
     SELECT estado, maquina_id
     INTO v_estado, v_maquina_id
@@ -1324,17 +1344,21 @@ BEGIN
 
         -- FIFO resolution + movements
         v_consumos := mes.calcular_fifo(p_datos->'consumos');
+        SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
         INSERT INTO inventario.item_movimientos(
-            item_id, lote_id, item_movimiento_tipo_id,
-            origen_ubicacion_id, cantidad,
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, cantidad, precio_unitario,
             documento_tipo, documento_id, observacion
         )
         SELECT
+            v_doc_movimiento_id,
             (v_consumo->>'item_id')::INT,
             (v_consumo->>'lote_id')::INT,
             v_egr_tipo_id,
             (v_consumo->>'ubicacion_id')::INT,
             (v_consumo->>'cantidad')::NUMERIC(12,2),
+            (SELECT iv.precio_promedio FROM inventario.item_valoracion iv
+             WHERE iv.item_id = (v_consumo->>'item_id')::INT),
             'LAVADO_MAQUINA',
             p_lavado_id,
             p_consumo->>'observacion'

@@ -285,14 +285,19 @@ CREATE TABLE inventario.lote_secuencia_anual (
 );
 
 -- ── inventario.item_movimientos ───────────────────────────────
+CREATE SEQUENCE IF NOT EXISTS inventario.mov_doc_seq START 1;
+
 CREATE TABLE inventario.item_movimientos (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    doc_movimiento_id BIGINT NOT NULL,                  -- posting event grouping key (≈ SAP MBLNR)
     item_id INT NOT NULL REFERENCES item(id),
     lote_id int REFERENCES inventario.lote(id),
     item_movimiento_tipo_id smallint REFERENCES inventario.item_movimiento_tipo(id) NOT NULL,
     origen_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
     destino_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
     cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    precio_unitario NUMERIC(12,4),                      -- NULL for non-valorizable movements (flg_valorizable=false)
+    monto NUMERIC(14,2) GENERATED ALWAYS AS (cantidad * precio_unitario) STORED,
     fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
     documento_tipo TEXT,
     documento_id int,
@@ -300,3 +305,74 @@ CREATE TABLE inventario.item_movimientos (
     usr_cre int,
     fyh_cre timestamptz DEFAULT NOW()
 );
+
+-- ── inventario.item_valoracion (Moving Average Price store — mirrors SAP MBEW) ──
+CREATE TABLE inventario.item_valoracion (
+    item_id         INT            PRIMARY KEY REFERENCES item(id),
+    precio_promedio NUMERIC(12,4)  NOT NULL DEFAULT 0,
+    stock_qty       NUMERIC(12,2)  NOT NULL DEFAULT 0,
+    stock_valorado  NUMERIC(16,4)  NOT NULL DEFAULT 0,
+    fyh_mod         TIMESTAMPTZ    DEFAULT now()
+);
+
+-- MAP trigger
+CREATE OR REPLACE FUNCTION inventario.fn_trg_actualizar_map()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_flg_valorizable boolean;
+    v_flg_recalcula   boolean;
+    v_factor          smallint;
+    v_map             numeric(12,4);
+    v_stock_qty       numeric(12,2);
+    v_stock_valorado  numeric(16,4);
+BEGIN
+    IF NEW.precio_unitario IS NULL THEN RETURN NEW; END IF;
+
+    SELECT imt.flg_valorizable, imt.flg_recalcula_costo, imt.factor
+    INTO v_flg_valorizable, v_flg_recalcula, v_factor
+    FROM inventario.item_movimiento_tipo imt
+    WHERE imt.id = NEW.item_movimiento_tipo_id;
+
+    IF NOT v_flg_valorizable THEN RETURN NEW; END IF;
+
+    -- Ensure row exists, then lock it to serialize concurrent postings for the same item
+    INSERT INTO inventario.item_valoracion (item_id, precio_promedio, stock_qty, stock_valorado)
+    VALUES (NEW.item_id, 0, 0, 0)
+    ON CONFLICT (item_id) DO NOTHING;
+
+    SELECT precio_promedio, stock_qty, stock_valorado
+    INTO v_map, v_stock_qty, v_stock_valorado
+    FROM inventario.item_valoracion
+    WHERE item_id = NEW.item_id
+    FOR UPDATE;  -- row-level lock: serializes concurrent movements for the same item
+
+    IF v_factor > 0 THEN
+        IF v_flg_recalcula THEN
+            v_stock_valorado := v_stock_valorado + (NEW.cantidad * NEW.precio_unitario);
+            v_stock_qty      := v_stock_qty + NEW.cantidad;
+            v_map            := CASE WHEN v_stock_qty > 0
+                                     THEN ROUND(v_stock_valorado / v_stock_qty, 4) ELSE 0 END;
+        ELSE
+            v_stock_valorado := v_stock_valorado + (NEW.cantidad * v_map);
+            v_stock_qty      := v_stock_qty + NEW.cantidad;
+        END IF;
+    ELSE
+        v_stock_valorado := GREATEST(0, v_stock_valorado - (NEW.cantidad * v_map));
+        v_stock_qty      := GREATEST(0, v_stock_qty - NEW.cantidad);
+        IF v_stock_qty = 0 THEN v_stock_valorado := 0; END IF;
+    END IF;
+
+    INSERT INTO inventario.item_valoracion (item_id, precio_promedio, stock_qty, stock_valorado, fyh_mod)
+    VALUES (NEW.item_id, v_map, v_stock_qty, v_stock_valorado, now())
+    ON CONFLICT (item_id) DO UPDATE
+        SET precio_promedio = EXCLUDED.precio_promedio,
+            stock_qty       = EXCLUDED.stock_qty,
+            stock_valorado  = EXCLUDED.stock_valorado,
+            fyh_mod         = EXCLUDED.fyh_mod;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_ai_item_movimientos_map
+AFTER INSERT ON inventario.item_movimientos
+FOR EACH ROW EXECUTE FUNCTION inventario.fn_trg_actualizar_map();
