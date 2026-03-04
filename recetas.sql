@@ -1,4 +1,10 @@
 -- ═══════════════════════════════════════════════════════════════
+-- DEPENDENCY: tablas.sql (or migration/04_alter_legacy_tables.sql) MUST run first.
+-- This file references articulo_tipo(id) — which is the renamed tipo_articulo table.
+-- If tipo_articulo has not been renamed yet, FK on receta.tenido will fail.
+-- ═══════════════════════════════════════════════════════════════
+
+-- ═══════════════════════════════════════════════════════════════
 -- receta SCHEMA — recipe master data (process engineering domain)
 --
 -- Domain split:
@@ -321,3 +327,4 @@ GRANT SELECT ON receta.lavado_maquina_paso_insumo TO authenticated;
 
 -- 7d: Drop desarrollo_color (was never populated — safe to drop)
 -- DROP TABLE IF EXISTS public.desarrollo_color;
+

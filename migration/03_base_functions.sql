@@ -19,22 +19,6 @@ BEGIN
 END;
 $$;
 
--- FIX (BUG 3): Variant for tables that derive codigo_canon from 'nombre'
--- (not 'codigo'). Used by: articulo_tipo, articulo.
--- In tablas.sql these tables had fn_trg_set_codigo_canon attached despite
--- having no 'codigo' column — that causes runtime ERROR on every INSERT.
-CREATE OR REPLACE FUNCTION public.fn_trg_set_codigo_canon_from_nombre()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    IF NEW.nombre IS NOT NULL THEN
-        NEW.codigo_canon := lower(unaccent(NEW.nombre));
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
 -- Audit helpers (from constraints.sql — needed before constraint file)
 CREATE OR REPLACE FUNCTION public.fn_trg_set_cre_fields()
 RETURNS trigger LANGUAGE plpgsql AS $$

@@ -11,7 +11,7 @@
 -- 1. ENUM DEFINITIONS (Must be created before they are used in tables)
 -- CREATE TYPE insumo_tipo_enum AS ENUM ('quimico', 'colorante', 'auxiliar'); -- Added based on usage below
 
------AGREGAR NUEVA DEFINICION DE vw_COLOR_X_CLOETE ára terminar funcion de get insumo
+-----AGREGAR NUEVA DEFINICION DE vw_COLOR_X_CLIENTE ára terminar funcion de get insumo
 ----luego hacer get insumo
 ----Notas
 ----A futuro separar movimientos de los documentos de negocio
@@ -446,64 +446,83 @@ VALUES ('directo','DIR'),('disperso','DISP'),('reactivo','RX');
 -- Article classification
 -- ───────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS articulo_tipo (
-    id           SMALLINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    nombre       TEXT     NOT NULL,
-    codigo_canon TEXT     NOT NULL UNIQUE
-);
--- FIX BUG3: articulo_tipo has no 'codigo' column — must use fn_trg_set_codigo_canon_from_nombre
--- (reads NEW.nombre instead of NEW.codigo)
+-- ── articulo_tipo (was: tipo_articulo) ────────────────────────
+-- Rename table (guard: only if still called tipo_articulo)
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname='public' AND tablename='tipo_articulo') THEN
+        ALTER TABLE tipo_articulo RENAME TO articulo_tipo;
+    END IF;
+END $$;
+
+-- Rename column tipo_articulo → nombre
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='articulo_tipo' AND column_name='tipo_articulo') THEN
+        ALTER TABLE articulo_tipo RENAME COLUMN tipo_articulo TO nombre;
+    END IF;
+END $$;
+
+-- Add codigo and backfill (UPPER + strip non-alphanum, same as color.codigo)
+ALTER TABLE articulo_tipo ADD COLUMN IF NOT EXISTS codigo TEXT;
+UPDATE articulo_tipo
+SET codigo = UPPER(regexp_replace(nombre, '[^a-zA-Z0-9]', '', 'g'))
+WHERE codigo IS NULL;
+-- Review collisions before enforcing: SELECT codigo, COUNT(*) FROM articulo_tipo GROUP BY codigo HAVING COUNT(*)>1;
+-- ALTER TABLE articulo_tipo ALTER COLUMN codigo SET NOT NULL;
+-- ALTER TABLE articulo_tipo ADD CONSTRAINT articulo_tipo_codigo_uk UNIQUE (codigo);
+
+-- Add codigo_canon and backfill
+ALTER TABLE articulo_tipo ADD COLUMN IF NOT EXISTS codigo_canon TEXT;
+UPDATE articulo_tipo SET codigo_canon = lower(unaccent(codigo)) WHERE codigo_canon IS NULL AND codigo IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_tipo_cc ON articulo_tipo(codigo_canon);
+
+DROP TRIGGER IF EXISTS trg_bi_articulo_tipo_codigo_canon ON articulo_tipo;
 CREATE TRIGGER trg_bi_articulo_tipo_codigo_canon
 BEFORE INSERT OR UPDATE ON articulo_tipo
-FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon_from_nombre();
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
 
-CREATE TABLE IF NOT EXISTS articulo (
-    id               SMALLINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    nombre           TEXT     NOT NULL,
-    codigo_canon     TEXT     NOT NULL UNIQUE,
-    grupo_articulo   TEXT,
-    articulo_tipo_id SMALLINT NOT NULL REFERENCES articulo_tipo(id),
-    fibra            SMALLINT NOT NULL  -- number of fiber types: 1=mono, 2=two-fiber blend
-);
--- FIX BUG3: articulo has no 'codigo' column — must use fn_trg_set_codigo_canon_from_nombre
+-- ── articulo ───────────────────────────────────────────────────
+-- Rename articulo → nombre
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='articulo' AND column_name='articulo') THEN
+        ALTER TABLE articulo RENAME COLUMN articulo TO nombre;
+    END IF;
+END $$;
+
+-- Rename tipo_articulo_id → articulo_tipo_id
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='articulo' AND column_name='tipo_articulo_id') THEN
+        ALTER TABLE articulo RENAME COLUMN tipo_articulo_id TO articulo_tipo_id;
+    END IF;
+END $$;
+
+-- Add codigo and backfill
+ALTER TABLE articulo ADD COLUMN IF NOT EXISTS codigo TEXT;
+UPDATE articulo
+SET codigo = UPPER(regexp_replace(nombre, '[^a-zA-Z0-9]', '', 'g'))
+WHERE codigo IS NULL;
+-- Review collisions: SELECT codigo, COUNT(*) FROM articulo GROUP BY codigo HAVING COUNT(*)>1;
+-- ALTER TABLE articulo ALTER COLUMN codigo SET NOT NULL;
+-- ALTER TABLE articulo ADD CONSTRAINT articulo_codigo_uk UNIQUE (codigo);
+
+-- Add codigo_canon and backfill
+ALTER TABLE articulo ADD COLUMN IF NOT EXISTS codigo_canon TEXT;
+UPDATE articulo SET codigo_canon = lower(unaccent(codigo)) WHERE codigo_canon IS NULL AND codigo IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_cc ON articulo(codigo_canon);
+
+-- Add fibra and backfill from item_rollo_detalle (must run BEFORE fibra is dropped from ird)
+ALTER TABLE articulo ADD COLUMN IF NOT EXISTS fibra SMALLINT;
+UPDATE articulo ar
+   SET fibra = ird.fibra
+  FROM item_rollo_detalle ird
+ WHERE ird.articulo_id = ar.id AND ar.fibra IS NULL;
+
+DROP TRIGGER IF EXISTS trg_bi_articulo_codigo_canon ON articulo;
 CREATE TRIGGER trg_bi_articulo_codigo_canon
 BEFORE INSERT OR UPDATE ON articulo
-FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon_from_nombre();
-
-
--- ═══════════════════════════════════════════════════════════════
--- MIGRATION (dev env)
--- Run against existing DB to align with DDL above.
--- Legacy tables: tipo_articulo (→ articulo_tipo), articulo (add fibra + codigo_canon)
--- ═══════════════════════════════════════════════════════════════
-
-
-
--- Step 1: Rename tables and columns
--- ALTER TABLE tipo_articulo RENAME TO articulo_tipo;
--- ALTER TABLE articulo_tipo RENAME COLUMN tipo_articulo TO nombre;
--- ALTER TABLE articulo RENAME COLUMN articulo TO nombre;
--- ALTER TABLE articulo RENAME COLUMN tipo_articulo_id TO articulo_tipo_id;
-
--- Step 2: Add codigo_canon and backfill
--- ALTER TABLE articulo_tipo ADD COLUMN IF NOT EXISTS codigo_canon TEXT;
--- UPDATE articulo_tipo SET codigo_canon = lower(unaccent(nombre));
--- ALTER TABLE articulo_tipo ALTER COLUMN codigo_canon SET NOT NULL;
--- CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_tipo_cc ON articulo_tipo(codigo_canon);
--- ALTER TABLE articulo ADD COLUMN IF NOT EXISTS codigo_canon TEXT;
--- UPDATE articulo SET codigo_canon = lower(unaccent(nombre));
--- ALTER TABLE articulo ALTER COLUMN codigo_canon SET NOT NULL;
--- CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_cc ON articulo(codigo_canon);
-
--- Step 3: Add fibra and backfill from item_rollo_detalle
--- Sanity check first (must return zero rows before proceeding):
--- SELECT articulo_id, COUNT(DISTINCT fibra) FROM item_rollo_detalle GROUP BY articulo_id HAVING COUNT(DISTINCT fibra) > 1;
--- ALTER TABLE articulo ADD COLUMN IF NOT EXISTS fibra SMALLINT;
--- UPDATE articulo ar SET fibra = ird.fibra FROM item_rollo_detalle ird WHERE ird.articulo_id = ar.id;
--- ALTER TABLE articulo ALTER COLUMN fibra SET NOT NULL;
-
--- Step 4: fibra moved to articulo — drop redundant column from item_rollo_detalle
--- FIX BUG1: moved to AFTER CREATE TABLE item_rollo_detalle (search for BUG1-MOVED below)
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
 
 
 CREATE TABLE item_insumo_detalle(
@@ -1008,15 +1027,16 @@ CREATE TRIGGER trg_bi_operacion_codigo_canon
 BEFORE INSERT OR UPDATE ON mes.operacion
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
--- Seed data based on your JSON
+-- Seed data
 INSERT INTO mes.operacion (codigo, nombre, requiere_receta) VALUES
-('TERMO',  'TERMOFIJADO',  false),
-('TEN',    'TEÑIDO',       true),
-('HIDRO',  'LAVADO_HIDRO', true),
-('SEC',    'SECADO',       false),
-('PLAN',   'PLANCHADO',   false),
-('PERCH',  'PERCHADO',    false),
-('VOLT',   'VOLTEADO',     false);
+('TERMOFIJADO',  'Termofijado',  false),
+('TENIDO',       'Teñido',       true),
+('LAVADO_HIDRO', 'Lavado Hidro', true),
+('SECADO',       'Secado',       false),
+('PLANCHADO',    'Planchado',    false),
+('PERCHADO',     'Perchado',     false),
+('VOLTEADO',     'Volteado',     false)
+ON CONFLICT (codigo) DO NOTHING;
 
 
 
@@ -1079,6 +1099,181 @@ CREATE TRIGGER trg_bi_empleado_rol_codigo_canon
 BEFORE INSERT OR UPDATE ON mes.empleado_rol
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+-- ── Code immutability ─────────────────────────────────────────────────────────
+-- Applied to every table with a codigo column. Codes are write-once: once set,
+-- they can never change. Rename = soft-delete old + create new.
+CREATE OR REPLACE FUNCTION public.fn_trg_immutable_codigo()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.codigo IS NOT NULL AND OLD.codigo IS DISTINCT FROM NEW.codigo THEN
+        RAISE EXCEPTION 'codigo is immutable on %. Deactivate and create a new record instead.', TG_TABLE_NAME;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- Apply to all catalog and instance tables
+DO $$ DECLARE t TEXT; BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        'public.unidad',
+        'public.item_tipo',
+        'public.item',
+        'public.insumo_tipo',
+        'public.colorante_tipo',
+        'public.articulo_tipo',
+        'public.articulo',
+        'public.color',
+        'inventario.item_movimiento_tipo',
+        'inventario.almacen',
+        'inventario.ubicacion',
+        'doc.guia_remision_tipo',
+        'mes.operacion',
+        'mes.maquina_tipo',
+        'mes.maquina',
+        'mes.empleado_rol',
+        'calidad.tipo_defecto'
+    ] LOOP
+        EXECUTE format(
+            'DROP TRIGGER IF EXISTS trg_bu_immutable_codigo ON %s;
+             CREATE TRIGGER trg_bu_immutable_codigo
+             BEFORE UPDATE ON %s
+             FOR EACH ROW EXECUTE FUNCTION public.fn_trg_immutable_codigo();',
+            t, t
+        );
+    END LOOP;
+END $$;
+
+-- ── Auto-gen: mes.maquina ─────────────────────────────────────────────────────
+-- Generates codigo = {maquina_tipo.codigo}-{NNN} scoped per tipo, if not provided.
+CREATE OR REPLACE FUNCTION mes.fn_trg_gen_codigo_maquina()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_tipo_codigo TEXT;
+    v_seq         INT;
+BEGIN
+    IF NEW.codigo IS NULL THEN
+        SELECT codigo INTO v_tipo_codigo FROM mes.maquina_tipo WHERE id = NEW.maquina_tipo_id;
+        SELECT COALESCE(MAX(
+            CASE WHEN codigo ~ ('^' || v_tipo_codigo || '-[0-9]+$')
+                 THEN (regexp_match(codigo, '[0-9]+$'))[1]::int
+                 ELSE 0 END
+        ), 0) + 1
+        INTO v_seq
+        FROM mes.maquina WHERE maquina_tipo_id = NEW.maquina_tipo_id;
+        NEW.codigo := v_tipo_codigo || '-' || LPAD(v_seq::text, 3, '0');
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_bi_gen_codigo_maquina ON mes.maquina;
+CREATE TRIGGER trg_bi_gen_codigo_maquina
+BEFORE INSERT ON mes.maquina
+FOR EACH ROW EXECUTE FUNCTION mes.fn_trg_gen_codigo_maquina();
+
+-- ── Auto-gen: inventario.ubicacion ───────────────────────────────────────────
+-- Generates codigo = {almacen_abbrev}-{NN} scoped per almacen, if not provided.
+-- Strips the 'ALM-' prefix from almacen.codigo to get the abbreviation.
+CREATE OR REPLACE FUNCTION inventario.fn_trg_gen_codigo_ubicacion()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_abbrev TEXT;
+    v_seq    INT;
+BEGIN
+    IF NEW.codigo IS NULL THEN
+        SELECT regexp_replace(codigo, '^ALM-', '') INTO v_abbrev
+        FROM inventario.almacen WHERE id = NEW.almacen_id;
+        SELECT COUNT(*) + 1 INTO v_seq
+        FROM inventario.ubicacion WHERE almacen_id = NEW.almacen_id;
+        NEW.codigo := v_abbrev || '-' || LPAD(v_seq::text, 2, '0');
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_bi_gen_codigo_ubicacion ON inventario.ubicacion;
+CREATE TRIGGER trg_bi_gen_codigo_ubicacion
+BEFORE INSERT ON inventario.ubicacion
+FOR EACH ROW EXECUTE FUNCTION inventario.fn_trg_gen_codigo_ubicacion();
+
+-- ── Auto-gen: color ───────────────────────────────────────────────────────────
+-- Derives codigo by stripping non-alphanumeric from color name, uppercased.
+CREATE OR REPLACE FUNCTION public.fn_trg_gen_codigo_color()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.codigo IS NULL THEN
+        NEW.codigo := UPPER(regexp_replace(NEW.color, '[^a-zA-Z0-9]', '', 'g'));
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_bi_gen_codigo_color ON color;
+CREATE TRIGGER trg_bi_gen_codigo_color
+BEFORE INSERT ON color
+FOR EACH ROW EXECUTE FUNCTION public.fn_trg_gen_codigo_color();
+
+-- ── Auto-gen: item (rollo) ────────────────────────────────────────────────────
+-- Fires AFTER INSERT on item_rollo_detalle, updates item.codigo when not yet set.
+-- Format: R-{articulo.codigo}-{fibra}-{C|T}  (R-RB-... for rib variants)
+CREATE OR REPLACE FUNCTION public.fn_trg_gen_codigo_item_rollo()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_articulo_codigo TEXT;
+    v_fibra           TEXT;
+    v_estado          TEXT;
+    v_rib             TEXT;
+BEGIN
+    SELECT codigo INTO v_articulo_codigo FROM articulo WHERE id = NEW.articulo_id;
+    SELECT COALESCE(fibra::text, '1') INTO v_fibra FROM articulo WHERE id = NEW.articulo_id;
+    v_estado := CASE WHEN NEW.flg_tenido THEN 'T' ELSE 'C' END;
+    v_rib    := CASE WHEN COALESCE(NEW.flg_rib, false) THEN 'RB-' ELSE '' END;
+    UPDATE item
+       SET codigo = UPPER('R-' || v_rib || v_articulo_codigo || '-' || v_fibra || '-' || v_estado)
+     WHERE id = NEW.item_id AND codigo IS NULL;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_ai_gen_codigo_item_rollo ON item_rollo_detalle;
+CREATE TRIGGER trg_ai_gen_codigo_item_rollo
+AFTER INSERT ON item_rollo_detalle
+FOR EACH ROW EXECUTE FUNCTION public.fn_trg_gen_codigo_item_rollo();
+
+-- ── Auto-gen: item (insumo) ───────────────────────────────────────────────────
+-- Fires AFTER INSERT on item_insumo_detalle, updates item.codigo when not yet set.
+-- Format: I-{QUIM|COL|AUX}-{DIR|DISP|RX?}-{NORMALIZED_NAME}
+CREATE OR REPLACE FUNCTION public.fn_trg_gen_codigo_item_insumo()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_it_codigo TEXT;
+    v_ct_codigo TEXT;
+    v_nombre    TEXT;
+    v_codigo    TEXT;
+BEGIN
+    SELECT it.codigo, ct.codigo, i.nombre
+      INTO v_it_codigo, v_ct_codigo, v_nombre
+      FROM item i
+      JOIN insumo_tipo it ON it.id = NEW.insumo_tipo_id
+      LEFT JOIN colorante_tipo ct ON ct.id = NEW.colorante_tipo_id
+     WHERE i.id = NEW.item_id;
+
+    v_codigo := 'I-' || v_it_codigo;
+    IF v_ct_codigo IS NOT NULL THEN
+        v_codigo := v_codigo || '-' || v_ct_codigo;
+    END IF;
+    v_codigo := v_codigo || '-' ||
+        UPPER(trim(both '-' from
+            regexp_replace(
+                regexp_replace(v_nombre COLLATE "C", '\s+', ' ', 'g'),
+                '[^A-Z0-9]+', '-', 'g')));
+
+    UPDATE item SET codigo = v_codigo WHERE id = NEW.item_id AND codigo IS NULL;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_ai_gen_codigo_item_insumo ON item_insumo_detalle;
+CREATE TRIGGER trg_ai_gen_codigo_item_insumo
+AFTER INSERT ON item_insumo_detalle
+FOR EACH ROW EXECUTE FUNCTION public.fn_trg_gen_codigo_item_insumo();
+
 CREATE TABLE mes.empleado(
   id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   nombre text,

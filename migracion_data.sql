@@ -380,42 +380,37 @@ SELECT setval(
 -- 1. MASTER DATA MIGRATION - Public Schema
 -- ===========================================================================
 -- CREAR ROLLOS CRUDOS
-SELECT  UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C') codigo,
-'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo' nombre,
+-- Preview (SELECT only, not inserted):
+SELECT  UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C') codigo,
+'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo' nombre,
 u.id unidad_id,
 it.id item_tipo_id,
-articulo_id,
-COALESCE(fibra, '1') fibra 
-FROM partida
-JOIN articulo  a ON a.id = partida.articulo_id
+p.articulo_id,
+COALESCE(a.fibra, 1) fibra
+FROM partida p
+JOIN articulo  a ON a.id = p.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
 JOIN unidad u ON u.codigo = 'kg'
-GROUP BY 
-UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C'),
-'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo',
-u.id,
-it.id,
-articulo_id,
-COALESCE(fibra, '1');
+GROUP BY
+UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C'),
+'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo',
+u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1);
 
 WITH base AS (
-   SELECT  UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C') codigo,
-'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo' nombre,
+   SELECT  UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C') codigo,
+'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo' nombre,
 u.id unidad_id,
 it.id item_tipo_id,
-articulo_id,
-COALESCE(fibra, '1') fibra 
-FROM partida
-JOIN articulo  a ON a.id = partida.articulo_id
+p.articulo_id,
+COALESCE(a.fibra, 1) fibra
+FROM partida p
+JOIN articulo  a ON a.id = p.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
 JOIN unidad u ON u.codigo = 'kg'
-GROUP BY 
-UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C'),
-'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo',
-u.id,
-it.id,
-articulo_id,
-COALESCE(fibra, '1')
+GROUP BY
+UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C'),
+'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo',
+u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1)
 ),
 ins_item AS (
     INSERT INTO item (
@@ -453,24 +448,21 @@ JOIN base b USING (codigo);
 -----MIGRAR ROLLOS RIB CRUDOS
 
 WITH base AS (
-   SELECT  UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C') codigo,
-'Rollo Rib ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo' nombre,
+   SELECT  UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C') codigo,
+'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo' nombre,
 u.id unidad_id,
 it.id item_tipo_id,
-articulo_id,
-COALESCE(fibra, '1') fibra 
-FROM partida
-JOIN articulo  a ON a.id = partida.articulo_id
+p.articulo_id,
+COALESCE(a.fibra, 1) fibra
+FROM partida p
+JOIN articulo  a ON a.id = p.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
 JOIN unidad u ON u.codigo = 'kg'
-WHERE rib>0
-GROUP BY 
-UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-C'),
-'Rollo Rib ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Crudo',
-u.id,
-it.id,
-articulo_id,
-COALESCE(fibra, '1')
+WHERE p.rib > 0
+GROUP BY
+UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C'),
+'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo',
+u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1)
 ),
 ins_item AS (
     INSERT INTO item (
@@ -507,23 +499,20 @@ JOIN base b USING (codigo);
 
 --------------------INSERTAR ITEM ROLLO teñido
 WITH base AS (
-   SELECT  UPPER('R-' || a.articulo||'-'|| COALESCE(fibra, '1')||'-T') codigo,
-'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Teñido' nombre,
+   SELECT  UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-T') codigo,
+'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Teñido' nombre,
 u.id unidad_id,
 it.id item_tipo_id,
-articulo_id,
-COALESCE(fibra, '1') fibra 
-FROM partida
-JOIN articulo  a ON a.id = partida.articulo_id
+p.articulo_id,
+COALESCE(a.fibra, 1) fibra
+FROM partida p
+JOIN articulo  a ON a.id = p.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
 JOIN unidad u ON u.codigo = 'kg'
-GROUP BY 
-UPPER('R-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-T'),
-'Rollo ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Teñido',
-u.id,
-it.id,
-articulo_id,
-COALESCE(fibra, '1')
+GROUP BY
+UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-T'),
+'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Teñido',
+u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1)
 ),
 ins_item AS (
     INSERT INTO item (
@@ -560,24 +549,21 @@ JOIN base b USING (codigo);
 ---- RIB TEÑIDO
 
 WITH base AS (
-   SELECT  UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-T') codigo,
-'Rollo Rib ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Teñido' nombre,
+   SELECT  UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-T') codigo,
+'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Teñido' nombre,
 u.id unidad_id,
 it.id item_tipo_id,
-articulo_id,
-COALESCE(fibra, '1') fibra 
-FROM partida
-JOIN articulo  a ON a.id = partida.articulo_id
+p.articulo_id,
+COALESCE(a.fibra, 1) fibra
+FROM partida p
+JOIN articulo  a ON a.id = p.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
 JOIN unidad u ON u.codigo = 'kg'
-WHERE rib>0
-GROUP BY 
-UPPER('R-'||'RB-'|| a.articulo||'-'|| COALESCE(fibra, '1')||'-T'),
-'Rollo Rib ' || a.articulo || ' ' || COALESCE(fibra, '1') || ' fibra(s) Teñido',
-u.id,
-it.id,
-articulo_id,
-COALESCE(fibra, '1')
+WHERE p.rib > 0
+GROUP BY
+UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-T'),
+'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Teñido',
+u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1)
 ),
 ins_item AS (
     INSERT INTO item (
@@ -631,8 +617,17 @@ insumo_id
 FROM insumo i
 LEFT JOIN item_tipo it ON it.codigo = 'INSUMO'
 LEFT JOIN unidad u ON u.codigo = 'kg'
-LEFT JOIN insumo_tipo it2 ON it2.nombre = CASE tipo WHEN 'directo' THEN 'colorante' WHEN 'reactivo' THEN 'colorante' WHEN 'disperso' THEN 'colorante' ELSE i.tipo::text END ---case when diperso,reactivo or directo then colorante
-LEFT JOIN colorante_tipo ct ON ct.nombre=i.tipo::text;
+LEFT JOIN insumo_tipo it2 ON it2.codigo = CASE tipo
+    WHEN 'directo'  THEN 'COL'
+    WHEN 'reactivo' THEN 'COL'
+    WHEN 'disperso' THEN 'COL'
+    WHEN 'auxiliar' THEN 'AUX'
+    WHEN 'quimico'  THEN 'QUIM' END
+LEFT JOIN colorante_tipo ct ON ct.codigo = CASE tipo
+    WHEN 'directo'  THEN 'DIR'
+    WHEN 'reactivo' THEN 'RX'
+    WHEN 'disperso' THEN 'DISP'
+    ELSE NULL END;
 
 with base AS(
     SELECT 'I-' ||
@@ -649,8 +644,17 @@ i.id
 FROM insumo i
 LEFT JOIN item_tipo it ON it.codigo = 'INSUMO'
 LEFT JOIN unidad u ON u.codigo = 'kg'
-LEFT JOIN insumo_tipo it2 ON it2.nombre = CASE tipo WHEN 'directo' THEN 'colorante' WHEN 'reactivo' THEN 'colorante' WHEN 'disperso' THEN 'colorante' ELSE i.tipo::text END ---case when diperso,reactivo or directo then colorante
-LEFT JOIN colorante_tipo ct ON ct.nombre=i.tipo::text
+LEFT JOIN insumo_tipo it2 ON it2.codigo = CASE tipo
+    WHEN 'directo'  THEN 'COL'
+    WHEN 'reactivo' THEN 'COL'
+    WHEN 'disperso' THEN 'COL'
+    WHEN 'auxiliar' THEN 'AUX'
+    WHEN 'quimico'  THEN 'QUIM' END
+LEFT JOIN colorante_tipo ct ON ct.codigo = CASE tipo
+    WHEN 'directo'  THEN 'DIR'
+    WHEN 'reactivo' THEN 'RX'
+    WHEN 'disperso' THEN 'DISP'
+    ELSE NULL END
 ),
 ins as(
     INSERT INTO item (
@@ -928,25 +932,26 @@ WHERE tipo_receta IN (
 
 -- First, create maquina_tipo entries based on ubicacion values
 INSERT INTO mes.maquina_tipo (codigo, nombre) VALUES
-('MAQ-TEN',    'Maquina de Teñido'),
-('HIDRO',      'Hidroextractora'),
-('COMPACT',    'Compactadora'),
-('PERCH',      'Perchadora'),
-('PREP',       'Preparadora'),
-('SEC',        'Secadora'),
-('TERMO',      'Termofijadora'),
-('VOLT',       'Volteadora'),
-('BOMBA',      'Bomba de Agua'),
-('POZO',       'Pozo de Agua'),
-('ABLAND',     'Ablandador'),
-('COMPR',      'Compresor'),
-('CALDERO',    'Caldero')
+('TEN',     'Maquina de Teñido'),
+('HIDRO',   'Hidroextractora'),
+('COMPACT', 'Compactadora'),
+('PERCH',   'Perchadora'),
+('PREP',    'Preparadora'),
+('SEC',     'Secadora'),
+('TERMO',   'Termofijadora'),
+('VOLT',    'Volteadora'),
+('BOMBA',   'Bomba de Agua'),
+('POZO',    'Pozo de Agua'),
+('ABLAND',  'Ablandador'),
+('COMPR',   'Compresor'),
+('CALDERO', 'Caldero')
 ON CONFLICT (codigo) DO NOTHING;
 
 -- Migrate maquina records with preserved IDs
+-- codigo is omitted: auto-gen trigger (fn_trg_gen_codigo_maquina) derives it
+-- from maquina_tipo.codigo + per-type sequence → e.g. TEN-001, SEC-001
 INSERT INTO mes.maquina (
     id,
-    codigo,
     nombre,
     maquina_tipo_id,
     capacidad_min_kg,
@@ -957,22 +962,21 @@ INSERT INTO mes.maquina (
 OVERRIDING SYSTEM VALUE
 SELECT
     m.id,
-    'MAQ-' || LPAD(m.id::text, 3, '0') AS codigo,
     m.nombre,
     CASE m.ubicacion
-        WHEN 'Maq Teñido'      THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'MAQ-TEN')
-        WHEN 'Hidro'           THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'HIDRO')
-        WHEN 'Compactadora'    THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'COMPACT')
-        WHEN 'Percha'          THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'PERCH')
-        WHEN 'Preparadora'     THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'PREP')
-        WHEN 'Secadora'        THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'SEC')
-        WHEN 'Termofijadora'   THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'TERMO')
-        WHEN 'Volteadora'      THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'VOLT')
-        WHEN 'Bombas de Agua'  THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'BOMBA')
+        WHEN 'Maq Teñido'         THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'TEN')
+        WHEN 'Hidro'              THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'HIDRO')
+        WHEN 'Compactadora'       THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'COMPACT')
+        WHEN 'Percha'             THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'PERCH')
+        WHEN 'Preparadora'        THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'PREP')
+        WHEN 'Secadora'           THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'SEC')
+        WHEN 'Termofijadora'      THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'TERMO')
+        WHEN 'Volteadora'         THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'VOLT')
+        WHEN 'Bombas de Agua'     THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'BOMBA')
         WHEN 'Pozo/Falta de Agua' THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'POZO')
-        WHEN 'Ablandador'      THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'ABLAND')
-        WHEN 'Compresor'       THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'COMPR')
-        WHEN 'Caldero'         THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'CALDERO')
+        WHEN 'Ablandador'         THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'ABLAND')
+        WHEN 'Compresor'          THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'COMPR')
+        WHEN 'Caldero'            THEN (SELECT id FROM mes.maquina_tipo WHERE codigo = 'CALDERO')
     END AS maquina_tipo_id,
     -- Estimated capacities based on machine type and RB
     CASE 

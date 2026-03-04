@@ -31,11 +31,28 @@ Run each step in sequence. If any step fails, do NOT continue — diagnose first
 | Bug | File | Fix Applied |
 |-----|------|-------------|
 | BUG1 | `tablas.sql` | ALTER item_rollo_detalle moved after CREATE |
-| BUG3 | `tablas.sql` | articulo_tipo/articulo triggers use `_from_nombre` variant |
+| BUG3 | `tablas.sql` | `tipo_articulo`/`articulo` replaced CREATE TABLE IF NOT EXISTS with actual ALTER TABLE RENAME + ADD COLUMN `codigo`; standard trigger restored |
 | BUG4 | `recetas.sql` | Stray `SELECT * FROM paso` removed |
 | BUG5 | `funciones/mes.sql` | `lm.receta_lavado_maquina_id` → `lm.receta_id` |
 | BUG6 | `tablas.sql` | `DROP TYPE IF EXISTS` → `DROP TYPE IF EXISTS ... CASCADE` |
 | BUG7 | `tablas.sql` | `CREATE SCHEMA inventario` → `CREATE SCHEMA IF NOT EXISTS inventario` |
+
+## articulo_tipo / articulo — post-migration checklist
+
+Step 4 backfills `codigo` automatically but does **not** enforce uniqueness yet.
+Before enforcing, run these checks and fix any collisions manually:
+
+```sql
+-- Check for duplicate codes (must return 0 rows before enforcing)
+SELECT codigo, COUNT(*) FROM articulo_tipo GROUP BY codigo HAVING COUNT(*) > 1;
+SELECT codigo, COUNT(*) FROM articulo      GROUP BY codigo HAVING COUNT(*) > 1;
+
+-- Then enforce:
+ALTER TABLE articulo_tipo ALTER COLUMN codigo SET NOT NULL;
+ALTER TABLE articulo_tipo ADD CONSTRAINT articulo_tipo_codigo_uk UNIQUE (codigo);
+ALTER TABLE articulo      ALTER COLUMN codigo SET NOT NULL;
+ALTER TABLE articulo      ADD CONSTRAINT articulo_codigo_uk UNIQUE (codigo);
+```
 
 ## Still Requires Manual Action
 
@@ -44,8 +61,7 @@ Run each step in sequence. If any step fails, do NOT continue — diagnose first
   already exists as a legacy type — leave commented.
 
 - **WARN A** (`funciones.sql` `get_item`): References old legacy column names
-  (`ar.articulo`, `ta.tipo_articulo`). Update after confirming column rename
-  migration has run successfully on `articulo` table.
+  (`ar.articulo`, `ta.tipo_articulo`). Update after step 4 runs successfully.
 
 - **migracion_recetas.sql** step 17a: After running lines 1–96, run the
   diagnostic queries to review op_id mapping, correct any NULL rows, then
