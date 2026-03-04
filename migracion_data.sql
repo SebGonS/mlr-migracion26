@@ -1498,15 +1498,97 @@ JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_
 -- JOIN inv ON inv.compra_id = c.id
 -- WHERE c.inventario_id = inventario.lote.id;
 
+-- ============================================================================
+-- MIGRAR CUADRES DE INVENTARIO
+-- ============================================================================
+-- Source:  public.cuadre_inventario        → inventario.cuadre
+--          public.cuadre_inventario_detalle → inventario.cuadre_detalle
+--
+-- Key mapping:
+--   cuadre_inventario.estado ('borrador'|'preparado'|'ejecutado') stays the same
+--   cuadre_inventario_detalle.insumo_id → item_id via item.legacy_id
+--   costo_bruto_prom_kg_sistema → precio_promedio_sistema
+--   costo_bruto_total_sistema   → stock_valorado_sistema
+--
+-- Must run BEFORE the lote tagging UPDATE below, because that UPDATE sets
+-- inventario.lote.documento_id to the cuadre id — the new cuadre rows must
+-- exist first so the FK is valid.
+-- ============================================================================
+
+-- Step 1: inventario.cuadre (OVERRIDING SYSTEM VALUE preserves IDs used by lotes)
+INSERT INTO inventario.cuadre (
+    id,
+    fecha_cuadre,
+    fecha_cierre,
+    estado,
+    usr_cre,
+    fyh_cre,
+    usr_mod,
+    fyh_mod
+)
+OVERRIDING SYSTEM VALUE
+SELECT
+    ci.id,
+    ci.fecha_cuadre,
+    ci.fecha_cierre,
+    ci.estado::text::inventario.cuadre_estado_enum,
+    ci.usr_cre,
+    ci.fyh_cre,
+    ci.usr_mod,
+    ci.fyh_mod
+FROM public.cuadre_inventario ci;
+
+SELECT setval(
+    pg_get_serial_sequence('inventario.cuadre', 'id'),
+    (SELECT MAX(id) FROM inventario.cuadre)
+);
+
+-- Step 2: inventario.cuadre_detalle
+-- insumo_id → item_id resolved via item.legacy_id (populated in the insumo migration).
+-- Rows whose insumo_id cannot be resolved are skipped; run gap check below.
+INSERT INTO inventario.cuadre_detalle (
+    cuadre_id,
+    item_id,
+    cantidad_sistema,
+    precio_promedio_sistema,
+    stock_valorado_sistema,
+    ult_precio_compra,
+    cantidad_contada,
+    usr_mod,
+    fyh_mod
+)
+SELECT
+    cid.cuadre_inventario_id,
+    it.id,
+    cid.cantidad_sistema,
+    cid.costo_bruto_prom_kg_sistema,
+    cid.costo_bruto_total_sistema,
+    cid.ult_precio_compra,
+    cid.cantidad_contada,
+    cid.usr_mod,
+    cid.fyh_mod
+FROM public.cuadre_inventario_detalle cid
+JOIN item it ON it.legacy_id = cid.insumo_id
+WHERE cid.cuadre_inventario_id IN (SELECT id FROM inventario.cuadre);
+
+-- Gap check: detalle rows whose insumo didn't resolve
+-- SELECT cid.cuadre_inventario_id, cid.insumo_id
+-- FROM public.cuadre_inventario_detalle cid
+-- LEFT JOIN item it ON it.legacy_id = cid.insumo_id
+-- WHERE it.id IS NULL;
+
+-- ============================================================================
+
 -------------------ACTUALIZAR DOC DE ENTRADADAS POR AJUSTES y/o CUADRES
 --pendiente
-UPDATE inventario.lote 
-SET documento_tipo = 'CUADRE_INVENTARIO',
+-- documento_tipo = 'CUADRE' to match inventario.finalizar_cuadre convention
+UPDATE inventario.lote
+SET documento_tipo = 'CUADRE',
 documento_id = ci.id
 FROM inventario i
 JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
 JOIN entrada_inventario ei ON ei.id=eid.entrada_inventario_id
-JOIN cuadre_inventario ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
+JOIN inventario.cuadre ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
 WHERE ei.motivo IN ('ajuste','reconteo') AND inventario.lote.id = i.id;
 
 

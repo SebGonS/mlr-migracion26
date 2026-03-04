@@ -914,6 +914,69 @@ AFTER INSERT ON inventario.item_movimientos
 FOR EACH ROW EXECUTE FUNCTION inventario.fn_trg_actualizar_map();
 
 
+-- ── inventario.cuadre / inventario.cuadre_detalle ────────────────────────────
+-- Inventory reconciliation (cuadre de inventario).
+-- Replaces public.cuadre_inventario + public.cuadre_inventario_detalle.
+--
+-- Key changes from legacy:
+--   • insumo_id  → item_id          (unified item master, not legacy insumo table)
+--   • costo_bruto_prom_kg_sistema → precio_promedio_sistema  (MAP terminology)
+--   • costo_bruto_total_sistema   → stock_valorado_sistema
+--   • Adjustments posted directly to inventario.item_movimientos
+--     (AJUSTE_POS / AJUSTE_NEG) instead of old entrada/salida_inventario tables.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TYPE inventario.cuadre_estado_enum AS ENUM (
+    'borrador',   -- just created, items being counted
+    'preparado',  -- counts complete, ready to finalise
+    'ejecutado'   -- adjustments posted, closed
+);
+
+CREATE TABLE inventario.cuadre (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    fecha_cuadre TIMESTAMPTZ NOT NULL DEFAULT now(),   -- snapshot timestamp
+    fecha_cierre TIMESTAMPTZ,                          -- set on ejecutado
+    estado       inventario.cuadre_estado_enum NOT NULL DEFAULT 'borrador',
+    usr_cre      INT  REFERENCES profiles(id_usuario),
+    fyh_cre      TIMESTAMPTZ DEFAULT now(),
+    usr_mod      INT  REFERENCES profiles(id_usuario),
+    fyh_mod      TIMESTAMPTZ
+);
+
+CREATE TABLE inventario.cuadre_detalle (
+    id                      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    cuadre_id               BIGINT NOT NULL REFERENCES inventario.cuadre(id),
+    item_id                 INT    NOT NULL REFERENCES item(id),
+    -- Snapshot values captured at cuadre creation time
+    cantidad_sistema        NUMERIC(12,4),
+    precio_promedio_sistema NUMERIC(12,6),  -- MAP at snapshot time
+    stock_valorado_sistema  NUMERIC(14,4),  -- total value at snapshot time
+    ult_precio_compra       NUMERIC(12,4),  -- last COMPRA_ING price
+    -- Filled in during physical count
+    cantidad_contada        NUMERIC(12,4),
+    usr_mod                 INT  REFERENCES profiles(id_usuario),
+    fyh_mod                 TIMESTAMPTZ,
+    UNIQUE (cuadre_id, item_id)
+);
+
+-- Temporal context view: exposes previous cuadre close date alongside the current one.
+-- Used by inventario.get_item_movimientos_cuadre() to bound the movement window.
+CREATE OR REPLACE VIEW inventario.vw_cuadre AS
+SELECT
+    c.id           AS cuadre_id,
+    c.fecha_cuadre,
+    c.fecha_cierre,
+    c.estado,
+    (SELECT MAX(c2.fecha_cierre)
+     FROM inventario.cuadre c2
+     WHERE c2.estado = 'ejecutado'
+       AND c2.id < c.id) AS ult_cuadre_ejecutado_fecha
+FROM inventario.cuadre c;
+
+GRANT SELECT ON inventario.cuadre         TO authenticated;
+GRANT SELECT ON inventario.cuadre_detalle TO authenticated;
+GRANT SELECT ON inventario.vw_cuadre      TO authenticated;
+
 
 -- Production Order Status (ISA-95 Standard States)
 
