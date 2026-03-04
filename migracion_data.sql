@@ -1584,21 +1584,22 @@ WHERE cid.cuadre_inventario_id IN (SELECT id FROM inventario.cuadre);
 -- documento_tipo = 'CUADRE' to match inventario.finalizar_cuadre convention
 UPDATE inventario.lote
 SET documento_tipo = 'CUADRE',
-documento_id = ci.id
-FROM inventario i
-JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
-JOIN entrada_inventario ei ON ei.id=eid.entrada_inventario_id
-JOIN inventario.cuadre ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
-WHERE ei.motivo IN ('ajuste','reconteo') AND inventario.lote.id = i.id;
+    documento_id   = ci.id
+FROM public.inventario i                                          -- legacy stock table (public schema)
+JOIN public.entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id = eid.id
+JOIN public.entrada_inventario         ei  ON ei.id = eid.entrada_inventario_id
+JOIN inventario.cuadre                 ci  ON ci.fecha_cierre = ei.fyh_solicitud_tz
+WHERE ei.motivo IN ('ajuste', 'reconteo')
+  AND inventario.lote.id = i.id;
 
 
 ----PENDIENTE LIMPIAR id de documento de movimientos que NO son de cuadres
 -- SELECT l.*,i.*
 -- FROM inventario.lote l
--- JOIN inventario i ON i.id=l.id
--- JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
--- JOIN entrada_inventario ei ON ei.id=eid.entrada_inventario_id
--- LEFT JOIN cuadre_inventario ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
+-- JOIN public.inventario i ON i.id=l.id
+-- JOIN public.entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
+-- JOIN public.entrada_inventario ei ON ei.id=eid.entrada_inventario_id
+-- LEFT JOIN inventario.cuadre ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
 -- WHERE ei.motivo IN ('ajuste','reconteo') AND ci.id IS NOT NULL
 
 --REGISTRAR MOVIMIENTO INICIAL

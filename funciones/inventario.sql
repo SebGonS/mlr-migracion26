@@ -33,6 +33,10 @@ BEGIN
     VALUES (get_user_id())
     RETURNING id INTO v_cuadre_id;
 
+    -- Source from item catalog (all INSUMOs), not vw_stock_general.
+    -- vw_stock_general only includes items with qty > 0 — items fully consumed
+    -- wouldn't appear on the count sheet, preventing discovery of phantom stock.
+    -- cantidad_sistema = 0 for items with no open lotes; operators can still flag them.
     INSERT INTO inventario.cuadre_detalle (
         cuadre_id,
         item_id,
@@ -43,22 +47,23 @@ BEGIN
     )
     SELECT
         v_cuadre_id,
-        sg.item_id,
-        sg.cantidad_total,
+        i.id,
+        COALESCE(sg.cantidad_total, 0),
         COALESCE(iv.precio_promedio, 0),
         COALESCE(iv.stock_valorado,  0),
         -- last purchase price: most recent COMPRA_ING movement for this item
         (SELECT im2.precio_unitario
          FROM inventario.item_movimientos im2
          JOIN inventario.item_movimiento_tipo imt2 ON imt2.id = im2.item_movimiento_tipo_id
-         WHERE im2.item_id = sg.item_id
+         WHERE im2.item_id = i.id
            AND imt2.codigo = 'COMPRA_ING'
          ORDER BY im2.fecha_hora DESC NULLS LAST
          LIMIT 1)
-    FROM inventario.vw_stock_general sg
-    JOIN item      i  ON i.id  = sg.item_id
+    FROM item i
     JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
-    LEFT JOIN inventario.item_valoracion iv ON iv.item_id = sg.item_id;
+    LEFT JOIN inventario.vw_stock_general  sg ON sg.item_id  = i.id
+    LEFT JOIN inventario.item_valoracion   iv ON iv.item_id  = i.id
+    WHERE i.flg_elm = false;
 
     RETURN v_cuadre_id;
 END;
@@ -248,13 +253,18 @@ BEGIN
 
     -- ── AJUSTE_POS: contada > sistema (sobrantes físicos) ──────────────────
     -- Create a new lote per surplus item and post ingress movement.
+    -- Uses CURRENT MAP from item_valoracion (not snapshot): purchases between
+    -- cuadre creation and finalization may have changed the price, and the
+    -- surplus item was physically present all along at current value.
+    -- Falls back to precio_promedio_sistema if no MAP row exists yet.
     FOR v_rec IN
-        SELECT item_id,
-               cantidad_contada - cantidad_sistema AS diferencia,
-               COALESCE(precio_promedio_sistema, 0) AS precio
-        FROM inventario.cuadre_detalle
-        WHERE cuadre_id = p_cuadre_id
-          AND cantidad_contada > cantidad_sistema
+        SELECT cd.item_id,
+               cd.cantidad_contada - cd.cantidad_sistema AS diferencia,
+               COALESCE(iv.precio_promedio, cd.precio_promedio_sistema, 0) AS precio
+        FROM inventario.cuadre_detalle cd
+        LEFT JOIN inventario.item_valoracion iv ON iv.item_id = cd.item_id
+        WHERE cd.cuadre_id = p_cuadre_id
+          AND cd.cantidad_contada > cd.cantidad_sistema
     LOOP
         WITH ins_lote AS (
             INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad)
