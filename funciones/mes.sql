@@ -686,7 +686,6 @@ DECLARE
     v_usr_id            int := get_user_id();
     v_estado            orden_produccion_estado_enum;
     v_count             int;
-    v_pesaje_id         int;
     v_peso_prorate      numeric;
     v_pesaje_pos_id     smallint;
     v_pesaje_neg_id     smallint;
@@ -717,38 +716,37 @@ BEGIN
     SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
     SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
 
-    -- Create pesaje header
-    INSERT INTO inventario.pesaje (orden_produccion_id)
-    VALUES (p_orden_id)
-    RETURNING id INTO v_pesaje_id;
-
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
 
-    -- Create adjustment movements for differences
+    -- Insert one pesaje per lote (weighing gate), then movements for differences
+    WITH pesajes AS (
+        INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, usr_cre)
+        SELECT p_orden_id, opi.lote_id, v_peso_prorate, v_usr_id
+        FROM mes.orden_produccion_item opi
+        WHERE opi.orden_produccion_id = p_orden_id
+        RETURNING id, lote_id
+    )
     INSERT INTO inventario.item_movimientos (
         doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
         origen_ubicacion_id, destino_ubicacion_id,
         cantidad, documento_tipo, documento_id
     )
     SELECT
-        v_doc_movimiento_id,
-        l.item_id,
-        l.id,
+        v_doc_movimiento_id, l.item_id, l.id,
         CASE WHEN v_peso_prorate > l.cantidad THEN v_pesaje_pos_id ELSE v_pesaje_neg_id END,
         CASE WHEN v_peso_prorate < l.cantidad THEN sa.ubicacion_id ELSE NULL END,
         CASE WHEN v_peso_prorate > l.cantidad THEN sa.ubicacion_id ELSE NULL END,
         ABS(v_peso_prorate - l.cantidad),
-        'PESAJE', v_pesaje_id
-    FROM inventario.lote l
+        'PESAJE', p.id
+    FROM pesajes p
+    JOIN inventario.lote l ON l.id = p.lote_id
     JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id AND opi.item_id = l.item_id
     JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
-    WHERE opi.orden_produccion_id = p_orden_id
-      AND v_peso_prorate - l.cantidad <> 0;
+    WHERE ABS(v_peso_prorate - l.cantidad) > 0;
 
-    -- Update lotes
+    -- Update lote quantities
     UPDATE inventario.lote
-    SET cantidad = v_peso_prorate,
-        detalles = jsonb_set(COALESCE(detalles, '{}'::jsonb), '{fyh_pesado}', to_jsonb(NOW()))
+    SET cantidad = v_peso_prorate
     FROM mes.orden_produccion_item opi
     WHERE opi.orden_produccion_id = p_orden_id
       AND opi.lote_id = inventario.lote.id AND opi.item_id = inventario.lote.item_id;
@@ -780,7 +778,6 @@ DECLARE
     v_usr_id            int := get_user_id();
     v_estado            orden_produccion_estado_enum;
     v_count             int;
-    v_pesaje_id         int;
     v_pesaje_pos_id     smallint;
     v_pesaje_neg_id     smallint;
     v_doc_movimiento_id BIGINT;
@@ -801,10 +798,6 @@ BEGIN
 
     SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
     SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
-
-    INSERT INTO inventario.pesaje (orden_produccion_id, usr_cre)
-    VALUES (p_orden_id, v_usr_id)
-    RETURNING id INTO v_pesaje_id;
 
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
 
@@ -827,6 +820,12 @@ BEGIN
         JOIN inventario.lote l ON l.id = opi.lote_id AND l.item_id = opi.item_id
         JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
     ),
+    pesajes AS (
+        INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, usr_cre)
+        SELECT p_orden_id, ld.lote_id, ld.peso_nuevo, v_usr_id
+        FROM lotes_data ld
+        RETURNING id, lote_id
+    ),
     movimientos AS (
         INSERT INTO inventario.item_movimientos (
             doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
@@ -840,13 +839,13 @@ BEGIN
             CASE WHEN ld.diferencia < 0 THEN ld.ubicacion_id ELSE NULL END,
             CASE WHEN ld.diferencia > 0 THEN ld.ubicacion_id ELSE NULL END,
             ABS(ld.diferencia),
-            'PESAJE', v_pesaje_id
+            'PESAJE', p.id
         FROM lotes_data ld
+        JOIN pesajes p ON p.lote_id = ld.lote_id
         WHERE ld.diferencia <> 0
     )
     UPDATE inventario.lote l
-    SET cantidad = ld.peso_nuevo,
-        detalles = jsonb_set(COALESCE(l.detalles, '{}'::jsonb), '{fyh_pesado}', to_jsonb(NOW()))
+    SET cantidad = ld.peso_nuevo
     FROM lotes_data ld
     WHERE l.id = ld.lote_id;
 

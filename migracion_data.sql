@@ -916,10 +916,10 @@ ALTER TABLE tipo_receta ADD CONSTRAINT fk_tipo_receta_operacion
     FOREIGN KEY (operacion_id) REFERENCES mes.operacion(id);
 
 -- Update statements
-UPDATE tipo_receta SET operacion_id = (SELECT id FROM mes.operacion WHERE nombre = 'TEÑIDO')
+UPDATE tipo_receta SET operacion_id = (SELECT id FROM mes.operacion WHERE codigo = 'TENIDO')
 WHERE tipo_receta IN ('Teñido', 'Reteñido', 'Teñido a Negro', 'Desmontado + Reteñido', 'Reproceso Matizado');
 
-UPDATE tipo_receta SET operacion_id = (SELECT id FROM mes.operacion WHERE nombre = 'LAVADO_HIDRO')
+UPDATE tipo_receta SET operacion_id = (SELECT id FROM mes.operacion WHERE codigo = 'LAVADO_HIDRO')
 WHERE tipo_receta IN (
     'Rebaje', 'Mojar', 'Lavado x Lineas', 'Lavado x Lineas Suavizante',
     'Lavado x Suavidad', 'Lavado x Manchas', 'Lavado x Migrado',

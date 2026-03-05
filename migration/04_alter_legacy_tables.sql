@@ -23,6 +23,12 @@ CREATE TRIGGER trg_bi_color_codigo_canon
 BEFORE INSERT OR UPDATE ON color
 FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
 
+-- Auto-gen: derive codigo from color name if not provided (fires before canon trigger)
+DROP TRIGGER IF EXISTS trg_bi_gen_codigo_color ON color;
+CREATE TRIGGER trg_bi_gen_codigo_color
+BEFORE INSERT ON color
+FOR EACH ROW EXECUTE FUNCTION public.fn_trg_gen_codigo_color();
+
 -- ── color_x_cliente ────────────────────────────────────────────
 ALTER TABLE color_x_cliente ADD COLUMN IF NOT EXISTS hex text;
 

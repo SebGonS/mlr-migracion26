@@ -276,3 +276,372 @@ JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
 JOIN item i ON i.id = grd.item_id
 JOIN proveedor p ON p.id = gr.emisor_proveedor_id
 WHERE gr.emisor_proveedor_id IS NOT NULL;
+
+GRANT SELECT ON inventario.vw_item_proveedor_guia TO anon, authenticated;
+
+-- ── inventario.vw_lotes_rollos_despachados ────────────────────
+CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_despachados AS
+SELECT
+    l.id AS lote_id,
+    EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0') AS lote_codigo,
+    l.item_id,
+    i.codigo AS item_codigo,
+    i.nombre AS item_nombre,
+    sa.ubicacion_id,
+    u.nombre AS ubicacion,
+    a.nombre AS almacen,
+    sa.cantidad_disponible,
+    un.codigo AS unidad,
+    l.estado_calidad::text,
+    (l.detalles->>'ancho')::numeric AS ancho,
+    l.cantidad AS peso,
+    ird.articulo_id,
+    art.nombre AS articulo,  -- FIX: art.articulo → art.nombre
+    ird.flg_tenido,
+    ird.flg_rib,
+    art.fibra,
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.cliente_id,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
+    c.id AS propietario_id,
+    c.cliente AS propietario
+FROM inventario.lote l
+LEFT JOIN inventario.vw_stock_actual sa ON l.id = sa.lote_id
+JOIN item i ON i.id = l.item_id
+JOIN item_tipo it ON it.id = i.item_tipo_id
+JOIN item_rollo_detalle ird ON ird.item_id = i.id
+JOIN articulo art ON art.id = ird.articulo_id
+JOIN unidad un ON un.id = i.unidad_id
+LEFT JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
+LEFT JOIN inventario.almacen a ON a.id = u.almacen_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
+LEFT JOIN cliente c ON c.id = l.propietario_id
+WHERE it.codigo = 'ROLLO' AND sa.cantidad_disponible IS NULL
+AND EXISTS (
+    SELECT 1 FROM inventario.item_movimientos im
+    JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+    WHERE im.lote_id = l.id
+      AND imt.codigo IN ('SERV_EGR')
+)
+ORDER BY a.nombre, u.nombre, i.nombre;
+
+-- ── doc.partida_resumen_tenido ────────────────────────────────
+CREATE OR REPLACE VIEW doc.partida_resumen_tenido AS
+SELECT
+    pd.partida_id,
+    a.id AS articulo_id,
+    a.nombre AS articulo_nombre,
+    a.fibra,
+    COUNT(pd.item_id) AS total_rollos,
+    SUM(pd.cantidad) AS cantidad_total,
+    SUM(CASE WHEN ird.flg_rib = false THEN pd.cantidad ELSE 0 END) AS cantidad_regular,
+    SUM(CASE WHEN ird.flg_rib = true  THEN pd.cantidad ELSE 0 END) AS cantidad_rib
+FROM doc.partida_detalle pd
+JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
+JOIN articulo a ON ird.articulo_id = a.id
+GROUP BY 1, 2, 3, 4
+ORDER BY 1, 2;
+
+-- ── mes.vw_maquinas ───────────────────────────────────────────
+CREATE OR REPLACE VIEW mes.vw_maquinas AS
+SELECT
+    m.id,
+    m.codigo,
+    m.nombre,
+    m.maquina_tipo_id,
+    mt.codigo AS maquina_tipo_codigo,
+    mt.nombre AS maquina_tipo_nombre,
+    m.relacion_bano
+FROM mes.maquina m
+LEFT JOIN mes.maquina_tipo mt ON mt.id = m.maquina_tipo_id;
+
+-- ── mes.vw_partida_produccion_rollos ──────────────────────────
+CREATE OR REPLACE VIEW mes.vw_partida_produccion_rollos AS
+SELECT
+    p.id AS partida_id,
+    l.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+    COUNT(*) AS cantidad_rollos
+FROM inventario.lote l
+JOIN vw_items vi ON vi.item_id = l.item_id AND vi.item_tipo_codigo = 'ROLLO'
+JOIN mes.orden_produccion_paso opp ON opp.id = l.documento_id
+JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+JOIN doc.partida p ON op.partida_id = p.id
+WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+GROUP BY p.id, l.item_id, vi.item_codigo, vi.item_nombre;
+
+-- ── inventario.vw_stock_general ───────────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_stock_general AS
+SELECT
+    vi.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+    vi.item_tipo_id,
+    vi.item_tipo_codigo,
+    SUM(sa.cantidad_disponible) AS cantidad_total,
+    vi.unidad_id,
+    vi.unidad_codigo
+FROM inventario.vw_stock_actual sa
+LEFT JOIN vw_items vi ON vi.item_id = sa.item_id
+GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre, vi.item_tipo_id, vi.item_tipo_codigo, vi.unidad_id, vi.unidad_codigo;
+
+-- ── inventario.vw_stock_rollos ────────────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_stock_rollos AS
+WITH rollos AS (
+    SELECT
+        sa.item_id,
+        i.codigo AS item_codigo,
+        i.nombre AS item_nombre,
+        op.partida_id,
+        COUNT(sa.lote_id) AS cantidad_rollos,
+        SUM(sa.cantidad_disponible) AS cantidad_total,
+        u.codigo AS unidad_codigo,
+        l.propietario_id,
+        l.estado_calidad
+    FROM inventario.vw_stock_actual sa
+    JOIN inventario.lote l ON l.id = sa.lote_id
+    LEFT JOIN mes.orden_produccion_paso opp
+        ON documento_tipo = 'ORDEN_PRODUCCION_PASO' AND opp.id = l.documento_id
+    LEFT JOIN mes.orden_produccion op ON opp.orden_produccion_id = op.id
+    JOIN item i ON i.id = sa.item_id
+    JOIN item_tipo it ON it.id = i.item_tipo_id
+    JOIN unidad u ON i.unidad_id = u.id
+    WHERE it.codigo = 'ROLLO'
+    GROUP BY sa.item_id, i.codigo, i.nombre, op.partida_id, u.codigo, l.propietario_id, l.estado_calidad
+)
+SELECT
+    r.item_id,
+    r.item_codigo,
+    r.item_nombre,
+    r.partida_id,
+    r.cantidad_rollos,
+    r.cantidad_total,
+    r.unidad_codigo,
+    r.estado_calidad,
+    ird.articulo_id,
+    art.nombre AS articulo,  -- FIX: art.articulo → art.nombre
+    ird.flg_tenido,
+    ird.flg_rib,
+    art.fibra,
+    p.tenido_id,
+    t.tenido,
+    p.ancho,
+    p.malla,
+    p.rendimiento,
+    p.flg_antipilling,
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.cliente_id,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
+    c.id AS propietario_id,
+    c.cliente AS propietario
+FROM rollos r
+JOIN item_rollo_detalle ird ON ird.item_id = r.item_id
+JOIN articulo art ON art.id = ird.articulo_id
+LEFT JOIN doc.partida p ON p.id = r.partida_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+LEFT JOIN cliente c ON c.id = r.propietario_id
+LEFT JOIN tenido t ON t.id = p.tenido_id
+ORDER BY art.nombre, r.item_nombre;  -- FIX: art.articulo → art.nombre
+
+-- ── inventario.vw_stock_insumos ───────────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_stock_insumos AS
+WITH insumos AS (
+    SELECT
+        sa.item_id,
+        vi.item_codigo,
+        vi.item_nombre,
+        SUM(sa.cantidad_disponible) AS cantidad_total,
+        vi.unidad_codigo
+    FROM inventario.vw_stock_actual sa
+    JOIN vw_items vi ON vi.item_id = sa.item_id
+    WHERE vi.item_tipo_codigo = 'INSUMO'
+    GROUP BY sa.item_id, vi.item_codigo, vi.item_nombre, vi.unidad_codigo
+)
+SELECT
+    i.item_id,
+    i.item_codigo,
+    i.item_nombre,
+    i.cantidad_total,
+    i.unidad_codigo,
+    iid.insumo_tipo_id,
+    it.codigo AS insumo_tipo_codigo,
+    it.nombre AS insumo_tipo_nombre,
+    iid.colorante_tipo_id,
+    ct.codigo AS colorante_tipo_codigo,
+    ct.nombre AS colorante_tipo_nombre
+FROM insumos i
+LEFT JOIN item_insumo_detalle iid ON iid.item_id = i.item_id
+LEFT JOIN insumo_tipo it ON it.id = iid.insumo_tipo_id
+LEFT JOIN colorante_tipo ct ON ct.id = iid.colorante_tipo_id;
+
+-- ── inventario.vw_lotes_disponibles ──────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_lotes_disponibles AS
+SELECT
+    vi.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+    vi.item_tipo_id,
+    vi.item_tipo_codigo,
+    sa.lote_id,
+    EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0') AS lote_codigo,
+    sa.ubicacion_id,
+    sa.cantidad_disponible,
+    vi.unidad_id,
+    vi.unidad_codigo
+FROM inventario.vw_stock_actual sa
+LEFT JOIN vw_items vi ON vi.item_id = sa.item_id
+LEFT JOIN inventario.lote l ON l.id = sa.lote_id;
+
+-- ── calidad.vw_lotes_pendientes_inspeccion ────────────────────
+DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion;
+CREATE OR REPLACE VIEW calidad.vw_lotes_pendientes_inspeccion AS
+SELECT
+    l.id AS lote_id,
+    EXTRACT(YEAR FROM l.fyh_cre) || '-' || l.secuencia AS lote_codigo,
+    l.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+    l.documento_tipo,
+    l.documento_id,
+    opp.id AS orden_produccion_paso_id,
+    m.id AS maquina_id,
+    m.codigo AS maquina_codigo,
+    o.id AS operacion_id,
+    o.codigo AS operacion_codigo,
+    p.id AS partida_id,
+    EXTRACT(YEAR FROM p.fyh_cre) || '-' || p.numero AS partida_codigo,
+    p.ancho,
+    p.rendimiento,
+    p.malla,
+    p.flg_antipilling,
+    p.prioridad_id,
+    pr.prioridad,
+    l.propietario_id,
+    c.cliente AS cliente_nombre,
+    l.fyh_cre AS fecha_creacion_lote
+FROM inventario.lote l
+LEFT JOIN vw_items vi ON vi.item_id = l.item_id
+LEFT JOIN mes.orden_produccion_paso opp
+    ON opp.id = l.documento_id AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
+LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id
+LEFT JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+LEFT JOIN doc.partida p ON p.id = op.partida_id
+LEFT JOIN cliente c ON l.propietario_id = c.id
+LEFT JOIN prioridad pr ON pr.id = p.prioridad_id
+WHERE l.estado_calidad = 'PENDIENTE'
+  AND vi.item_tipo_codigo = 'ROLLO'
+  AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO';
+
+-- ── calidad.vw_inspecciones ───────────────────────────────────
+CREATE OR REPLACE VIEW calidad.vw_inspecciones AS
+SELECT
+    i.id AS inspeccion_id,
+    i.lote_id,
+    l.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+    i.orden_produccion_paso_id,
+    i.resultado,
+    i.observacion,
+    i.empleado_id,
+    e.nombre AS empleado_nombre,
+    i.fyh_inspeccion
+FROM calidad.inspeccion i
+LEFT JOIN inventario.lote l ON l.id = i.lote_id
+LEFT JOIN vw_items vi ON vi.item_id = l.item_id
+LEFT JOIN mes.empleado e ON e.id = i.empleado_id;
+
+-- ── mes.vw_pasos ──────────────────────────────────────────────
+CREATE OR REPLACE VIEW mes.vw_pasos AS
+SELECT
+    opp.id AS paso_id,
+    opp.secuencia,
+    opp.orden_produccion_id,
+    op.partida_id,
+    p.numero AS partida_numero,
+    EXTRACT(YEAR FROM p.fyh_cre) || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
+    opp.operacion_id,
+    o.codigo AS operacion_codigo,
+    o.nombre AS operacion_nombre,
+    o.requiere_receta,
+    o.requiere_maquina,
+    opp.maquina_asignada_id,
+    opp.receta_id,
+    m.codigo AS maquina_codigo,
+    m.nombre AS maquina_nombre,
+    opp.estado,
+    opp.fyh_inicio,
+    opp.fyh_fin,
+    opp.flg_genera_produccion
+FROM mes.orden_produccion_paso opp
+JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+JOIN doc.partida p ON p.id = op.partida_id
+JOIN mes.operacion o ON o.id = opp.operacion_id
+LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id;
+
+-- ── inventario.vw_items_movimientos ───────────────────────────
+CREATE OR REPLACE VIEW inventario.vw_items_movimientos AS
+SELECT
+    im.id                                                             AS movimiento_id,
+    im.fecha_hora,
+    im.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+    im.lote_id,
+    CASE WHEN l.id IS NOT NULL
+        THEN EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0')
+    END                                                               AS lote_codigo,
+    im.item_movimiento_tipo_id,
+    imt.codigo                                                        AS tipo_codigo,
+    imt.nombre                                                        AS tipo_nombre,
+    imt.categoria,
+    imt.factor,
+    im.cantidad,
+    im.cantidad * imt.factor                                          AS cantidad_neta,
+    im.origen_ubicacion_id,
+    uo.nombre                                                         AS origen_nombre,
+    im.destino_ubicacion_id,
+    ud.nombre                                                         AS destino_nombre,
+    im.documento_tipo,
+    im.documento_id,
+    im.observacion
+FROM inventario.item_movimientos im
+LEFT JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+LEFT JOIN vw_items vi ON vi.item_id = im.item_id
+LEFT JOIN inventario.lote l ON l.id = im.lote_id
+LEFT JOIN inventario.ubicacion uo ON uo.id = im.origen_ubicacion_id
+LEFT JOIN inventario.ubicacion ud ON ud.id = im.destino_ubicacion_id;
+
+-- ── Grants ────────────────────────────────────────────────────
+GRANT SELECT ON inventario.vw_stock_rollos        TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_general       TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_insumos       TO anon, authenticated;
+GRANT SELECT ON inventario.vw_lotes_disponibles   TO anon, authenticated;
+GRANT SELECT ON inventario.vw_lotes_rollos_despachados TO anon, authenticated;
+GRANT SELECT ON inventario.vw_items_movimientos   TO anon, authenticated;
+GRANT SELECT ON mes.vw_maquinas                   TO authenticated;
+GRANT SELECT ON mes.vw_pasos                      TO anon, authenticated;
+GRANT SELECT ON mes.vw_partida_produccion_rollos  TO anon, authenticated;
+GRANT SELECT ON calidad.vw_lotes_pendientes_inspeccion TO authenticated;
+GRANT SELECT ON calidad.vw_inspecciones           TO authenticated;
+GRANT SELECT ON doc.partida_resumen_tenido        TO authenticated;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA doc        TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA mes        TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA calidad    TO authenticated;
+GRANT USAGE ON SCHEMA mes        TO authenticated;
+GRANT USAGE ON SCHEMA doc        TO authenticated;
+GRANT USAGE ON SCHEMA inventario TO authenticated;
+GRANT USAGE ON SCHEMA calidad    TO authenticated;
+GRANT INSERT ON calidad.inspeccion      TO authenticated;
+GRANT INSERT ON calidad.inspeccion_foto TO authenticated;
+GRANT UPDATE ON mes.operacion           TO authenticated;

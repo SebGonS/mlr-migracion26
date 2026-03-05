@@ -1,27 +1,8 @@
 -- =============================================================================
--- MLR App — Authorization Setup for Supabase
--- Run sections in order. Re-running is safe (CREATE OR REPLACE / IF NOT EXISTS).
+-- Step 10: Authorization — JWT hook and RLS policies
+-- get_user_id() is defined in step 3 (migration/03_base_functions.sql).
+-- Re-running is safe (CREATE OR REPLACE / IF NOT EXISTS).
 -- =============================================================================
-
-
--- =============================================================================
--- SECTION 0: get_user_id()
--- Reads numeric id_usuario from the JWT claim baked in by the access token hook.
--- Zero DB cost (no join). Used by every SECURITY DEFINER function and trigger.
--- Must be defined before constraints.sql (which calls it in trigger functions).
--- =============================================================================
-
-CREATE OR REPLACE FUNCTION public.get_user_id()
-RETURNS int
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public
-AS $$
-  SELECT (auth.jwt()->>'id_usuario')::int;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.get_user_id TO authenticated, anon;
 
 
 -- =============================================================================
@@ -52,7 +33,6 @@ BEGIN
   WHERE id = (event->>'user_id')::uuid;
 
   -- No profile = no permissions, id_usuario stays NULL.
-  -- The user will fail all permission checks but won't cause ghost audit records.
   IF v_numeric_id IS NULL THEN
     claims := event->'claims';
     claims := jsonb_set(claims, '{user_permissions}', '[]'::jsonb);
@@ -232,9 +212,7 @@ CREATE POLICY "calidad_ver" ON calidad.inspeccion_foto    FOR SELECT TO authenti
 -- -----------------------------------------------------------------------------
 
 ALTER TABLE public.profiles  ENABLE ROW LEVEL SECURITY;
--- Own row always visible
-CREATE POLICY "own_row"       ON public.profiles FOR SELECT TO authenticated USING (auth.uid() = id);
--- Admins see all rows (permissive policies OR together — correct behavior)
+CREATE POLICY "own_row"        ON public.profiles FOR SELECT TO authenticated USING (auth.uid() = id);
 CREATE POLICY "admin_read_all" ON public.profiles FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
 
 ALTER TABLE iam.rol ENABLE ROW LEVEL SECURITY;
@@ -252,7 +230,6 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- =============================================================================
 -- SECTION 4: Permission guard pattern for SECURITY DEFINER write functions
 -- Paste the guard block at the top of each function's BEGIN body.
--- auth.jwt() is accessible even inside SECURITY DEFINER (reads session claims).
 -- =============================================================================
 
 -- Guard snippet (copy into each function):

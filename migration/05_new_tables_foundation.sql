@@ -147,6 +147,11 @@ CREATE TABLE item_insumo_detalle (
     fyh_mod TIMESTAMPTZ
 );
 
+DROP TRIGGER IF EXISTS trg_ai_gen_codigo_item_insumo ON item_insumo_detalle;
+CREATE TRIGGER trg_ai_gen_codigo_item_insumo
+AFTER INSERT ON item_insumo_detalle
+FOR EACH ROW EXECUTE FUNCTION public.fn_trg_gen_codigo_item_insumo();
+
 -- ── item_rollo_detalle ─────────────────────────────────────────
 -- FIX (BUG 1): CREATE before any ALTER on this table.
 -- fibra column is NOT here — it lives on articulo (Step 4).
@@ -160,6 +165,11 @@ CREATE TABLE item_rollo_detalle (
     usr_mod int,
     fyh_mod TIMESTAMPTZ
 );
+
+DROP TRIGGER IF EXISTS trg_ai_gen_codigo_item_rollo ON item_rollo_detalle;
+CREATE TRIGGER trg_ai_gen_codigo_item_rollo
+AFTER INSERT ON item_rollo_detalle
+FOR EACH ROW EXECUTE FUNCTION public.fn_trg_gen_codigo_item_rollo();
 
 -- ── inventario.item_movimiento_tipo ────────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_item_movimiento_categoria AS
@@ -262,6 +272,11 @@ BEFORE INSERT OR UPDATE ON inventario.ubicacion
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
+DROP TRIGGER IF EXISTS trg_bi_gen_codigo_ubicacion ON inventario.ubicacion;
+CREATE TRIGGER trg_bi_gen_codigo_ubicacion
+BEFORE INSERT ON inventario.ubicacion
+FOR EACH ROW EXECUTE FUNCTION inventario.fn_trg_gen_codigo_ubicacion();
+
 -- ── inventario.lote ───────────────────────────────────────────
 CREATE TABLE inventario.lote (
     id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -269,14 +284,17 @@ CREATE TABLE inventario.lote (
     item_id int NOT NULL REFERENCES item(id),
     documento_tipo TEXT,
     documento_id BIGINT,
-    cantidad numeric(10,2),
+    cantidad numeric(10,2) CHECK (cantidad > 0),
     detalles JSONB,
     estado_calidad calidad_estado_enum DEFAULT 'PENDIENTE',
     propietario_id int NULL REFERENCES cliente(id),
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
-    fyh_mod TIMESTAMPTZ
+    fyh_mod TIMESTAMPTZ,
+    flg_elm BOOL DEFAULT false,
+    usr_elm INT,
+    fyh_elm TIMESTAMPTZ
 );
 
 CREATE TABLE inventario.lote_secuencia_anual (
@@ -376,3 +394,52 @@ $$;
 CREATE TRIGGER trg_ai_item_movimientos_map
 AFTER INSERT ON inventario.item_movimientos
 FOR EACH ROW EXECUTE FUNCTION inventario.fn_trg_actualizar_map();
+
+-- ── inventario.cuadre / cuadre_detalle ────────────────────────
+-- Inventory reconciliation (cuadre de inventario).
+CREATE TYPE inventario.cuadre_estado_enum AS ENUM (
+    'borrador',   -- just created, items being counted
+    'preparado',  -- counts complete, ready to finalise
+    'ejecutado'   -- adjustments posted, closed
+);
+
+CREATE TABLE inventario.cuadre (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    fecha_cuadre TIMESTAMPTZ NOT NULL DEFAULT now(),
+    fecha_cierre TIMESTAMPTZ,
+    estado       inventario.cuadre_estado_enum NOT NULL DEFAULT 'borrador',
+    usr_cre      INT  REFERENCES profiles(id_usuario),
+    fyh_cre      TIMESTAMPTZ DEFAULT now(),
+    usr_mod      INT  REFERENCES profiles(id_usuario),
+    fyh_mod      TIMESTAMPTZ
+);
+
+CREATE TABLE inventario.cuadre_detalle (
+    id                      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    cuadre_id               BIGINT NOT NULL REFERENCES inventario.cuadre(id),
+    item_id                 INT    NOT NULL REFERENCES item(id),
+    cantidad_sistema        NUMERIC(12,4),
+    precio_promedio_sistema NUMERIC(12,6),
+    stock_valorado_sistema  NUMERIC(14,4),
+    ult_precio_compra       NUMERIC(12,4),
+    cantidad_contada        NUMERIC(12,4),
+    usr_mod                 INT  REFERENCES profiles(id_usuario),
+    fyh_mod                 TIMESTAMPTZ,
+    UNIQUE (cuadre_id, item_id)
+);
+
+CREATE OR REPLACE VIEW inventario.vw_cuadre AS
+SELECT
+    c.id           AS cuadre_id,
+    c.fecha_cuadre,
+    c.fecha_cierre,
+    c.estado,
+    (SELECT MAX(c2.fecha_cierre)
+     FROM inventario.cuadre c2
+     WHERE c2.estado = 'ejecutado'
+       AND c2.id < c.id) AS ult_cuadre_ejecutado_fecha
+FROM inventario.cuadre c;
+
+GRANT SELECT ON inventario.cuadre         TO authenticated;
+GRANT SELECT ON inventario.cuadre_detalle TO authenticated;
+GRANT SELECT ON inventario.vw_cuadre      TO authenticated;

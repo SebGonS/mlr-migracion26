@@ -28,7 +28,10 @@ CREATE TABLE doc.partida (
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
-    fyh_mod TIMESTAMPTZ
+    fyh_mod TIMESTAMPTZ,
+    flg_elm BOOL DEFAULT false,
+    usr_elm INT,
+    fyh_elm TIMESTAMPTZ
 );
 
 CREATE TABLE doc.partida_detalle (
@@ -107,6 +110,9 @@ CREATE TABLE doc.guia_remision (
     fyh_cre timestamptz DEFAULT NOW(),
     usr_mod int,
     fyh_mod timestamptz,
+    flg_elm BOOL DEFAULT false,
+    usr_elm INT,
+    fyh_elm TIMESTAMPTZ,
     UNIQUE (serie, correlativo, emisor_proveedor_id),
     UNIQUE (serie, correlativo, emisor_cliente_id)
 );
@@ -149,13 +155,14 @@ FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
 INSERT INTO mes.operacion (codigo, nombre, requiere_receta) VALUES
-    ('TERMO', 'TERMOFIJADO',  false),
-    ('TEN',   'TEÑIDO',       true),
-    ('HIDRO', 'LAVADO_HIDRO', true),
-    ('SEC',   'SECADO',       false),
-    ('PLAN',  'PLANCHADO',    false),
-    ('PERCH', 'PERCHADO',     false),
-    ('VOLT',  'VOLTEADO',     false);
+    ('TERMOFIJADO',  'Termofijado',  false),
+    ('TENIDO',       'Teñido',       true),
+    ('LAVADO_HIDRO', 'Lavado Hidro', true),
+    ('SECADO',       'Secado',       false),
+    ('PLANCHADO',    'Planchado',    false),
+    ('PERCHADO',     'Perchado',     false),
+    ('VOLTEADO',     'Volteado',     false)
+ON CONFLICT (codigo) DO NOTHING;
 
 -- ── mes.maquina_tipo ──────────────────────────────────────────
 CREATE TABLE mes.maquina_tipo (
@@ -185,8 +192,8 @@ CREATE TABLE mes.maquina (
     estado_actual maquina_estado_enum NOT NULL DEFAULT 'espera',
     ultimo_mantenimiento timestamptz,
     horas_totales int,
-    capacidad_min_kg int NOT NULL,
-    capacidad_max_kg int NOT NULL,
+    capacidad_min_kg int NOT NULL CHECK (capacidad_min_kg > 0),
+    capacidad_max_kg int NOT NULL CHECK (capacidad_max_kg >= capacidad_min_kg),
     relacion_bano numeric(5,2),
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
@@ -201,6 +208,11 @@ CREATE TRIGGER trg_bi_maquina_codigo_canon
 BEFORE INSERT OR UPDATE ON mes.maquina
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
+
+DROP TRIGGER IF EXISTS trg_bi_gen_codigo_maquina ON mes.maquina;
+CREATE TRIGGER trg_bi_gen_codigo_maquina
+BEFORE INSERT ON mes.maquina
+FOR EACH ROW EXECUTE FUNCTION mes.fn_trg_gen_codigo_maquina();
 
 -- ── mes.empleado_rol ──────────────────────────────────────────
 CREATE TABLE mes.empleado_rol (
@@ -267,16 +279,21 @@ CREATE TABLE mes.orden_produccion (
     fyh_cre timestamptz DEFAULT now(),
     fyh_inicio timestamptz,
     fyh_fin timestamptz,
-    usr_cre int
+    usr_cre int,
+    flg_elm BOOL DEFAULT false,
+    usr_elm INT,
+    fyh_elm TIMESTAMPTZ
 );
 
 -- ── inventario.pesaje ─────────────────────────────────────────
 CREATE TABLE inventario.pesaje (
-    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id          INT  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     orden_produccion_id BIGINT REFERENCES mes.orden_produccion(id),
+    lote_id     INT  NOT NULL REFERENCES inventario.lote(id),
+    peso_real   NUMERIC(10,2),
     observacion TEXT,
-    usr_cre INT,
-    fyh_cre TIMESTAMPTZ DEFAULT NOW()
+    usr_cre     INT,
+    fyh_cre     TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ── mes.orden_produccion_paso ─────────────────────────────────
@@ -444,7 +461,11 @@ CREATE TABLE doc.factura_proveedor (
     observacion TEXT,
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod INT, fyh_mod TIMESTAMPTZ,
-    UNIQUE (proveedor_id, serie, numero)
+    UNIQUE (proveedor_id, serie, numero),
+    CONSTRAINT chk_factura_montos CHECK (
+        subtotal > 0 AND igv >= 0 AND total > 0
+        AND ABS(total - (subtotal + igv)) < 0.01
+    )
 );
 
 CREATE TABLE doc.compra (

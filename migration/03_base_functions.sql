@@ -19,7 +19,22 @@ BEGIN
 END;
 $$;
 
--- Audit helpers (from constraints.sql — needed before constraint file)
+-- ── User identity helper ──────────────────────────────────────────────────────
+-- Reads numeric id_usuario from the JWT claim baked in by the access token hook.
+-- Zero DB cost (no join). Used by every SECURITY DEFINER function and trigger.
+CREATE OR REPLACE FUNCTION public.get_user_id()
+RETURNS int
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT (auth.jwt()->>'id_usuario')::int;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_user_id TO authenticated, anon;
+
+-- Audit helpers
 CREATE OR REPLACE FUNCTION public.fn_trg_set_cre_fields()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -50,6 +65,138 @@ BEGIN
         NEW.usr_elm := get_user_id();
         NEW.fyh_elm := now();
     END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- ── Code immutability ─────────────────────────────────────────────────────────
+-- Applied to every table with a codigo column. Codes are write-once: once set,
+-- they can never change. Rename = soft-delete old + create new.
+CREATE OR REPLACE FUNCTION public.fn_trg_immutable_codigo()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.codigo IS NOT NULL AND OLD.codigo IS DISTINCT FROM NEW.codigo THEN
+        RAISE EXCEPTION 'codigo is immutable on %. Deactivate and create a new record instead.', TG_TABLE_NAME;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- ── Hard-delete prevention ────────────────────────────────────────────────────
+-- Core business documents must never be hard-deleted — use flg_elm = true instead.
+CREATE OR REPLACE FUNCTION public.fn_trg_prevent_hard_delete()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'Hard delete not allowed on %. Set flg_elm = true to soft-delete.', TG_TABLE_NAME;
+END;
+$$;
+
+-- ── Auto-gen: mes.maquina ─────────────────────────────────────────────────────
+-- Generates codigo = {maquina_tipo.codigo}-{NNN} scoped per tipo, if not provided.
+CREATE OR REPLACE FUNCTION mes.fn_trg_gen_codigo_maquina()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_tipo_codigo TEXT;
+    v_seq         INT;
+BEGIN
+    IF NEW.codigo IS NULL THEN
+        SELECT codigo INTO v_tipo_codigo FROM mes.maquina_tipo WHERE id = NEW.maquina_tipo_id;
+        SELECT COALESCE(MAX(
+            CASE WHEN codigo ~ ('^' || v_tipo_codigo || '-[0-9]+$')
+                 THEN (regexp_match(codigo, '[0-9]+$'))[1]::int
+                 ELSE 0 END
+        ), 0) + 1
+        INTO v_seq
+        FROM mes.maquina WHERE maquina_tipo_id = NEW.maquina_tipo_id;
+        NEW.codigo := v_tipo_codigo || '-' || LPAD(v_seq::text, 3, '0');
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- ── Auto-gen: inventario.ubicacion ───────────────────────────────────────────
+-- Generates codigo = {almacen_abbrev}-{NN} scoped per almacen, if not provided.
+-- Strips the 'ALM-' prefix from almacen.codigo to get the abbreviation.
+CREATE OR REPLACE FUNCTION inventario.fn_trg_gen_codigo_ubicacion()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_abbrev TEXT;
+    v_seq    INT;
+BEGIN
+    IF NEW.codigo IS NULL THEN
+        SELECT regexp_replace(codigo, '^ALM-', '') INTO v_abbrev
+        FROM inventario.almacen WHERE id = NEW.almacen_id;
+        SELECT COUNT(*) + 1 INTO v_seq
+        FROM inventario.ubicacion WHERE almacen_id = NEW.almacen_id;
+        NEW.codigo := v_abbrev || '-' || LPAD(v_seq::text, 2, '0');
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- ── Auto-gen: color ───────────────────────────────────────────────────────────
+-- Derives codigo by stripping non-alphanumeric from color name, uppercased.
+CREATE OR REPLACE FUNCTION public.fn_trg_gen_codigo_color()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.codigo IS NULL THEN
+        NEW.codigo := UPPER(regexp_replace(NEW.color, '[^a-zA-Z0-9]', '', 'g'));
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- ── Auto-gen: item (rollo) ────────────────────────────────────────────────────
+-- Fires AFTER INSERT on item_rollo_detalle, updates item.codigo when not yet set.
+-- Format: R-{articulo.codigo}-{fibra}-{C|T}  (R-RB-... for rib variants)
+CREATE OR REPLACE FUNCTION public.fn_trg_gen_codigo_item_rollo()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_articulo_codigo TEXT;
+    v_fibra           TEXT;
+    v_estado          TEXT;
+    v_rib             TEXT;
+BEGIN
+    SELECT codigo INTO v_articulo_codigo FROM articulo WHERE id = NEW.articulo_id;
+    SELECT COALESCE(fibra::text, '1') INTO v_fibra FROM articulo WHERE id = NEW.articulo_id;
+    v_estado := CASE WHEN NEW.flg_tenido THEN 'T' ELSE 'C' END;
+    v_rib    := CASE WHEN COALESCE(NEW.flg_rib, false) THEN 'RB-' ELSE '' END;
+    UPDATE item
+       SET codigo = UPPER('R-' || v_rib || v_articulo_codigo || '-' || v_fibra || '-' || v_estado)
+     WHERE id = NEW.item_id AND codigo IS NULL;
+    RETURN NEW;
+END;
+$$;
+
+-- ── Auto-gen: item (insumo) ───────────────────────────────────────────────────
+-- Fires AFTER INSERT on item_insumo_detalle, updates item.codigo when not yet set.
+-- Format: I-{QUIM|COL|AUX}-{DIR|DISP|RX?}-{NORMALIZED_NAME}
+CREATE OR REPLACE FUNCTION public.fn_trg_gen_codigo_item_insumo()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_it_codigo TEXT;
+    v_ct_codigo TEXT;
+    v_nombre    TEXT;
+    v_codigo    TEXT;
+BEGIN
+    SELECT it.codigo, ct.codigo, i.nombre
+      INTO v_it_codigo, v_ct_codigo, v_nombre
+      FROM item i
+      JOIN insumo_tipo it ON it.id = NEW.insumo_tipo_id
+      LEFT JOIN colorante_tipo ct ON ct.id = NEW.colorante_tipo_id
+     WHERE i.id = NEW.item_id;
+
+    v_codigo := 'I-' || v_it_codigo;
+    IF v_ct_codigo IS NOT NULL THEN
+        v_codigo := v_codigo || '-' || v_ct_codigo;
+    END IF;
+    v_codigo := v_codigo || '-' ||
+        UPPER(trim(both '-' from
+            regexp_replace(
+                regexp_replace(v_nombre COLLATE "C", '\s+', ' ', 'g'),
+                '[^A-Z0-9]+', '-', 'g')));
+
+    UPDATE item SET codigo = v_codigo WHERE id = NEW.item_id AND codigo IS NULL;
     RETURN NEW;
 END;
 $$;
