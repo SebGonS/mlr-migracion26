@@ -20,8 +20,9 @@ END;
 $$;
 
 -- ── User identity helper ──────────────────────────────────────────────────────
--- Reads numeric id_usuario from the JWT claim baked in by the access token hook.
--- Zero DB cost (no join). Used by every SECURITY DEFINER function and trigger.
+-- Reads id_usuario from the JWT (injected at login by custom_access_token_hook).
+-- Zero DB cost. Requires hook registered: Supabase Dashboard →
+--   Authentication → Hooks → Custom Access Token → public.custom_access_token_hook
 CREATE OR REPLACE FUNCTION public.get_user_id()
 RETURNS int
 LANGUAGE sql
@@ -191,10 +192,10 @@ BEGIN
         v_codigo := v_codigo || '-' || v_ct_codigo;
     END IF;
     v_codigo := v_codigo || '-' ||
-        UPPER(trim(both '-' from
+        trim(both '-' from
             regexp_replace(
-                regexp_replace(v_nombre COLLATE "C", '\s+', ' ', 'g'),
-                '[^A-Z0-9]+', '-', 'g')));
+                regexp_replace(UPPER(v_nombre) COLLATE "C", '\s+', ' ', 'g'),
+                '[^A-Z0-9]+', '-', 'g'));
 
     UPDATE item SET codigo = v_codigo WHERE id = NEW.item_id AND codigo IS NULL;
     RETURN NEW;

@@ -210,9 +210,9 @@ BEGIN
         v_usr_id
     FROM jsonb_array_elements(p_letras) l;
 
-    -- Mark factura as paid by letras
+    -- Mark factura as paid by letras (letras implies credito payment type)
     UPDATE doc.factura_proveedor
-    SET tipo_pago = 'letras', usr_mod = v_usr_id, fyh_mod = NOW()
+    SET tipo_pago = 'credito', usr_mod = v_usr_id, fyh_mod = NOW()
     WHERE id = p_factura_proveedor_id;
 
     RETURN format('%s letras registradas para factura #%s.', jsonb_array_length(p_letras), p_factura_proveedor_id);
@@ -227,7 +227,7 @@ $function$;
 -- ───────────────────────────────────────────────────────────────
 -- pagar_letra
 -- Marks a letra as paid. Cascades estado_pago to the factura:
---   all paid → 'pagado' | some paid → 'parcial'
+--   all paid → 'total' | some paid → 'parcial'
 -- ───────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION doc.pagar_letra(
     p_letra_id   bigint,
@@ -252,8 +252,8 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Letra #% no encontrada.', p_letra_id;
     END IF;
-    IF v_estado_actual <> 'pendiente' THEN
-        RAISE EXCEPTION 'La letra #% ya está en estado %. Solo se pueden pagar letras pendientes.',
+    IF v_estado_actual NOT IN ('emitida', 'vencida') THEN
+        RAISE EXCEPTION 'La letra #% ya está en estado %. Solo se pueden pagar letras emitidas o vencidas.',
             p_letra_id, v_estado_actual;
     END IF;
 
@@ -268,11 +268,11 @@ BEGIN
     SELECT NOT EXISTS (
         SELECT 1 FROM doc.letra
         WHERE factura_proveedor_id = v_factura_id
-          AND estado = 'pendiente'
+          AND estado NOT IN ('pagada', 'anulada')
     ) INTO v_todas_pagadas;
 
     UPDATE doc.factura_proveedor
-    SET estado_pago = CASE WHEN v_todas_pagadas THEN 'pagado' ELSE 'parcial' END,
+    SET estado_pago = CASE WHEN v_todas_pagadas THEN 'total' ELSE 'parcial' END,
         usr_mod     = v_usr_id,
         fyh_mod     = NOW()
     WHERE id = v_factura_id;

@@ -184,14 +184,14 @@ SELECT
         WHEN 'AJUSTE'         THEN 'Ajustes'
         WHEN 'TRANSFERENCIA'  THEN 'Transferencias'
     END AS nombre
-FROM unnest(enum_range(NULL::inventario.item_movimiento_tipo_categoria_enum)) AS c(codigo);
+FROM unnest(enum_range(NULL::item_movimiento_tipo_categoria_enum)) AS c(codigo);
 
 CREATE TABLE inventario.item_movimiento_tipo (
     id smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
     codigo_canon TEXT NOT NULL,
     nombre text NOT NULL,
-    categoria inventario.item_movimiento_tipo_categoria_enum NOT NULL,
+    categoria item_movimiento_tipo_categoria_enum NOT NULL,
     factor SMALLINT NOT NULL CHECK (factor IN (1, -1, 0)),
     descripcion text,
     flg_afecta_stock    BOOLEAN NOT NULL DEFAULT true,

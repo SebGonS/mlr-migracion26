@@ -1339,9 +1339,12 @@ SELECT
     lc.fecha_emision         AS fecha_giro,
     lc.fecha_vencimiento,
     CASE lc.estado
-        WHEN 'emitida' THEN 'pendiente'::letra_estado_enum
-        WHEN 'pagada'  THEN 'pagada'::letra_estado_enum
-        ELSE                'pendiente'::letra_estado_enum
+        WHEN 'emitida'    THEN 'emitida'::letra_estado_enum
+        WHEN 'pagada'     THEN 'pagada'::letra_estado_enum
+        WHEN 'vencida'    THEN 'vencida'::letra_estado_enum
+        WHEN 'protestada' THEN 'protestada'::letra_estado_enum
+        WHEN 'anulada'    THEN 'anulada'::letra_estado_enum
+        ELSE                   'emitida'::letra_estado_enum
     END,
     lc.fecha_pago,
     lc.observaciones,

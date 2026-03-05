@@ -503,7 +503,7 @@ CREATE TABLE doc.letra (
     fecha_giro           DATE,
     fecha_vencimiento    DATE NOT NULL,
     banco                TEXT,
-    estado               letra_estado_enum NOT NULL DEFAULT 'pendiente',
+    estado               letra_estado_enum NOT NULL DEFAULT 'emitida',
     fecha_pago           DATE,
     observacion          TEXT,
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),

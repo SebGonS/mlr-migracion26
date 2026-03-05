@@ -13,7 +13,7 @@ CREATE TYPE calidad_estado_enum AS ENUM (
   'CUARENTENA'
 );
 
-CREATE TYPE inventario.item_movimiento_tipo_categoria_enum AS ENUM (
+CREATE TYPE item_movimiento_tipo_categoria_enum AS ENUM (
     'COMPRA',
     'VENTA',
     'PRODUCCION',
@@ -85,21 +85,23 @@ CREATE TYPE maquina_estado_enum AS ENUM (
 );
 
 -- ── Compras ────────────────────────────────────────────────────
+SELECT * FROM vw_tipo_pago;
+
 DO $$
 BEGIN
-    CREATE TYPE tipo_pago_enum AS ENUM ('contado', 'credito', 'letras');
+    CREATE TYPE tipo_pago_enum AS ENUM ('contado', 'credito');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-    CREATE TYPE estado_pago_enum AS ENUM ('pendiente', 'parcial', 'pagado', 'anulado');
+    CREATE TYPE estado_pago_enum AS ENUM ('pendiente', 'parcial', 'total', 'anulado');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-    CREATE TYPE letra_estado_enum AS ENUM ('pendiente', 'protestada', 'pagada', 'anulada');
+    CREATE TYPE letra_estado_enum AS ENUM ('emitida', 'pagada', 'vencida', 'protestada', 'anulada');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
