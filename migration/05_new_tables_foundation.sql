@@ -86,7 +86,7 @@ FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 INSERT INTO insumo_tipo (codigo, nombre) VALUES
     ('QUIM',  'quimico'),
-    ('COLOR', 'colorante'),
+    ('COL',   'colorante'),
     ('AUX',   'auxiliar');
 
 -- ── colorante_tipo ─────────────────────────────────────────────
@@ -125,8 +125,7 @@ CREATE TABLE item (
     flg_elm boolean NOT NULL DEFAULT FALSE,
     usr_elm int,
     fyh_elm timestamptz,
-    UNIQUE(codigo_canon),
-    legacy_id int -- drop after migration
+    UNIQUE(codigo_canon)
 );
 CREATE TRIGGER trg_bi_item_codigo_canon
 BEFORE INSERT OR UPDATE ON item
@@ -222,7 +221,7 @@ VALUES
 ('VENTA_EGR',        'Venta – Despacho',                          'VENTA',           -1, true,  true,  false, true,  true,  false, 'Salida por venta a cliente'),
 ('PROD_CONSUMO',     'Producción – Consumo MP',                   'PRODUCCION',      -1, true,  true,  false, false, true,  false, 'Consumo de materia prima hacia orden de producción'),
 ('PROD_ING',         'Producción – Ingreso PT',                   'PRODUCCION',      1,  true,  true,  true,  false, false, true,  'Ingreso de producto terminado'),
-('EXT_ENVIO',        'Proceso Ext. – Envío',                      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Salida a maquilador'),
+('EXT_ENVIO',        'Proceso Ext. – Envío',                      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Salida a maquilador/tercero para proceso externo'),
 ('EXT_RETORNO',      'Proceso Ext. – Retorno',                    'PROCESO_EXTERNO', 1,  true,  true,  true,  true,  false, true,  'Retorno con valor agregado'),
 ('INT_TRANSFER_ING', 'Transferencia Interna',                     'TRANSFERENCIA',   1,  true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
 ('INT_TRANSFER_EGR', 'Transferencia Interna',                     'TRANSFERENCIA',   -1, true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
@@ -383,7 +382,8 @@ BEGIN
     INSERT INTO inventario.item_valoracion (item_id, precio_promedio, stock_qty, stock_valorado, fyh_mod)
     VALUES (NEW.item_id, v_map, v_stock_qty, v_stock_valorado, now())
     ON CONFLICT (item_id) DO UPDATE
-        SET precio_promedio = EXCLUDED.precio_promedio,
+        SET precio_promedio = EXCLUDED.precio_promedio
+        ,
             stock_qty       = EXCLUDED.stock_qty,
             stock_valorado  = EXCLUDED.stock_valorado,
             fyh_mod         = EXCLUDED.fyh_mod;

@@ -17,7 +17,8 @@
 
 CREATE OR REPLACE FUNCTION receta.crear_tenido(
     p_color_x_cliente_id INT,
-    p_articulo_id        INT,
+    p_articulo_tipo_id   SMALLINT,
+    p_fibra              SMALLINT,
     p_tenido_id          INT,
     p_flg_antipilling    BOOLEAN  DEFAULT false,
     p_tipo_receta_id     SMALLINT DEFAULT NULL
@@ -36,7 +37,8 @@ BEGIN
 
     INSERT INTO receta.tenido (
         color_x_cliente_id,
-        articulo_id,
+        articulo_tipo_id,
+        fibra,
         tenido_id,
         flg_antipilling,
         tipo_receta_id,
@@ -45,7 +47,8 @@ BEGIN
         fyh_cre
     ) VALUES (
         p_color_x_cliente_id,
-        p_articulo_id,
+        p_articulo_tipo_id,
+        p_fibra,
         p_tenido_id,
         p_flg_antipilling,
         p_tipo_receta_id,
@@ -116,7 +119,8 @@ BEGIN
             usr_mod   = v_usr_id,
             fyh_mod   = now()
         WHERE color_x_cliente_id = v_receta.color_x_cliente_id
-          AND articulo_id        = v_receta.articulo_id
+          AND articulo_tipo_id   = v_receta.articulo_tipo_id
+          AND fibra              = v_receta.fibra
           AND tenido_id          = v_receta.tenido_id
           AND flg_antipilling    = v_receta.flg_antipilling
           AND flg_produccion     = true   -- trigger-maintained: true only when APROBADO

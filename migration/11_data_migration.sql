@@ -363,38 +363,104 @@ SET hex=c.hex
 FROM color c
 WHERE color_x_cliente.color_id = c.id;
 
--- ============================================================================
--- 0. articulo_tipo  (new table — old name was tipo_articulo)
--- ============================================================================
-INSERT INTO articulo_tipo (id, nombre, codigo_canon)
-OVERRIDING SYSTEM VALUE
-SELECT id, tipo_articulo AS nombre, lower(unaccent(tipo_articulo))
-FROM public.tipo_articulo;
-
-SELECT setval(
-    pg_get_serial_sequence('articulo_tipo', 'id'),
-    COALESCE((SELECT MAX(id) FROM articulo_tipo), 1)
-);
 
 -- ============================================================================
 -- 1. MASTER DATA MIGRATION - Public Schema
--- ===========================================================================
+-- ============================================================================
+TRUNCATE item_insumo_detalle, item_rollo_detalle, item CASCADE;
+
+-- ============================================================================
+-- MIGRAR INSUMOS
+-- First: OVERRIDING SYSTEM VALUE preserves insumo.id directly as item.id.
+-- setval after advances the sequence so roll items never collide.
+-- ============================================================================
+WITH base AS (
+    SELECT
+        i.id                                                              AS insumo_id,
+        'I-' ||
+        CASE tipo
+            WHEN 'directo'  THEN 'COL'
+            WHEN 'reactivo' THEN 'COL'
+            WHEN 'disperso' THEN 'COL'
+            WHEN 'auxiliar' THEN 'AUX'
+            WHEN 'quimico'  THEN 'QUIM' END || '-' ||
+        CASE tipo
+            WHEN 'directo'  THEN 'DIR-'
+            WHEN 'reactivo' THEN 'RX-'
+            WHEN 'disperso' THEN 'DISP-'
+            ELSE '' END ||
+        trim(both '-' from regexp_replace(regexp_replace(UPPER(i.insumo) COLLATE "C", '\s+', ' ', 'g'), '[^A-Z0-9]+', '-', 'g'))
+                                                                          AS codigo,
+        i.insumo                                                          AS nombre,
+        u.id                                                              AS unidad_id,
+        i.medida,
+        it.id                                                             AS item_tipo_id,
+        it2.id                                                            AS insumo_tipo_id,
+        ct.id                                                             AS colorante_tipo_id
+    FROM insumo i
+    LEFT JOIN item_tipo    it  ON it.codigo  = 'INSUMO'
+    LEFT JOIN unidad       u   ON u.codigo   = 'kg'
+    LEFT JOIN insumo_tipo  it2 ON it2.codigo = CASE tipo
+        WHEN 'directo'  THEN 'COL'
+        WHEN 'reactivo' THEN 'COL'
+        WHEN 'disperso' THEN 'COL'
+        WHEN 'auxiliar' THEN 'AUX'
+        WHEN 'quimico'  THEN 'QUIM' END
+    LEFT JOIN colorante_tipo ct ON ct.codigo = CASE tipo
+        WHEN 'directo'  THEN 'DIR'
+        WHEN 'reactivo' THEN 'RX'
+        WHEN 'disperso' THEN 'DISP'
+        ELSE NULL END
+),
+ins AS (
+    INSERT INTO item (
+        id,
+        codigo,
+        nombre,
+        item_tipo_id,
+        unidad_id,
+        fyh_cre
+    )
+    OVERRIDING SYSTEM VALUE
+    SELECT
+        b.insumo_id,
+        b.codigo,
+        b.nombre,
+        b.item_tipo_id,
+        b.unidad_id,
+        NOW()
+    FROM base b
+    RETURNING id, codigo
+)
+INSERT INTO item_insumo_detalle (
+    item_id,
+    medida,
+    insumo_tipo_id,
+    colorante_tipo_id,
+    fyh_cre
+)
+SELECT
+    ins.id,
+    b.medida,
+    b.insumo_tipo_id,
+    b.colorante_tipo_id,
+    NOW()
+FROM ins
+JOIN base b ON b.codigo = ins.codigo;
+
+-- Advance sequence so roll items get IDs above all insumo IDs
+SELECT setval(pg_get_serial_sequence('item', 'id'), (SELECT MAX(id) FROM item));
+
+-- ============================================================================
 -- CREAR ROLLOS CRUDOS
+-- ============================================================================
 -- Preview (SELECT only, not inserted):
-SELECT  UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C') codigo,
-'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo' nombre,
-u.id unidad_id,
-it.id item_tipo_id,
-p.articulo_id,
-COALESCE(a.fibra, 1) fibra
-FROM partida p
-JOIN articulo  a ON a.id = p.articulo_id
-JOIN item_tipo it ON it.codigo='ROLLO'
-JOIN unidad u ON u.codigo = 'kg'
-GROUP BY
-UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C'),
-'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo',
-u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1);
+-- SELECT UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C') codigo,
+-- 'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo' nombre,
+-- u.id unidad_id, it.id item_tipo_id, p.articulo_id, COALESCE(a.fibra, 1) fibra
+-- FROM partida p JOIN articulo a ON a.id = p.articulo_id
+-- JOIN item_tipo it ON it.codigo='ROLLO' JOIN unidad u ON u.codigo = 'kg'
+-- GROUP BY 1,2,3,4,5,6;
 
 WITH base AS (
    SELECT  UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C') codigo,
@@ -427,19 +493,16 @@ ins_item AS (
         b.unidad_id,
         NOW()
     FROM base b
-    -- ON CONFLICT (codigo_canon) DO NOTHING
     RETURNING id, codigo
 )
 INSERT INTO item_rollo_detalle (
     item_id,
     articulo_id,
-    fibra,
     flg_tenido,
     fyh_cre)
 SELECT
     i.id,
     b.articulo_id,
-    b.fibra,
     false,
     NOW()
 FROM ins_item i
@@ -479,19 +542,16 @@ ins_item AS (
         b.unidad_id,
         NOW()
     FROM base b
-    -- ON CONFLICT (codigo_canon) DO NOTHING
     RETURNING id, codigo
 )
 INSERT INTO item_rollo_detalle (
     item_id,
     articulo_id,
-    fibra,
     flg_rib,
     fyh_cre)
 SELECT
     i.id,
     b.articulo_id,
-    b.fibra,
     true,
     NOW()
 FROM ins_item i
@@ -529,19 +589,16 @@ ins_item AS (
         b.unidad_id,
         NOW()
     FROM base b
-    -- ON CONFLICT (codigo_canon) DO NOTHING
     RETURNING id, codigo
 )
 INSERT INTO item_rollo_detalle (
     item_id,
     articulo_id,
-    fibra,
     flg_tenido,
     fyh_cre)
 SELECT
     i.id,
     b.articulo_id,
-    b.fibra,
     true,
     NOW()
 FROM ins_item i
@@ -580,116 +637,21 @@ ins_item AS (
         b.unidad_id,
         NOW()
     FROM base b
-    -- ON CONFLICT (codigo_canon) DO NOTHING
     RETURNING id, codigo
 )
 INSERT INTO item_rollo_detalle (
     item_id,
     articulo_id,
-    fibra,
     flg_rib,
     flg_tenido,
     fyh_cre)
 SELECT
     i.id,
     b.articulo_id,
-    b.fibra,
     true,
     true,
     NOW()
 FROM ins_item i
-JOIN base b USING (codigo);
-
--- ============================================================================
--- MIGRAR INSUMOS
--- ============================================================================
-SELECT 'I-' ||
-CASE tipo WHEN 'directo' THEN 'COL' WHEN 'reactivo' THEN 'COL' WHEN 'disperso' THEN 'COL' WHEN 'auxiliar' THEN 'AUX' WHEN 'quimico' THEN 'QUIM' END || '-' ||
-CASE tipo WHEN 'directo' THEN 'DIR-' WHEN 'reactivo' THEN 'RX-' WHEN 'disperso' THEN 'DIS-' ELSE '' END ||
-UPPER(trim(both '-' from regexp_replace(regexp_replace(i.insumo COLLATE "C", '\s+', ' ', 'g'), '[^A-Z0-9]+', '-', 'g'))) codigo,
-i.insumo nombre,
-u.id unidad_id,
-i.medida,
-it.id item_tipo_id,
-it2.id insumo_tipo_id,
-ct.id colorante_tipo_id,
-insumo_id
-FROM insumo i
-LEFT JOIN item_tipo it ON it.codigo = 'INSUMO'
-LEFT JOIN unidad u ON u.codigo = 'kg'
-LEFT JOIN insumo_tipo it2 ON it2.codigo = CASE tipo
-    WHEN 'directo'  THEN 'COL'
-    WHEN 'reactivo' THEN 'COL'
-    WHEN 'disperso' THEN 'COL'
-    WHEN 'auxiliar' THEN 'AUX'
-    WHEN 'quimico'  THEN 'QUIM' END
-LEFT JOIN colorante_tipo ct ON ct.codigo = CASE tipo
-    WHEN 'directo'  THEN 'DIR'
-    WHEN 'reactivo' THEN 'RX'
-    WHEN 'disperso' THEN 'DISP'
-    ELSE NULL END;
-
-with base AS(
-    SELECT 'I-' ||
-CASE tipo WHEN 'directo' THEN 'COL' WHEN 'reactivo' THEN 'COL' WHEN 'disperso' THEN 'COL' WHEN 'auxiliar' THEN 'AUX' WHEN 'quimico' THEN 'QUIM' END || '-' ||
-CASE tipo WHEN 'directo' THEN 'DIR-' WHEN 'reactivo' THEN 'RX-' WHEN 'disperso' THEN 'DIS-' ELSE '' END ||
-UPPER(trim(both '-' from regexp_replace(regexp_replace(i.insumo COLLATE "C", '\s+', ' ', 'g'), '[^A-Z0-9]+', '-', 'g'))) codigo,
-i.insumo nombre,
-u.id unidad_id,
-i.medida,
-it.id item_tipo_id,
-it2.id insumo_tipo_id,
-ct.id colorante_tipo_id,
-i.id
-FROM insumo i
-LEFT JOIN item_tipo it ON it.codigo = 'INSUMO'
-LEFT JOIN unidad u ON u.codigo = 'kg'
-LEFT JOIN insumo_tipo it2 ON it2.codigo = CASE tipo
-    WHEN 'directo'  THEN 'COL'
-    WHEN 'reactivo' THEN 'COL'
-    WHEN 'disperso' THEN 'COL'
-    WHEN 'auxiliar' THEN 'AUX'
-    WHEN 'quimico'  THEN 'QUIM' END
-LEFT JOIN colorante_tipo ct ON ct.codigo = CASE tipo
-    WHEN 'directo'  THEN 'DIR'
-    WHEN 'reactivo' THEN 'RX'
-    WHEN 'disperso' THEN 'DISP'
-    ELSE NULL END
-),
-ins as(
-    INSERT INTO item (
-        codigo,
-        nombre,
-        item_tipo_id,
-        unidad_id,
-        fyh_cre,
-        legacy_id
-    )
-    SELECT
-        b.codigo,
-        b.nombre,
-        b.item_tipo_id,
-        b.unidad_id,
-        NOW(),
-        id
-    FROM base b
-    -- ON CONFLICT (codigo_canon) DO NOTHING
-    RETURNING id, codigo
-)
-INSERT INTO item_insumo_detalle(
-    item_id,
-    medida,
-    insumo_tipo_id,
-    colorante_tipo_id,
-    fyh_cre
-)
-SELECT
-    i.id,
-    b.medida,
-    b.insumo_tipo_id,
-    b.colorante_tipo_id,
-    NOW()
-FROM ins i
 JOIN base b USING (codigo);
 
 
@@ -698,22 +660,22 @@ JOIN base b USING (codigo);
 -- ============================================================================
 
 INSERT INTO inventario.almacen(codigo,nombre,fyh_cre)
-VALUES ('ALM-INS', 'Almacén de Insumos', NOW()),
-       ('ALM-CRU', 'Almacén de Crudo', NOW()),
-       ('ALM-PT', 'Almacén de Productos Terminados', NOW());
+VALUES ('ALM_INS', 'Almacén de Insumos', NOW()),
+       ('ALM_CRU', 'Almacén de Crudo', NOW()),
+       ('ALM_PT', 'Almacén de Productos Terminados', NOW());
 
 INSERT INTO inventario.ubicacion(almacen_id,codigo,nombre,fyh_cre)
 SELECT a.id, 'UBI-01', 'Ubicación 1',NOW()
 FROM inventario.almacen a
-WHERE a.codigo = 'ALM-INS'
+WHERE a.codigo = 'ALM_INS'
 UNION ALL
 SELECT a.id, 'UBI-01', 'Ubicación 1',NOW()
 FROM inventario.almacen a
-WHERE a.codigo = 'ALM-CRU'
+WHERE a.codigo = 'ALM_CRU'
 UNION ALL
 SELECT a.id, 'UBI-01', 'Ubicación 1',NOW()
 FROM inventario.almacen a
-WHERE a.codigo = 'ALM-PT';
+WHERE a.codigo = 'ALM_PT';
 
 -- ============================================================================
 -- MIGRAR PARTIDAS
@@ -775,8 +737,10 @@ WITH ult_estado as(SELECT ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY id
 ,base as(SELECT 
 pp.id,
 pp.codigo,pp.prioridad_id,pp.cliente_id,
+pp.color_x_cliente_id,
 pp.tenido_id,
 pp.articulo_id, pp.malla,pp.rendimiento,
+pp.ancho,
 pp.rib,
 pp.rollos,
 pp.fibra,
@@ -798,11 +762,9 @@ LEFT JOIN estado e ON ue.estado_id = e.id)
     cliente_id,
     color_x_cliente_id,
     tenido_id,
-    articulo_id,
-    fibra,
     malla,
     rendimiento,
-    ancho
+    ancho,
     estado,
     fyh_programacion,
     fyh_inicio,
@@ -818,8 +780,6 @@ SELECT
     p.cliente_id,
     p.color_x_cliente_id,
     p.tenido_id,
-    p.articulo_id,
-    p.fibra,
     p.malla,
     p.rendimiento,
     p.ancho,
@@ -835,6 +795,7 @@ RETURNING id
         partida_id,
         item_id,
         cantidad,
+        unidad_id,
         usr_cre,
         fyh_cre
     )
@@ -842,12 +803,12 @@ RETURNING id
         p.id,
         ird.item_id,
         CASE WHEN ird.flg_rib THEN p.rib ELSE p.rollos END,
+        (SELECT id FROM unidad WHERE codigo = 'UN'),
         p.usr_cre,
         p.fyh_cre_tz
     FROM base p
-    LEFT JOIN item_rollo_detalle ird
-    ON ird.articulo_id=p.articulo_id AND flg_tenido=true AND (flg_rib=false OR (flg_rib AND p.rib>0))
-    AND COALESCE(p.fibra,1)=ird.fibra;
+    JOIN item_rollo_detalle ird
+    ON ird.articulo_id=p.articulo_id AND ird.flg_tenido=true AND (ird.flg_rib=false OR (ird.flg_rib AND p.rib>0));
 SELECT setval(
   pg_get_serial_sequence('doc.partida', 'id'),
   (SELECT MAX(id) FROM doc.partida)
@@ -861,7 +822,7 @@ SELECT setval(
 --============================================
 --EJECUTAR ESTA SECCION MANUALMENTE
 --============================================
-UPDATE doc.partida SET flg_antipilling=(CASE p.adicional_id WHEN 1 THEN true ELSE false END) FROM partida p WHERE p.id=doc.partida.id
+UPDATE doc.partida SET flg_antipilling=(CASE p.adicional_id WHEN 1 THEN true ELSE false END) FROM partida p WHERE p.id=doc.partida.id;
 
 
 INSERT INTO mes.orden_produccion(
@@ -897,7 +858,7 @@ INSERT INTO mes.orden_produccion(
   fyh_fin
 )
 WITH ult_estado as(SELECT ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY id desc) rw,* FROM partida_estado_historial)
-SELECT p.id,'REPROCESO' tipo, 'CERRADA',NOW() fyh_cre,   
+SELECT p.id,'REPROCESO'::orden_produccion_tipo_enum tipo, 'CERRADA'::orden_produccion_estado_enum,NOW() fyh_cre,   
 ue.fecha_ejecucion fyh_inicio,
   ue.fecha_ejecucion fyh_fin
 FROM doc.partida p
@@ -905,11 +866,11 @@ LEFT JOIN public.partida pp ON pp.id=p.id
 LEFT JOIN ult_estado ue ON p.id = ue.partida_id
 LEFT JOIN estado e ON e.id=ue.estado_id
 WHERE e.estado LIKE '%Reprocesado%'
-GROUP BY 1,2,3,4,5
+GROUP BY 1,2,3,4,5;
 --===========================================
 --Migrar pasos
 --===========================================
-SELECT * FROM tipo_receta; 
+-- SELECT * FROM tipo_receta;
 -- Add column with FK
 ALTER TABLE tipo_receta ADD COLUMN operacion_id SMALLINT;
 ALTER TABLE tipo_receta ADD CONSTRAINT fk_tipo_receta_operacion 
@@ -1087,8 +1048,291 @@ AND ((op.tipo = 'NORMAL' AND tipo_receta='Teñido') OR (op.tipo = 'REPROCESO' AN
 WHERE op.id IS NULL
 )SELECT  pxr.partida_id, 'REPROCESO', 'CERRADA', pxr.fyh_cre, pxr.fecha, pxr.fecha
 FROM partida_x_recetas pxr
-WHERE flg_elm=false AND tipo_receta_id IS NOT NULL AND partida_id IN (SELECT partida_id FROM o)
+WHERE flg_elm=false AND tipo_receta_id IS NOT NULL AND partida_id IN (SELECT partida_id FROM o);
 
+-- ============================================================================
+-- MIGRAR RECETAS
+-- Pre-migration prep: stage parsed values into public.receta_paso
+-- (ALTER TABLE is transactional in PostgreSQL — runs inside BEGIN block)
+-- ============================================================================
+
+-- Step 1: Add staging columns to source table
+ALTER TABLE public.paso
+    ADD COLUMN IF NOT EXISTS op_id      SMALLINT,
+    ADD COLUMN IF NOT EXISTS ph_val     NUMERIC(4,2),
+    ADD COLUMN IF NOT EXISTS temp_val   NUMERIC(5,2),
+    ADD COLUMN IF NOT EXISTS tiempo_val SMALLINT;
+
+-- Step 2: Auto-populate via CASE + regex
+UPDATE public.paso SET
+    op_id = CASE
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%TINTURA%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE '%TENIDO%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE '%TENIR%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE '%TNTURA%'             THEN 1  -- TINTURA
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%LAVADO%REDUCTIVO%'   THEN 3  -- LAVADO_REDUCTIVO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%BLANQUEO%OPTICO%'    THEN 5  -- BLANQUEO_OPTICO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%BLANQUEO%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE 'B.QUIM%'              THEN 4  -- BLANQUEO_QUIMICO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%LAVADO%'             THEN 2  -- LAVADO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%DESCRUDE%'           THEN 6  -- DESCRUDE
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%NEUTRALIZA%'         THEN 7  -- NEUTRALIZADO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%FIJADO%'             THEN 9  -- FIJADO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%SUAVIZADO%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE '%SUAVIZANTE%'         THEN 8  -- SUAVIZADO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%JABONADO%'           THEN 10 -- JABONADO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%ENJUAGUE%'           THEN 11 -- ENJUAGUE
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%MATIZ%'              THEN 12 -- MATIZADO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%ANTIPILLING%'        THEN 13 -- ANTIPILLING
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%SIMULTANEO%'         THEN 15 -- SIMULTANEO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%REGULAR%PH%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE '%REGULACION%PH%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE '%REGULANDO%PH%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE '%REGULO%PH%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE 'CHECK%PH%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE '%NO REGULAR%'         THEN 14 -- REGULACION_PH
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%DESMONTADO%'
+          OR unaccent(upper(paso COLLATE "C")) LIKE '%ELIMINACI%'          THEN 16 -- DESMONTADO
+        WHEN unaccent(upper(paso COLLATE "C")) LIKE '%REBAJE%'             THEN 17 -- REBAJE
+        ELSE NULL
+    END,
+    ph_val    = (regexp_match(upper(paso COLLATE "C"), 'PH\s*[=:]?\s*(\d+(?:[.,]\d+)?)'))[1]::numeric(4,2),
+    temp_val  = (regexp_match(paso COLLATE "C", '(\d{2,3})\s*[°º]'))[1]::numeric(5,2),
+    tiempo_val = COALESCE(
+        ( (regexp_match(lower(paso COLLATE "C"), '(\d+):(\d+)\s*min'))[1]::smallint * 60
+        + (regexp_match(lower(paso COLLATE "C"), '(\d+):(\d+)\s*min'))[2]::smallint ),
+        (regexp_match(lower(paso COLLATE "C"), '(\d+)\s*hora'))[1]::smallint * 60,
+        (regexp_match(lower(paso COLLATE "C"), '(\d+)\s*min'))[1]::smallint,
+        (regexp_match(paso COLLATE "C", $$(\d+)\s*'$$))[1]::smallint
+    );
+
+-- Step 3: Manual corrections for unmapped rows
+UPDATE public.paso SET op_id = 1 WHERE id = 163; -- PH 8.5-9 CON COLORANTE A 110°C X 20' → TINTURA
+UPDATE public.paso SET op_id = 1 WHERE id = 165; -- A 90°C PH 10 CON SAL X 20' → TINTURA
+
+
+--TRUNCATE receta.tenido CASCADE;
+-- 1. receta.tenido (preserves legacy IDs from public.receta2)
+INSERT INTO receta.tenido (
+    id,
+    color_x_cliente_id,
+    articulo_tipo_id,
+    fibra,
+    tenido_id,
+    flg_antipilling,
+    tipo_receta_id,
+    estado_id,
+    fyh_produccion,
+    usr_cre, fyh_cre
+)
+OVERRIDING SYSTEM VALUE
+WITH ranked AS (
+    -- Among duplicate approved recipes for the same key, only the latest id keeps APROBADO.
+    -- All earlier approved versions are demoted to HISTORICO.
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY color_x_cliente_id, tipo_articulo_id, fibra, tenido_id, flg_antipilling
+               ORDER BY id DESC
+           ) AS rn
+    FROM public.receta2
+    WHERE flg_produccion = true
+)
+SELECT
+    r.id,
+    r.color_x_cliente_id,
+    r.tipo_articulo_id,
+    r.fibra,
+    r.tenido_id,
+    r.flg_antipilling,
+    r.tipo_receta_id,
+    CASE
+        WHEN r.flg_produccion = true AND rk.rn = 1
+            THEN (SELECT id FROM estado_desarrollo_color WHERE codigo = 'APROBADO')
+        WHEN r.flg_produccion = true
+            THEN (SELECT id FROM estado_desarrollo_color WHERE codigo = 'HISTORICO')
+        WHEN r.flg_activo = true
+            THEN (SELECT id FROM estado_desarrollo_color WHERE codigo = 'EN_DESARROLLO')
+        ELSE
+            (SELECT id FROM estado_desarrollo_color WHERE codigo = 'CANCELADO')
+    END AS estado_id,
+    r.fyh_produccion,
+    CASE WHEN r.usr_cre NOT IN ('authenticated','anon','postgres') THEN r.usr_cre::integer ELSE NULL END,
+    r.fyh_cre
+FROM public.receta2 r
+LEFT JOIN ranked rk ON rk.id = r.id
+ORDER BY r.id;
+
+SELECT setval(
+    pg_get_serial_sequence('receta.tenido', 'id'),
+    COALESCE((SELECT MAX(id) FROM receta.tenido), 1)
+);
+
+-- 2. receta.tenido_paso (staging columns op_id/ph_val/temp_val/tiempo_val used here)
+INSERT INTO receta.tenido_paso (
+    id,
+    receta_id,
+    operacion_id,
+    orden,
+    ph,
+    temperatura,
+    tiempo_min,
+    nota
+)
+OVERRIDING SYSTEM VALUE
+SELECT
+    rxp.id,
+    rxp.receta_id,
+    rp.op_id        AS operacion_id,
+    rxp.orden,
+    rp.ph_val       AS ph,
+    rp.temp_val     AS temperatura,
+    rp.tiempo_val   AS tiempo_min,
+    rp.paso         AS nota
+FROM public.paso rp
+JOIN receta_x_paso rxp ON rxp.paso_id = rp.id
+WHERE rp.op_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM receta.tenido WHERE id = rxp.receta_id);
+
+SELECT setval(
+    pg_get_serial_sequence('receta.tenido_paso', 'id'),
+    COALESCE((SELECT MAX(id) FROM receta.tenido_paso), 1)
+);
+
+-- 3. receta.tenido_paso_insumo (item.id = insumo.id — preserved via OVERRIDING above)
+INSERT INTO receta.tenido_paso_insumo (
+    paso_id,
+    item_id,
+    cantidad,
+    orden
+)
+SELECT
+    rxp.id                                                                  AS paso_id,
+    it.id                                                                   AS item_id,
+    rxi.cantidad,
+    ROW_NUMBER() OVER (PARTITION BY rxp.id ORDER BY rxi.orden)             AS orden
+FROM public.receta_x_insumo rxi
+JOIN item it ON it.id = rxi.insumo_id
+JOIN LATERAL (
+    SELECT p.id
+    FROM receta_x_paso p
+    WHERE p.receta_id = rxi.receta_id
+      AND p.orden <= rxi.orden
+    ORDER BY p.orden DESC
+    LIMIT 1
+) rxp ON true
+WHERE EXISTS (SELECT 1 FROM receta.tenido_paso WHERE id = rxp.id);
+
+SELECT setval(
+    pg_get_serial_sequence('receta.tenido_paso_insumo', 'id'),
+    COALESCE((SELECT MAX(id) FROM receta.tenido_paso_insumo), 1)
+);
+
+-- 4. receta.lavado_maquina
+INSERT INTO receta.lavado_maquina (
+    id,
+    tipo_lavado_mq_id,
+    valor_origen_id,
+    valor_destino_id,
+    flg_activo,
+    usr_cre, fyh_cre
+)
+OVERRIDING SYSTEM VALUE
+WITH ranked AS (
+    -- Among duplicate active recipes for the same transition, only the latest keeps flg_activo = true.
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY tipo_lavado_mq_id, valor_origen_id, valor_destino_id
+               ORDER BY id DESC
+           ) AS rn
+    FROM public.receta_lavado_maquina
+    WHERE flg_activo = true
+)
+SELECT
+    rlm.id,
+    rlm.tipo_lavado_mq_id,
+    rlm.valor_origen_id,
+    rlm.valor_destino_id,
+    CASE WHEN rk.rn = 1 THEN true ELSE false END AS flg_activo,
+    NULL, rlm.fyh_cre
+FROM public.receta_lavado_maquina rlm
+LEFT JOIN ranked rk ON rk.id = rlm.id
+ORDER BY rlm.id;
+
+SELECT setval(
+    pg_get_serial_sequence('receta.lavado_maquina', 'id'),
+    COALESCE((SELECT MAX(id) FROM receta.lavado_maquina), 1)
+);
+-- ── Prep: synthetic row IDs for lavado_maquina junction tables ─────────────
+-- Run BEFORE the receta.lavado_maquina_paso / _paso_insumo inserts.
+
+-- 1. Give each (receta_lavado_maquina_id, paso_id) row a stable unique ID
+--    — mirrors the id column that receta_x_paso already has.
+ALTER TABLE public.receta_lavado_maquina_x_paso
+    ADD COLUMN IF NOT EXISTS id SERIAL;
+
+-- 2. Stamp that junction ID onto the insumo table so the migration can
+--    join receta_lavado_maquina_paso_insumo → receta_lavado_maquina_x_paso.
+--    Adjust the WHERE join columns if the insumo table uses different names.
+ALTER TABLE public.receta_lavado_maquina_x_insumo
+    ADD COLUMN IF NOT EXISTS id SERIAL;
+
+-- 5. receta.lavado_maquina_paso (staging columns op_id/ph_val/temp_val/tiempo_val used here)
+INSERT INTO receta.lavado_maquina_paso (
+    id,
+    receta_id,
+    operacion_id,
+    orden,
+    ph,
+    temperatura,
+    tiempo_min,
+    nota
+)
+OVERRIDING SYSTEM VALUE
+SELECT
+    rlmp.id,
+    rlmp.receta_lavado_mq_id   AS receta_id,
+    rp.op_id                        AS operacion_id,
+    rlmp.orden,
+    rp.ph_val                       AS ph,
+    rp.temp_val                     AS temperatura,
+    rp.tiempo_val                   AS tiempo_min,
+    rp.paso                         AS nota
+FROM public.receta_lavado_maquina_x_paso rlmp
+JOIN public.paso rp ON rp.id = rlmp.paso_id
+WHERE rp.op_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM receta.lavado_maquina WHERE id = rlmp.receta_lavado_mq_id);
+SELECT setval(
+    pg_get_serial_sequence('receta.lavado_maquina_paso', 'id'),
+    COALESCE((SELECT MAX(id) FROM receta.lavado_maquina_paso), 1)
+);
+
+-- 6. receta.lavado_maquina_paso_insumo
+INSERT INTO receta.lavado_maquina_paso_insumo (
+    paso_id,
+    item_id,
+    cantidad,
+    orden
+)
+SELECT
+    rlmp.id                                                      AS paso_id,
+    it.id                                                        AS item_id,
+    rxi.cantidad,
+    ROW_NUMBER() OVER (PARTITION BY rlmp.id ORDER BY rxi.orden) AS orden
+FROM public.receta_lavado_maquina_x_insumo rxi
+JOIN item it ON it.id = rxi.insumo_id
+JOIN LATERAL (
+    SELECT p.id
+    FROM public.receta_lavado_maquina_x_paso p
+    WHERE p.receta_lavado_mq_id = rxi.receta_lavado_mq_id
+      AND p.orden <= rxi.orden
+    ORDER BY p.orden DESC
+    LIMIT 1
+) rlmp ON true
+WHERE EXISTS (SELECT 1 FROM receta.lavado_maquina_paso WHERE id = rlmp.id);
+
+-- ============================================================================
+-- END MIGRAR RECETAS
+-- ============================================================================
 
 ------INSERTAR PRIMERO TEÑIDOS como primer paso de la orden de produccion default de todas las partidas
 INSERT INTO mes.orden_produccion_paso(
@@ -1163,7 +1407,7 @@ OVERRIDING SYSTEM VALUE
 SELECT i.id, it.id, i.cantidad, i.usr_cre, i.fyh_cre
 FROM inventario i
 LEFT JOIN insumo_x_proveedor ip ON ip.id=i.insumo_x_proveedor_id
-LEFT JOIN item it ON it.legacy_id=ip.insumo_id
+LEFT JOIN item it ON it.id=ip.insumo_id
 WHERE i.cantidad>0
 GROUP BY 1,2,3,4,5
 ;
@@ -1177,7 +1421,7 @@ UPDATE inventario.lote
 SET item_id = item.id
 FROM inventario i 
 JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
-LEFT JOIN item ON item.legacy_id = eid.insumo_id
+LEFT JOIN item ON item.id = eid.insumo_id
 WHERE i.id=inventario.lote.id and item_id IS NULL
 
 
@@ -1208,7 +1452,7 @@ WHERE i.id=inventario.lote.id and item_id IS NULL
 -- New shape (doc schema):
 --   factura_proveedor → split out from compra; letras now hang off factura, not compra
 --   compra            → lightweight header; factura_proveedor_id nullable (invoice may arrive later)
---   compra_detalle    → line items; insumo_id resolved → item_id via item.legacy_id
+--   compra_detalle    → line items; insumo_id resolved → item_id directly (item.id = insumo.id)
 --   compra_guia_remision → junction written by the guia block below; no action needed here
 --   letra             → re-linked from compra → factura_proveedor chain
 -- ============================================================================
@@ -1288,8 +1532,8 @@ SELECT setval(
 
 
 -- Step 3: doc.compra_detalle  (from public.compra_x_insumo)
--- insumo_id → item_id resolved via item.legacy_id populated in the insumo migration above.
--- Rows where legacy_id has no match are silently dropped; run the gap check below first.
+-- insumo_id → item_id resolved directly (item.id = insumo.id; OVERRIDING SYSTEM VALUE preserved IDs).
+-- Rows where insumo_id has no match in item are silently dropped; run the gap check below first.
 INSERT INTO doc.compra_detalle (
     compra_id,
     item_id,
@@ -1304,13 +1548,13 @@ SELECT
     cxi.precio_x_kg_usd,
     NOW()
 FROM public.compra_x_insumo cxi
-JOIN item it ON it.legacy_id = cxi.insumo_id
+JOIN item it ON it.id = cxi.insumo_id
 WHERE cxi.compra_id IN (SELECT id FROM doc.compra);
 
 -- Gap check: line items whose insumo_id didn't resolve to any item
 -- SELECT cxi.compra_id, cxi.insumo_id
 -- FROM public.compra_x_insumo cxi
--- LEFT JOIN item it ON it.legacy_id = cxi.insumo_id
+-- LEFT JOIN item it ON it.id = cxi.insumo_id
 -- WHERE it.id IS NULL;
 
 
@@ -1496,7 +1740,7 @@ JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_
 --     FROM compra_data c
 --     JOIN insumo_x_proveedor ip ON ip.id = c.insumo_x_proveedor_id
 --     JOIN inserted_guias ON inserted_guias.serie = c.serie AND inserted_guias.correlativo = c.correlativo
---     JOIN item ON item.legacy_id = ip.item_id
+--     JOIN item ON item.id = ip.insumo_id
 -- )
 -- UPDATE inventario.lote 
 -- SET tipo_documento = 'guia_remision',
@@ -1513,7 +1757,7 @@ JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_
 --
 -- Key mapping:
 --   cuadre_inventario.estado ('borrador'|'preparado'|'ejecutado') stays the same
---   cuadre_inventario_detalle.insumo_id → item_id via item.legacy_id
+--   cuadre_inventario_detalle.insumo_id → item_id directly (item.id = insumo.id)
 --   costo_bruto_prom_kg_sistema → precio_promedio_sistema
 --   costo_bruto_total_sistema   → stock_valorado_sistema
 --
@@ -1551,7 +1795,7 @@ SELECT setval(
 );
 
 -- Step 2: inventario.cuadre_detalle
--- insumo_id → item_id resolved via item.legacy_id (populated in the insumo migration).
+-- insumo_id → item_id resolved directly (item.id = insumo.id; OVERRIDING SYSTEM VALUE preserved IDs).
 -- Rows whose insumo_id cannot be resolved are skipped; run gap check below.
 INSERT INTO inventario.cuadre_detalle (
     cuadre_id,
@@ -1575,13 +1819,13 @@ SELECT
     cid.usr_mod,
     cid.fyh_mod
 FROM public.cuadre_inventario_detalle cid
-JOIN item it ON it.legacy_id = cid.insumo_id
+JOIN item it ON it.id = cid.insumo_id
 WHERE cid.cuadre_inventario_id IN (SELECT id FROM inventario.cuadre);
 
 -- Gap check: detalle rows whose insumo didn't resolve
 -- SELECT cid.cuadre_inventario_id, cid.insumo_id
 -- FROM public.cuadre_inventario_detalle cid
--- LEFT JOIN item it ON it.legacy_id = cid.insumo_id
+-- LEFT JOIN item it ON it.id = cid.insumo_id
 -- WHERE it.id IS NULL;
 
 -- ============================================================================
@@ -1626,8 +1870,8 @@ SELECT
     dp.doc_movimiento_id,
     i.item_id,
     i.id,
-    CASE WHEN i.documento_tipo = 'guia_remision' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING') ELSE (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS') END,
-    (SELECT inventario.ubicacion.id FROM inventario.ubicacion JOIN inventario.almacen ON inventario.almacen.id = inventario.ubicacion.almacen_id WHERE inventario.almacen.codigo = 'ALM-INS'),
+    CASE WHEN i.documento_tipo = 'GUIA_REMISION' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING') ELSE (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS') END,
+    (SELECT inventario.ubicacion.id FROM inventario.ubicacion JOIN inventario.almacen ON inventario.almacen.id = inventario.ubicacion.almacen_id WHERE inventario.almacen.codigo = 'ALM_INS'),
     i.cantidad,
     i.documento_tipo,
     i.documento_id,
@@ -1638,6 +1882,6 @@ FROM inventario.lote i
 JOIN doc_posting dp
   ON dp.documento_tipo IS NOT DISTINCT FROM i.documento_tipo
  AND dp.documento_id   IS NOT DISTINCT FROM i.documento_id
-WHERE i.cantidad > 0
+WHERE i.cantidad > 0;
 
-
+COMMIT;

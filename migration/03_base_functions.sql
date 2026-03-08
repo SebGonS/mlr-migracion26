@@ -77,7 +77,7 @@ CREATE OR REPLACE FUNCTION public.fn_trg_immutable_codigo()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF OLD.codigo IS NOT NULL AND OLD.codigo IS DISTINCT FROM NEW.codigo THEN
-        RAISE EXCEPTION 'codigo is immutable on %. Deactivate and create a new record instead.', TG_TABLE_NAME;
+        RAISE EXCEPTION 'el codigo es inmutable en %. Desactive y cree un nuevo registro en su lugar.', TG_TABLE_NAME;
     END IF;
     RETURN NEW;
 END;
@@ -88,7 +88,7 @@ $$;
 CREATE OR REPLACE FUNCTION public.fn_trg_prevent_hard_delete()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    RAISE EXCEPTION 'Hard delete not allowed on %. Set flg_elm = true to soft-delete.', TG_TABLE_NAME;
+    RAISE EXCEPTION 'el borrado no está permitido en %. Establezca flg_elm = true para borrar.', TG_TABLE_NAME;
 END;
 $$;
 
@@ -117,7 +117,8 @@ $$;
 
 -- ── Auto-gen: inventario.ubicacion ───────────────────────────────────────────
 -- Generates codigo = {almacen_abbrev}-{NN} scoped per almacen, if not provided.
--- Strips the 'ALM-' prefix from almacen.codigo to get the abbreviation.
+-- Strips the 'ALM_' prefix from almacen.codigo to get the abbreviation.
+-- Convention: almacen codes are user-set with ALM_ prefix (e.g. ALM_INS, ALM_CRU).
 CREATE OR REPLACE FUNCTION inventario.fn_trg_gen_codigo_ubicacion()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
@@ -125,7 +126,7 @@ DECLARE
     v_seq    INT;
 BEGIN
     IF NEW.codigo IS NULL THEN
-        SELECT regexp_replace(codigo, '^ALM-', '') INTO v_abbrev
+        SELECT regexp_replace(codigo, '^ALM_', '') INTO v_abbrev
         FROM inventario.almacen WHERE id = NEW.almacen_id;
         SELECT COUNT(*) + 1 INTO v_seq
         FROM inventario.ubicacion WHERE almacen_id = NEW.almacen_id;

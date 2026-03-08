@@ -362,7 +362,7 @@ CREATE TYPE maquina_estado_enum AS ENUM (
 -- ── Compras ────────────────────────────────────────────────────
 DO $$
 BEGIN
-    CREATE TYPE tipo_pago_enum AS ENUM ('contado', 'credito', 'letras');
+    CREATE TYPE tipo_pago_enum AS ENUM ('al contado', 'credito', 'letras');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
@@ -1460,7 +1460,7 @@ CREATE TABLE doc.factura_proveedor (
     numero      INT  NOT NULL,
     fecha_emision       DATE NOT NULL,
     fecha_vencimiento   DATE,
-    tipo_pago   tipo_pago_enum NOT NULL DEFAULT 'contado',
+    tipo_pago   tipo_pago_enum NOT NULL DEFAULT 'al contado',
     moneda      CHAR(3) NOT NULL DEFAULT 'USD',
     tipo_cambio NUMERIC(10,4),
     subtotal    NUMERIC(12,2) NOT NULL DEFAULT 0,

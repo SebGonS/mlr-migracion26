@@ -89,7 +89,7 @@ SELECT * FROM vw_tipo_pago;
 
 DO $$
 BEGIN
-    CREATE TYPE tipo_pago_enum AS ENUM ('contado', 'credito');
+    CREATE TYPE tipo_pago_enum AS ENUM ('al contado', 'credito');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 

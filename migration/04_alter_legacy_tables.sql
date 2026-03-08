@@ -12,8 +12,14 @@ UPDATE color
 SET codigo = UPPER(regexp_replace(color, '[^a-zA-Z0-9]', '', 'g'))
 WHERE codigo IS NULL;
 
-ALTER TABLE color
-ADD CONSTRAINT IF NOT EXISTS color_codigo_uk UNIQUE (codigo);
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_name = 'color_codigo_uk' AND table_name = 'color'
+    ) THEN
+        ALTER TABLE color ADD CONSTRAINT color_codigo_uk UNIQUE (codigo);
+    END IF;
+END $$;
 
 ALTER TABLE color ADD COLUMN IF NOT EXISTS codigo_canon TEXT;
 UPDATE color SET codigo_canon = lower(unaccent(codigo)) WHERE codigo_canon IS NULL AND codigo IS NOT NULL;
@@ -133,10 +139,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_cc ON articulo(codigo_canon);
 --      SELECT articulo_id, COUNT(DISTINCT fibra) n
 --      FROM item_rollo_detalle GROUP BY articulo_id HAVING COUNT(DISTINCT fibra) > 1;
 ALTER TABLE articulo ADD COLUMN IF NOT EXISTS fibra SMALLINT;
+
 UPDATE articulo ar
-   SET fibra = ird.fibra
-  FROM item_rollo_detalle ird
- WHERE ird.articulo_id = ar.id AND ar.fibra IS NULL;
+SET fibra = CASE
+    WHEN ar.nombre ILIKE '%poly%' THEN 2
+    ELSE COALESCE(
+        (SELECT MAX(p.fibra)
+         FROM partida p
+         WHERE p.articulo_id = ar.id
+           AND p.fibra IS NOT NULL),
+        1   -- fallback if no partida data at all
+    )
+END
+WHERE ar.fibra IS NULL
+  AND ar.id IN (SELECT DISTINCT articulo_id FROM partida WHERE articulo_id IS NOT NULL);
 
 -- 6. Attach standard trigger
 DROP TRIGGER IF EXISTS trg_bi_articulo_codigo_canon ON articulo;
@@ -152,4 +168,4 @@ FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
 
 -- ── item_rollo_detalle.fibra ────────────────────────────────────
 -- Drop fibra from item_rollo_detalle AFTER backfill above completes.
-ALTER TABLE item_rollo_detalle DROP COLUMN IF EXISTS fibra;
+ALTER TABLE IF EXISTS item_rollo_detalle DROP COLUMN IF EXISTS fibra;

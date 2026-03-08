@@ -120,7 +120,7 @@ BEGIN
         (p_datos->>'numero')::INT,
         (p_datos->>'fecha_emision')::DATE,
         (p_datos->>'fecha_vencimiento')::DATE,
-        COALESCE((p_datos->>'tipo_pago')::tipo_pago_enum, 'contado'),
+        COALESCE((p_datos->>'tipo_pago')::tipo_pago_enum, 'al contado'),
         COALESCE(p_datos->>'moneda', 'USD'),
         (p_datos->>'tipo_cambio')::NUMERIC,
         (p_datos->>'subtotal')::NUMERIC,

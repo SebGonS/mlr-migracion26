@@ -257,7 +257,7 @@ LEFT JOIN LATERAL (
 ) guias ON true
 LEFT JOIN LATERAL (
     SELECT COUNT(*) AS total_letras,
-           SUM(l.monto) FILTER (WHERE l.estado = 'pendiente') AS monto_letras_pendiente
+           SUM(l.monto) FILTER (WHERE l.estado = 'emitida') AS monto_letras_pendiente
     FROM doc.letra l WHERE l.factura_proveedor_id = c.factura_proveedor_id
 ) letras ON true;
 

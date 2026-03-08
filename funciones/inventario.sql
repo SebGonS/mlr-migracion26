@@ -203,13 +203,13 @@ BEGIN
             HINT    = 'Solo cuadres en borrador o preparado pueden ejecutarse';
     END IF;
 
-    -- Cache movement type IDs and default ALM-INS location
+    -- Cache movement type IDs and default ALM_INS location
     SELECT id INTO v_tipo_ajuste_neg FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG';
     SELECT id INTO v_tipo_ajuste_pos FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS';
     SELECT u.id INTO v_ubicacion_id
     FROM inventario.ubicacion u
     JOIN inventario.almacen a ON a.id = u.almacen_id
-    WHERE a.codigo = 'ALM-INS'
+    WHERE a.codigo = 'ALM_INS'
     LIMIT 1;
 
     -- One posting event for the entire cuadre
