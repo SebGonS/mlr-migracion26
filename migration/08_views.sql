@@ -50,7 +50,9 @@ HAVING SUM(im.cantidad * imt.factor) > 0;
 
 GRANT SELECT ON inventario.vw_stock_actual TO anon, authenticated;
 
+
 -- ── inventario.vw_lotes_rollos_stock ─────────────────────────
+DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock;
 CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_stock AS
 SELECT
     sa.lote_id,
@@ -192,13 +194,13 @@ SELECT
         ELSE NULL
     END AS duracion_horas,
     op.usr_cre,
-    prof.first_name || ' ' || prof.last_name AS creado_por
+    prof.nombre || ' ' || prof.apellido AS creado_por
 FROM mes.orden_produccion op
 JOIN doc.partida p ON p.id = op.partida_id
 LEFT JOIN cliente c ON c.id = p.cliente_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
 LEFT JOIN tenido t ON t.id = p.tenido_id
-LEFT JOIN profiles prof ON prof.id_usuario = op.usr_cre
+LEFT JOIN usuario prof ON prof.id = op.usr_cre
 LEFT JOIN LATERAL (
     SELECT
         COUNT(*) AS total_pasos,
@@ -222,7 +224,6 @@ LEFT JOIN LATERAL (
 GRANT SELECT ON mes.vw_ordenes_produccion TO anon, authenticated;
 
 -- ── doc.vw_compras ────────────────────────────────────────────
-DROP VIEW IF EXISTS doc.vw_compras;
 CREATE OR REPLACE VIEW doc.vw_compras AS
 SELECT
     c.id,

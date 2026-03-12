@@ -24,7 +24,8 @@ DO $$ DECLARE t TEXT; BEGIN
         'mes.maquina_tipo',
         'mes.maquina',
         'mes.empleado_rol',
-        'calidad.tipo_defecto'
+        'calidad.tipo_defecto',
+        'public.tercero'
     ] LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS trg_bu_immutable_codigo ON %s;
@@ -123,6 +124,10 @@ WHEN (NEW.secuencia IS NULL)
 EXECUTE FUNCTION inventario.trfn_generar_secuencia_lote();
 
 -- ── Per-table REVOKEs (audit/cre/mod/elm triggers are in step 12, after data migration) ───
+
+-----TERCERO
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod, usr_elm, fyh_elm) ON tercero FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                                      ON tercero FROM anon, authenticated;
 
 -----UNIDAD
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON unidad FROM anon, authenticated;

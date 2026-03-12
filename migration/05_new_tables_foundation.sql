@@ -283,7 +283,7 @@ CREATE TABLE inventario.lote (
     item_id int NOT NULL REFERENCES item(id),
     documento_tipo TEXT,
     documento_id BIGINT,
-    cantidad numeric(10,2) CHECK (cantidad > 0),
+    cantidad numeric(10,4) CHECK (cantidad > 0),
     detalles JSONB,
     estado_calidad calidad_estado_enum DEFAULT 'PENDIENTE',
     propietario_id int NULL REFERENCES cliente(id),
@@ -312,9 +312,9 @@ CREATE TABLE inventario.item_movimientos (
     item_movimiento_tipo_id smallint REFERENCES inventario.item_movimiento_tipo(id) NOT NULL,
     origen_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
     destino_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
-    cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    cantidad NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
     precio_unitario NUMERIC(12,4),                      -- NULL for non-valorizable movements (flg_valorizable=false)
-    monto NUMERIC(14,2) GENERATED ALWAYS AS (cantidad * precio_unitario) STORED,
+    monto NUMERIC(16,4) GENERATED ALWAYS AS (cantidad * precio_unitario) STORED,
     fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
     documento_tipo TEXT,
     documento_id int,
@@ -327,7 +327,7 @@ CREATE TABLE inventario.item_movimientos (
 CREATE TABLE inventario.item_valoracion (
     item_id         INT            PRIMARY KEY REFERENCES item(id),
     precio_promedio NUMERIC(12,4)  NOT NULL DEFAULT 0,
-    stock_qty       NUMERIC(12,2)  NOT NULL DEFAULT 0,
+    stock_qty       NUMERIC(12,4)  NOT NULL DEFAULT 0,
     stock_valorado  NUMERIC(16,4)  NOT NULL DEFAULT 0,
     fyh_mod         TIMESTAMPTZ    DEFAULT now()
 );
@@ -340,7 +340,7 @@ DECLARE
     v_flg_recalcula   boolean;
     v_factor          smallint;
     v_map             numeric(12,4);
-    v_stock_qty       numeric(12,2);
+    v_stock_qty       numeric(12,4);
     v_stock_valorado  numeric(16,4);
 BEGIN
     IF NEW.precio_unitario IS NULL THEN RETURN NEW; END IF;
@@ -408,9 +408,9 @@ CREATE TABLE inventario.cuadre (
     fecha_cuadre TIMESTAMPTZ NOT NULL DEFAULT now(),
     fecha_cierre TIMESTAMPTZ,
     estado       inventario.cuadre_estado_enum NOT NULL DEFAULT 'borrador',
-    usr_cre      INT  REFERENCES profiles(id_usuario),
+    usr_cre      INT  REFERENCES usuario(id),
     fyh_cre      TIMESTAMPTZ DEFAULT now(),
-    usr_mod      INT  REFERENCES profiles(id_usuario),
+    usr_mod      INT  REFERENCES usuario(id),
     fyh_mod      TIMESTAMPTZ
 );
 
@@ -423,7 +423,7 @@ CREATE TABLE inventario.cuadre_detalle (
     stock_valorado_sistema  NUMERIC(14,4),
     ult_precio_compra       NUMERIC(12,4),
     cantidad_contada        NUMERIC(12,4),
-    usr_mod                 INT  REFERENCES profiles(id_usuario),
+    usr_mod                 INT  REFERENCES usuario(id),
     fyh_mod                 TIMESTAMPTZ,
     UNIQUE (cuadre_id, item_id)
 );
@@ -442,4 +442,47 @@ FROM inventario.cuadre c;
 
 GRANT SELECT ON inventario.cuadre         TO authenticated;
 GRANT SELECT ON inventario.cuadre_detalle TO authenticated;
+
+-- ── tercero ───────────────────────────────────────────────────
+-- Master entity for all external trading parties (ERP concept: "tercero").
+-- Replaces the separate legacy `cliente` and `proveedor` tables as the
+-- canonical source of truth. flg_cliente / flg_proveedor indicate roles —
+-- a party can hold both simultaneously.
+-- cliente_id / proveedor_id are kept as migration cross-references only;
+-- they may be dropped once legacy tables are retired.
+-- Row id=1 = MLR (our own company), with both flags false.
+CREATE TABLE tercero (
+    id               INT  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo           TEXT NOT NULL UNIQUE,
+    codigo_canon     TEXT NOT NULL UNIQUE,
+    nombre           TEXT NOT NULL,              -- commercial / trade name
+    razon_social     TEXT,                       -- legal registered name (razón social)
+    ruc              TEXT UNIQUE,                -- 11-digit Peruvian tax ID
+    direccion        TEXT,
+    telefono         TEXT,
+    correo           TEXT,
+    procedencia      TEXT,                       -- country / region of origin
+    flg_cliente      BOOLEAN NOT NULL DEFAULT false,
+    flg_proveedor    BOOLEAN NOT NULL DEFAULT false,
+    -- Migration cross-references (nullable; removed once legacy tables are retired)
+    cliente_id       INT REFERENCES cliente(id),
+    proveedor_id     INT REFERENCES proveedor(id),
+    -- Audit
+    usr_cre INT REFERENCES usuario(id),
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT REFERENCES usuario(id),
+    fyh_mod TIMESTAMPTZ,
+    flg_elm BOOL DEFAULT false,
+    usr_elm INT,
+    fyh_elm TIMESTAMPTZ
+);
+
+CREATE TRIGGER trg_bi_tercero_codigo_canon
+BEFORE INSERT OR UPDATE ON tercero
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
+
+-- Row 1 = MLR (our own company)
+INSERT INTO tercero (codigo, nombre) VALUES ('MLR', 'Manufacturas la Real');
+
+GRANT SELECT ON tercero TO authenticated;
 GRANT SELECT ON inventario.vw_cuadre      TO authenticated;

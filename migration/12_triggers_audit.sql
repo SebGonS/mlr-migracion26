@@ -8,6 +8,16 @@
 -- Depends on: fn_trg_set_cre/mod/elm_fields (step 3), audit.fn_audit_row (step 9).
 -- ═══════════════════════════════════════════════════════════════
 
+-----TERCERO
+CREATE TRIGGER trg_biud_tercero_audit BEFORE INSERT OR UPDATE OR DELETE ON tercero
+    FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
+CREATE TRIGGER trg_bi_tercero_audit BEFORE INSERT ON tercero
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+CREATE TRIGGER trg_bu_tercero_audit BEFORE UPDATE ON tercero
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+CREATE TRIGGER trg_bu_tercero_elm   BEFORE UPDATE ON tercero
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_elm_fields();
+
 -----UNIDAD
 CREATE TRIGGER trg_bi_unidad_audit BEFORE INSERT ON unidad
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();

@@ -100,10 +100,8 @@ CREATE TABLE IF NOT EXISTS doc.guia_remision (
     guia_remision_tipo_id smallint NOT NULL REFERENCES doc.guia_remision_tipo(id),
     serie TEXT NOT NULL,
     correlativo TEXT NOT NULL,
-    emisor_cliente_id   INT,
-    emisor_proveedor_id INT,
-    receptor_cliente_id   INT,
-    receptor_proveedor_id INT,
+    emisor_id   INT NOT NULL REFERENCES tercero(id),
+    receptor_id INT NOT NULL REFERENCES tercero(id),
     fecha_emision TIMESTAMPTZ NOT NULL,
     fecha_recepcion TIMESTAMPTZ DEFAULT now(),
     usr_cre int,
@@ -113,8 +111,7 @@ CREATE TABLE IF NOT EXISTS doc.guia_remision (
     flg_elm BOOL DEFAULT false,
     usr_elm INT,
     fyh_elm TIMESTAMPTZ,
-    UNIQUE (serie, correlativo, emisor_proveedor_id),
-    UNIQUE (serie, correlativo, emisor_cliente_id)
+    UNIQUE (serie, correlativo, emisor_id)
 );
 
 -- ── doc.guia_remision_detalle ─────────────────────────────────
@@ -484,7 +481,7 @@ CREATE TABLE doc.compra_detalle (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     compra_id       BIGINT NOT NULL REFERENCES doc.compra(id),
     item_id         INT    NOT NULL REFERENCES item(id),
-    cantidad        NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    cantidad        NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
     precio_unitario NUMERIC(12,4) NOT NULL CHECK (precio_unitario >= 0),
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW()
 );

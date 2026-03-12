@@ -186,8 +186,8 @@ BEGIN
         PERFORM crear_item_insumo(p_item, v_item_id);
     END IF;
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Nuevo Item Creado', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó un nuevo item de tipo' || COALESCE(p_item->>'nombre','sin nombre'), 'info',jsonb_build_object('objeto_tipo','item','item_id',v_item_id)
-FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+SELECT ur.user_id,'Nuevo Item Creado', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' creó un nuevo item de tipo' || COALESCE(p_item->>'nombre','sin nombre'), 'info',jsonb_build_object('objeto_tipo','item','item_id',v_item_id)
+FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
    RETURN format('Item con ID %s creado correctamente.', v_item_id);
@@ -259,8 +259,8 @@ IF p_almacen ? 'ubicaciones' THEN
 END IF;
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Nuevo almacen y ubicaciones', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó un nuevo almacen y ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',v_almacen_id)
-FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+SELECT ur.user_id,'Nuevo almacen y ubicaciones', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' creó un nuevo almacen y ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',v_almacen_id)
+FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
    RETURN format('Almacen con ID %s creado correctamente.', v_almacen_id);
@@ -317,8 +317,8 @@ IF p_almacen ? 'ubicaciones' THEN
 END IF;
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Almacen y/o ubicaciones actualizadas', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' modifico un almacen y/o sus ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',v_almacen_id)
-FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+SELECT ur.user_id,'Almacen y/o ubicaciones actualizadas', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' modifico un almacen y/o sus ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',v_almacen_id)
+FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
    RETURN format('Almacen con ID %s modificado correctamente.', v_almacen_id);
@@ -362,8 +362,8 @@ DELETE FROM inventario.almacen WHERE id = p_almacen_id
 RETURNING nombre INTO v_almacen_nombre;
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Almacen eliminado', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' eliminó un almacen y sus ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',p_almacen_id)
-FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+SELECT ur.user_id,'Almacen eliminado', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' eliminó un almacen y sus ubicaciones', 'info',jsonb_build_object('objeto_tipo','almacen','almacen_id',p_almacen_id)
+FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
    RETURN format('Almacen %s eliminado ', v_almacen_nombre);
@@ -477,8 +477,8 @@ BEGIN
 
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Nueva Partida Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva partida', 'info',jsonb_build_object('objeto_tipo','partida','partida_id',v_partida_id)
-FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+SELECT ur.user_id,'Nueva Partida Creada', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' creó una nueva partida', 'info',jsonb_build_object('objeto_tipo','partida','partida_id',v_partida_id)
+FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
    RETURN format('Partida con ID %s creada correctamente.', v_partida_id);
@@ -583,14 +583,14 @@ ON CONFLICT (partida_id, item_id) DO UPDATE
     SELECT ur.user_id,
            'Partida Modificada',
            COALESCE(
-               (SELECT COALESCE(first_name, 'Usuario desconocido') || ' ' || last_name
-                FROM profiles WHERE id_usuario = v_usr_id),
+               (SELECT COALESCE(nombre, 'Usuario desconocido') || ' ' || apellido
+                FROM usuario WHERE id = v_usr_id),
                'sistema'
            ) || ' modificó la partida #' || p_partida_id,
            'info',
            jsonb_build_object('objeto_tipo', 'partida', 'partida_id', p_partida_id)
     FROM iam.user_rol ur
-    LEFT JOIN profiles p ON p.id_usuario = ur.user_id
+    LEFT JOIN usuario p ON p.id = ur.user_id
     LEFT JOIN iam.rol r ON ur.rol_id = r.id
     WHERE r.code IN ('jefe_planta', 'compras')
       AND v_usr_id <> ur.user_id;
@@ -1044,14 +1044,14 @@ WITH orden_rollos AS (
     SELECT ur.user_id,
            'Nueva Orden de Producción',
            COALESCE(
-               (SELECT COALESCE(first_name, 'Usuario desconocido') || ' ' || last_name
-                FROM profiles WHERE id_usuario = v_usr_id),
+               (SELECT COALESCE(nombre, 'Usuario desconocido') || ' ' || apellido
+                FROM usuario WHERE id = v_usr_id),
                'sistema'
            ) || ' creó la orden de producción #' || v_orden_id,
            'info',
            jsonb_build_object('objeto_tipo', 'orden_produccion', 'orden_produccion_id', v_orden_id)
     FROM iam.user_rol ur
-    LEFT JOIN profiles p ON p.id_usuario = ur.user_id
+    LEFT JOIN usuario p ON p.id = ur.user_id
     LEFT JOIN iam.rol r ON ur.rol_id = r.id
     WHERE r.code IN ('jefe_planta', 'compras')
       AND v_usr_id <> ur.user_id;
@@ -1444,8 +1444,8 @@ INSERT INTO ruta_plantilla_detalle (ruta_plantilla_id, operacion_id, secuencia, 
            FROM jsonb_array_elements(p_plantilla->'plantilla_detalles') AS detalle;
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Nueva Plantilla Creada', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva plantilla', 'info',jsonb_build_object('objeto_tipo','plantilla','plantilla_id',v_plantilla_id)
-FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+SELECT ur.user_id,'Nueva Plantilla Creada', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' creó una nueva plantilla', 'info',jsonb_build_object('objeto_tipo','plantilla','plantilla_id',v_plantilla_id)
+FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
    RETURN format('Plantilla con ID %s creada correctamente.', v_plantilla_id);
@@ -1583,44 +1583,44 @@ IF v_guia_tipo.flg_emitida THEN
                 DETAIL  = v_error_payload::text;
     END IF;
 -----------------------------------------------------------------------------------------------------------------------
-    IF v_guia_tipo.flg_cliente AND (p_guia->>'receptor_cliente_id') IS NULL THEN
-        RAISE EXCEPTION 'Guía inválida: se esperaba receptor_cliente_id para documento de cliente emitido';
-    ELSIF NOT v_guia_tipo.flg_cliente AND (p_guia->>'receptor_proveedor_id') IS NULL THEN
-        RAISE EXCEPTION 'Guía inválida: se esperaba receptor_proveedor_id para documento de proveedor emitido';
+    IF (p_guia->>'receptor_id') IS NULL THEN
+        RAISE EXCEPTION 'Guía inválida: se esperaba receptor_id';
+    END IF;
+    IF v_guia_tipo.flg_cliente AND NOT EXISTS (
+        SELECT 1 FROM tercero WHERE id = (p_guia->>'receptor_id')::INT AND flg_cliente = true
+    ) THEN
+        RAISE EXCEPTION 'Guía inválida: receptor_id % no corresponde a un cliente', (p_guia->>'receptor_id');
+    ELSIF NOT v_guia_tipo.flg_cliente AND NOT EXISTS (
+        SELECT 1 FROM tercero WHERE id = (p_guia->>'receptor_id')::INT AND flg_proveedor = true
+    ) THEN
+        RAISE EXCEPTION 'Guía inválida: receptor_id % no corresponde a un proveedor', (p_guia->>'receptor_id');
     END IF;
 ELSE
     -- incoming
-    IF v_guia_tipo.flg_cliente AND (p_guia->>'emisor_cliente_id') IS NULL THEN
-        RAISE EXCEPTION 'Guía inválida: se esperaba emisor_cliente_id para documento de cliente recibido';
-    ELSIF NOT v_guia_tipo.flg_cliente AND (p_guia->>'emisor_proveedor_id') IS NULL THEN
-        RAISE EXCEPTION 'Guía inválida: se esperaba emisor_proveedor_id para documento de proveedor recibido';
+    IF (p_guia->>'emisor_id') IS NULL THEN
+        RAISE EXCEPTION 'Guía inválida: se esperaba emisor_id';
+    END IF;
+    IF v_guia_tipo.flg_cliente AND NOT EXISTS (
+        SELECT 1 FROM tercero WHERE id = (p_guia->>'emisor_id')::INT AND flg_cliente = true
+    ) THEN
+        RAISE EXCEPTION 'Guía inválida: emisor_id % no corresponde a un cliente', (p_guia->>'emisor_id');
+    ELSIF NOT v_guia_tipo.flg_cliente AND NOT EXISTS (
+        SELECT 1 FROM tercero WHERE id = (p_guia->>'emisor_id')::INT AND flg_proveedor = true
+    ) THEN
+        RAISE EXCEPTION 'Guía inválida: emisor_id % no corresponde a un proveedor', (p_guia->>'emisor_id');
     END IF;
 END IF;
 
  INSERT INTO logs_api(function_name, user_id, params)
         VALUES ('crear_guia', v_usr_id, p_guia);
 
-    INSERT INTO doc.guia_remision(guia_remision_tipo_id, serie, correlativo, emisor_cliente_id, emisor_proveedor_id, receptor_cliente_id, receptor_proveedor_id, fecha_emision, fecha_recepcion)
+    INSERT INTO doc.guia_remision(guia_remision_tipo_id, serie, correlativo, emisor_id, receptor_id, fecha_emision, fecha_recepcion)
     VALUES (
         (p_guia->>'guia_remision_tipo_id')::INT,
         p_guia->>'serie',
         p_guia->>'correlativo',
-        CASE
-            WHEN p_guia ? 'emisor_cliente_id' THEN (p_guia->>'emisor_cliente_id')::INT
-            ELSE NULL
-        END,
-        CASE
-            WHEN p_guia ? 'emisor_proveedor_id' THEN (p_guia->>'emisor_proveedor_id')::INT
-            ELSE NULL
-        END,
-        CASE
-            WHEN p_guia ? 'receptor_cliente_id' THEN (p_guia->>'receptor_cliente_id')::INT
-            ELSE NULL
-        END,
-        CASE
-            WHEN p_guia ? 'receptor_proveedor_id' THEN (p_guia->>'receptor_proveedor_id')::INT
-            ELSE NULL
-        END,
+        (p_guia->>'emisor_id')::INT,
+        (p_guia->>'receptor_id')::INT,
         (p_guia->>'fecha_emision')::TIMESTAMPTZ,
         CASE
             WHEN v_guia_tipo.flg_emitida THEN NULL
@@ -1752,8 +1752,8 @@ INSERT INTO inventario.item_movimientos (doc_movimiento_id, item_id, lote_id, it
     FROM nuevos_lotes nl;
 END IF;
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Nueva Guia y movimientos', COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name FROM profiles WHERE id_usuario=v_usr_id),'sistema') || ' creó una nueva guía de remisión y generó movimientos de inventario', 'info',jsonb_build_object('objeto_tipo','guia_remision','guia_remision_id',v_guia_id)
-FROM iam.user_rol ur LEFT JOIN profiles p ON p.id_usuario=ur.user_id
+SELECT ur.user_id,'Nueva Guia y movimientos', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' creó una nueva guía de remisión y generó movimientos de inventario', 'info',jsonb_build_object('objeto_tipo','guia_remision','guia_remision_id',v_guia_id)
+FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
    RETURN format('Guía de remisión con ID %s creada correctamente.', v_guia_id);
@@ -1793,14 +1793,14 @@ SELECT jsonb_build_object(
     'correlativo', gr.correlativo,
     'fecha_emision', gr.fecha_emision,
     'fecha_recepcion', gr.fecha_recepcion,
-    'emisor_cliente_id', gr.emisor_cliente_id,
-    'emisor_cliente', ec.cliente,
-    'emisor_proveedor_id', gr.emisor_proveedor_id,
-    'emisor_proveedor', ep.proveedor,
-    'receptor_cliente_id', gr.receptor_cliente_id,
-    'receptor_cliente', rc.cliente,
-    'receptor_proveedor_id', gr.receptor_proveedor_id,
-    'receptor_proveedor', rp.proveedor,
+    'emisor_id', gr.emisor_id,
+    'emisor_codigo', et.codigo,
+    'emisor', COALESCE(et.nombre, 'MLR'),
+    'emisor_ruc', et.ruc,
+    'receptor_id', gr.receptor_id,
+    'receptor_codigo', rt.codigo,
+    'receptor', COALESCE(rt.nombre, 'MLR'),
+    'receptor_ruc', rt.ruc,
     'fyh_cre', gr.fyh_cre,
     'detalles', (
         SELECT COALESCE(jsonb_agg(
@@ -1827,10 +1827,8 @@ SELECT jsonb_build_object(
 )
 FROM doc.guia_remision gr
 LEFT JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
-LEFT JOIN cliente ec ON ec.id = gr.emisor_cliente_id
-LEFT JOIN proveedor ep ON ep.id = gr.emisor_proveedor_id
-LEFT JOIN cliente rc ON rc.id = gr.receptor_cliente_id
-LEFT JOIN proveedor rp ON rp.id = gr.receptor_proveedor_id
+LEFT JOIN tercero et ON et.id = gr.emisor_id
+LEFT JOIN tercero rt ON rt.id = gr.receptor_id
 WHERE gr.id = p_guia_id;
 $$;
 

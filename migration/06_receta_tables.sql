@@ -83,9 +83,9 @@ CREATE TABLE receta.tenido (
     estado_id          SMALLINT NOT NULL REFERENCES estado_desarrollo_color(id),
     flg_produccion     BOOLEAN  NOT NULL DEFAULT false,
     fyh_produccion     TIMESTAMPTZ,
-    usr_cre            INT      REFERENCES profiles(id_usuario),
+    usr_cre            INT      REFERENCES usuario(id),
     fyh_cre            TIMESTAMPTZ DEFAULT now(),
-    usr_mod            INT      REFERENCES profiles(id_usuario),
+    usr_mod            INT      REFERENCES usuario(id),
     fyh_mod            TIMESTAMPTZ
 );
 
@@ -137,9 +137,9 @@ CREATE TABLE receta.lavado_maquina (
     valor_origen_id   SMALLINT REFERENCES valor(id),
     valor_destino_id  SMALLINT REFERENCES valor(id),
     flg_activo        BOOLEAN  DEFAULT true,
-    usr_cre           INT      REFERENCES profiles(id_usuario),
+    usr_cre           INT      REFERENCES usuario(id),
     fyh_cre           TIMESTAMPTZ DEFAULT now(),
-    usr_mod           INT      REFERENCES profiles(id_usuario),
+    usr_mod           INT      REFERENCES usuario(id),
     fyh_mod           TIMESTAMPTZ
 );
 

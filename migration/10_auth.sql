@@ -27,12 +27,12 @@ DECLARE
   v_permissions text[];
   v_role_codes  text[];
 BEGIN
-  -- Bridge auth UUID → numeric id_usuario
-  SELECT id_usuario INTO v_numeric_id
-  FROM public.profiles
-  WHERE id = (event->>'user_id')::uuid;
+  -- Bridge auth UUID → numeric id
+  SELECT id INTO v_numeric_id
+  FROM public.usuario
+  WHERE auth_id = (event->>'user_id')::uuid;
 
-  -- No profile = no permissions, id_usuario stays NULL.
+  -- No usuario row = no permissions, id_usuario JWT claim stays NULL.
   IF v_numeric_id IS NULL THEN
     claims := event->'claims';
     claims := jsonb_set(claims, '{user_permissions}', '[]'::jsonb);
@@ -208,12 +208,12 @@ CREATE POLICY "calidad_ver" ON calidad.inspeccion_foto    FOR SELECT TO authenti
 
 
 -- -----------------------------------------------------------------------------
--- TIER 3: Profiles & IAM
+-- TIER 3: Usuario & IAM
 -- -----------------------------------------------------------------------------
 
-ALTER TABLE public.profiles  ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "own_row"        ON public.profiles FOR SELECT TO authenticated USING (auth.uid() = id);
-CREATE POLICY "admin_read_all" ON public.profiles FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
+ALTER TABLE public.usuario  ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "own_row"        ON public.usuario FOR SELECT TO authenticated USING (auth.uid() = auth_id);
+CREATE POLICY "admin_read_all" ON public.usuario FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
 
 ALTER TABLE iam.rol ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "auth_read" ON iam.rol FOR SELECT TO authenticated USING (true);

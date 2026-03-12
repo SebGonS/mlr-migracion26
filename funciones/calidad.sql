@@ -60,8 +60,8 @@ BEGIN
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id,
            'Nueva Inspección de Calidad',
-           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
-                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido
+                     FROM usuario WHERE id = v_usr_id), 'sistema')
              || ' registró una inspección con resultado '
              || (p_inspeccion->>'resultado'),
            'info',

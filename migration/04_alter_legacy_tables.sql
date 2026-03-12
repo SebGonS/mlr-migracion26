@@ -169,3 +169,42 @@ FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
 -- ── item_rollo_detalle.fibra ────────────────────────────────────
 -- Drop fibra from item_rollo_detalle AFTER backfill above completes.
 ALTER TABLE IF EXISTS item_rollo_detalle DROP COLUMN IF EXISTS fibra;
+
+-- ── profiles → usuario ───────────────────────────────────────────
+-- Rename legacy Supabase profiles table and its columns to Spanish conventions.
+-- id (uuid, FK to auth.users) → auth_id
+-- id_usuario (integer, true PK) → id
+-- first_name → nombre, last_name → apellido
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'profiles') THEN
+        ALTER TABLE public.profiles RENAME TO usuario;
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'usuario' AND column_name = 'id') THEN
+        ALTER TABLE public.usuario RENAME COLUMN id TO auth_id;
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'usuario' AND column_name = 'id_usuario') THEN
+        ALTER TABLE public.usuario RENAME COLUMN id_usuario TO id;
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'usuario' AND column_name = 'first_name') THEN
+        ALTER TABLE public.usuario RENAME COLUMN first_name TO nombre;
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'usuario' AND column_name = 'last_name') THEN
+        ALTER TABLE public.usuario RENAME COLUMN last_name TO apellido;
+    END IF;
+END $$;

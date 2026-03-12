@@ -407,8 +407,8 @@ BEGIN
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Receta Generada',
-           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
-                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido
+                     FROM usuario WHERE id = v_usr_id), 'sistema')
            || format(' generó la receta del paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
            jsonb_build_object('objeto_tipo','orden_produccion_paso','paso_id', p_paso_id, 'orden_produccion_id', v_orden_id)
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
@@ -500,8 +500,8 @@ BEGIN
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Paso Iniciado',
-           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
-                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido
+                     FROM usuario WHERE id = v_usr_id), 'sistema')
            || format(' inició el paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
            jsonb_build_object('objeto_tipo','orden_produccion_paso','paso_id', p_paso_id, 'orden_produccion_id', v_orden_id)
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
@@ -592,7 +592,7 @@ v_consumos:= mes.calcular_fifo(p_consumos);
             (v_consumo->>'lote_id')::INT,
             v_egr_tipo_id,
             (v_consumo->>'ubicacion_id')::INT,
-            (v_consumo->>'cantidad')::NUMERIC(12,2),
+            (v_consumo->>'cantidad')::NUMERIC,
             (SELECT iv.precio_promedio FROM inventario.item_valoracion iv
              WHERE iv.item_id = (v_consumo->>'item_id')::INT),
             'ORDEN_PRODUCCION_PASO',
@@ -1081,7 +1081,7 @@ FOR UPDATE;
     WITH input_items AS (
         SELECT
             (i->>'item_id')::INT AS item_id,
-            (i->>'cantidad')::NUMERIC(10,2) AS cantidad
+            (i->>'cantidad')::NUMERIC AS cantidad
         FROM jsonb_array_elements(p_output) i
     ),
     insert_lotes AS (
@@ -1113,8 +1113,8 @@ FROM insert_lotes;
     -- 5. Notifications
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Producción Registrada',
-           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
-                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido
+                     FROM usuario WHERE id = v_usr_id), 'sistema')
            || format(' registró %s lotes de producción en orden #%s', jsonb_array_length(p_output), v_orden_id), 'info',
            jsonb_build_object('objeto_tipo','orden_produccion','orden_produccion_id', v_orden_id)
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
@@ -1203,8 +1203,8 @@ BEGIN
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Paso Completado',
-           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
-                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido
+                     FROM usuario WHERE id = v_usr_id), 'sistema')
            || format(' completó el paso %s (orden #%s)', v_op_nombre, v_orden_id), 'info',
            jsonb_build_object('objeto_tipo','orden_produccion_paso','paso_id', p_paso_id, 'orden_produccion_id', v_orden_id)
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
@@ -1261,8 +1261,8 @@ BEGIN
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Lavado Iniciado',
-           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
-                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido
+                     FROM usuario WHERE id = v_usr_id), 'sistema')
            || format(' inició lavado de maquina #%s', v_maquina_id), 'info',
            jsonb_build_object('objeto_tipo','lavado_maquina','lavado_id', p_lavado_id)
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
@@ -1355,7 +1355,7 @@ BEGIN
             (v_consumo->>'lote_id')::INT,
             v_egr_tipo_id,
             (v_consumo->>'ubicacion_id')::INT,
-            (v_consumo->>'cantidad')::NUMERIC(12,2),
+            (v_consumo->>'cantidad')::NUMERIC,
             (SELECT iv.precio_promedio FROM inventario.item_valoracion iv
              WHERE iv.item_id = (v_consumo->>'item_id')::INT),
             'LAVADO_MAQUINA',
@@ -1377,8 +1377,8 @@ BEGIN
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Lavado Completado',
-           COALESCE((SELECT COALESCE(first_name,'Usuario desconocido') || ' ' || last_name
-                     FROM profiles WHERE id_usuario = v_usr_id), 'sistema')
+           COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido
+                     FROM usuario WHERE id = v_usr_id), 'sistema')
            || format(' completó lavado de maquina #%s', v_maquina_id), 'info',
            jsonb_build_object('objeto_tipo','lavado_maquina','lavado_id', p_lavado_id)
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id

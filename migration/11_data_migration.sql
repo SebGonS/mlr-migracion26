@@ -448,6 +448,10 @@ SELECT
 FROM ins
 JOIN base b ON b.codigo = ins.codigo;
 
+-- Item 13 is purchased as solid but recipes reference it in diluted form (1:6 ratio).
+-- factor_stock = 1/6 so generar_receta yields the correct solid-equivalent kg.
+UPDATE item_insumo_detalle SET factor_stock = 1.0/6.0 WHERE item_id = 13;
+
 -- Advance sequence so roll items get IDs above all insumo IDs
 SELECT setval(pg_get_serial_sequence('item', 'id'), (SELECT MAX(id) FROM item));
 
@@ -1404,25 +1408,22 @@ INSERT INTO inventario.lote(
     id,item_id,cantidad,usr_cre,fyh_cre
 )
 OVERRIDING SYSTEM VALUE
-SELECT i.id, it.id, i.cantidad, i.usr_cre, i.fyh_cre
+SELECT
+    i.id,
+    COALESCE(ip.insumo_id, i.insumo_id)  AS item_id,
+    i.cantidad,
+    i.usr_cre,
+    i.fyh_cre
 FROM inventario i
-LEFT JOIN insumo_x_proveedor ip ON ip.id=i.insumo_x_proveedor_id
-LEFT JOIN item it ON it.id=ip.insumo_id
-WHERE i.cantidad>0
-GROUP BY 1,2,3,4,5
-;
+LEFT JOIN insumo_x_proveedor         ip  ON ip.id  = i.insumo_x_proveedor_id
+WHERE i.cantidad > 0.00
+  AND COALESCE(ip.insumo_id, i.insumo_id) IS NOT NULL;
+
 
 SELECT setval(
     pg_get_serial_sequence('inventario.lote', 'id'),
     (SELECT MAX(id) FROM inventario.lote)
 );
-
-UPDATE inventario.lote 
-SET item_id = item.id
-FROM inventario i 
-JOIN entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id=eid.id
-LEFT JOIN item ON item.id = eid.insumo_id
-WHERE i.id=inventario.lote.id and item_id IS NULL
 
 
 
@@ -1605,6 +1606,35 @@ WHERE dc.factura_proveedor_id IS NOT NULL;
 
 -- ============================================================================
 
+-- ── tercero population ───────────────────────────────
+-- id=1 (MLR / our company) was inserted in step 5 with codigo='MLR'.
+-- Proveedores first, then clientes. codigo generated as 'PROV{id}' / 'CLI{id}'
+-- to guarantee uniqueness; update manually to meaningful codes post-migration.
+-- codigo_canon is set automatically by trg_bi_tercero_codigo_canon.
+
+INSERT INTO tercero (proveedor_id, codigo, nombre, flg_proveedor, fyh_cre)
+    SELECT
+        id,
+        'PROV' || id::text,
+        proveedor,
+        true,
+        COALESCE(fyh_cre_tz, fyh_cre::timestamptz, now())
+    FROM proveedor
+    ORDER BY id;
+
+INSERT INTO tercero (cliente_id, codigo, nombre, ruc, correo, procedencia, flg_cliente, fyh_cre)
+    SELECT
+        id,
+        'CLI' || id::text,
+        cliente,
+        NULLIF(ruc, ''),
+        NULLIF(correo, ''),
+        NULLIF(procedencia, ''),
+        true,
+        COALESCE(fyh_cre_tz, fyh_cre::timestamptz, now())
+    FROM cliente
+    ORDER BY id;
+
 ----CONFIGURAR GUIAS y
 -- TRUNCATE TABLE doc.guia_remision_detalle,doc.guia_remision,doc.compra_guia_remision;
 WITH 
@@ -1642,19 +1672,20 @@ compra_data AS (
 ),
 inserted_guias AS (
     INSERT INTO doc.guia_remision (
-        guia_remision_tipo_id, serie, correlativo, 
-        emisor_proveedor_id, fecha_emision, usr_cre, fyh_cre
+        guia_remision_tipo_id, serie, correlativo,
+        emisor_id, receptor_id, fecha_emision, usr_cre, fyh_cre
     )
-    SELECT 
+    SELECT
         (SELECT id FROM doc.guia_remision_tipo WHERE codigo = 'COMPRA_INGRESO'),
         serie,
         correlativo,
-        proveedor_id,
+        (SELECT id FROM tercero WHERE proveedor_id = cd.proveedor_id),
+        1,  -- receptor = MLR (our company)
         fecha_remision::date,
         usr_cre,
         fyh_cre
-    FROM compra_data
-    GROUP BY 1,2,3,4,5,6,7
+    FROM compra_data cd
+    GROUP BY 1,2,3,4,5,6,7,8
     RETURNING id, serie, correlativo
 ),inserted_compra_guias_remision AS (
     INSERT INTO doc.compra_guia_remision(guia_remision_id,compra_id)
