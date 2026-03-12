@@ -48,7 +48,7 @@ FROM (
     LEFT JOIN mes.orden_produccion op        ON op.id = opp.orden_produccion_id
     LEFT JOIN doc.partida p                  ON p.id = op.partida_id
     LEFT JOIN tenido t                       ON t.id = p.tenido_id
-    LEFT JOIN cliente c                      ON c.id = p.cliente_id
+    LEFT JOIN tercero c                      ON c.id = p.tercero_id
     LEFT JOIN vw_colores vc                  ON vc.color_x_cliente_id = p.color_x_cliente_id
     LEFT JOIN partida_resumen_tenido vpa     ON vpa.partida_id = p.id
     LEFT JOIN mes.lavado_maquina lm          ON prog.actividad_tipo = 'LAVADO_MAQUINA' AND lm.id = prog.actividad_id
@@ -84,7 +84,7 @@ FROM (
     JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
     JOIN doc.partida p ON p.id = op.partida_id
     LEFT JOIN tenido t ON t.id = p.tenido_id
-    LEFT JOIN cliente c ON c.id = p.cliente_id
+    LEFT JOIN tercero c ON c.id = p.tercero_id
     LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
     WHERE opp.estado = 'PENDIENTE'
       AND NOT EXISTS (
@@ -126,7 +126,7 @@ FROM (
     JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
     JOIN doc.partida p ON p.id = op.partida_id
     LEFT JOIN tenido t ON t.id = p.tenido_id
-    LEFT JOIN cliente c ON c.id = p.cliente_id
+    LEFT JOIN tercero c ON c.id = p.tercero_id
     LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
     WHERE opp.estado = 'PENDIENTE'
       AND NOT EXISTS (
@@ -340,8 +340,8 @@ BEGIN
     SELECT jsonb_build_object(
         'receta_id',         opp.receta_id,
         'partida_id',        p.id,
-        'cliente_id',        p.cliente_id,
-        'cliente',           cli.cliente,
+        'tercero_id',        p.tercero_id,
+        'cliente',           cli.nombre,
         'orden_produccion_id', op.id,
         'tipo_receta',       tr.tipo_receta,
         'articulo_id',       ar.id,
@@ -402,7 +402,7 @@ BEGIN
     LEFT JOIN tipo_receta tr      ON tr.id  = r.tipo_receta_id
     JOIN articulo ar              ON ar.id  = r.articulo_id
     LEFT JOIN articulo_tipo at    ON at.id  = ar.articulo_tipo_id
-    LEFT JOIN cliente cli         ON cli.id = p.cliente_id
+    LEFT JOIN tercero cli         ON cli.id = p.tercero_id
     WHERE opp.id = p_paso_id;
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
@@ -1035,7 +1035,7 @@ FOR UPDATE;
     END IF;
 
     -- 3. Build lote detalles from partida specs
-    SELECT p.cliente_id,
+    SELECT p.tercero_id,
            jsonb_build_object(
                'tenido_id', p.tenido_id,
                'color_x_cliente_id', p.color_x_cliente_id,

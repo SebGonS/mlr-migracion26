@@ -79,7 +79,7 @@ SELECT
     vc.color_hex,
     vc.color_x_cliente_hex,
     c.id AS propietario_id,
-    c.cliente AS propietario
+    c.nombre AS propietario
 FROM inventario.vw_stock_actual sa
 JOIN inventario.lote l ON l.id = sa.lote_id
 JOIN item i ON i.id = sa.item_id
@@ -90,7 +90,7 @@ JOIN unidad un ON un.id = i.unidad_id
 JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
 JOIN inventario.almacen a ON a.id = u.almacen_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
-LEFT JOIN cliente c ON c.id = l.propietario_id
+LEFT JOIN tercero c ON c.id = l.propietario_id
 WHERE it.codigo = 'ROLLO'
 ORDER BY a.nombre, u.nombre, i.nombre;
 
@@ -102,8 +102,8 @@ SELECT
     p.numero,
     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS codigo,
     p.estado,
-    p.cliente_id,
-    c.cliente,
+    p.tercero_id,
+    c.nombre AS cliente,
     p.prioridad_id,
     pri.prioridad,
     p.tenido_id,
@@ -134,7 +134,7 @@ SELECT
     p.usr_cre,
     p.fyh_cre
 FROM doc.partida p
-LEFT JOIN cliente c ON c.id = p.cliente_id
+LEFT JOIN tercero c ON c.id = p.tercero_id
 LEFT JOIN prioridad pri ON pri.id = p.prioridad_id
 LEFT JOIN tenido t ON t.id = p.tenido_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
@@ -166,8 +166,8 @@ SELECT
     p.numero AS partida_numero,
     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
     p.estado AS partida_estado,
-    c.id AS cliente_id,
-    c.cliente,
+    c.id AS tercero_id,
+    c.nombre AS cliente,
     vc.color_id,
     vc.color,
     vc.tono,
@@ -197,7 +197,7 @@ SELECT
     prof.nombre || ' ' || prof.apellido AS creado_por
 FROM mes.orden_produccion op
 JOIN doc.partida p ON p.id = op.partida_id
-LEFT JOIN cliente c ON c.id = p.cliente_id
+LEFT JOIN tercero c ON c.id = p.tercero_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
 LEFT JOIN tenido t ON t.id = p.tenido_id
 LEFT JOIN usuario prof ON prof.id = op.usr_cre
@@ -227,8 +227,8 @@ GRANT SELECT ON mes.vw_ordenes_produccion TO anon, authenticated;
 CREATE OR REPLACE VIEW doc.vw_compras AS
 SELECT
     c.id,
-    c.proveedor_id,
-    p.proveedor AS proveedor_nombre,
+    c.tercero_id,
+    p.nombre AS proveedor_nombre,
     c.fecha,
     c.factura_proveedor_id,
     fp.serie                  AS factura_serie,
@@ -246,7 +246,7 @@ SELECT
     c.usr_cre,
     c.fyh_cre
 FROM doc.compra c
-JOIN proveedor p ON p.id = c.proveedor_id
+JOIN tercero p ON p.id = c.tercero_id
 LEFT JOIN doc.factura_proveedor fp ON fp.id = c.factura_proveedor_id
 LEFT JOIN LATERAL (
     SELECT COUNT(*) AS total_items, SUM(cd.cantidad * cd.precio_unitario) AS monto_total

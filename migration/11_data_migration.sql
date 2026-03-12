@@ -763,7 +763,7 @@ LEFT JOIN estado e ON ue.estado_id = e.id)
     id,
     numero,
     prioridad_id,
-    cliente_id,
+    tercero_id,
     color_x_cliente_id,
     tenido_id,
     malla,
@@ -781,7 +781,7 @@ SELECT
     p.id,          -- same id as old partida
     p.codigo,
     p.prioridad_id,
-    p.cliente_id,
+    (SELECT t.id FROM tercero t WHERE t.cliente_id = p.cliente_id),  -- bridge legacy → tercero
     p.color_x_cliente_id,
     p.tenido_id,
     p.malla,

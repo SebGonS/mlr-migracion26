@@ -85,7 +85,7 @@ CREATE TYPE maquina_estado_enum AS ENUM (
 );
 
 -- ── Compras ────────────────────────────────────────────────────
-SELECT * FROM vw_tipo_pago;
+
 
 DO $$
 BEGIN
@@ -102,6 +102,31 @@ END $$;
 DO $$
 BEGIN
     CREATE TYPE letra_estado_enum AS ENUM ('emitida', 'pagada', 'vencida', 'protestada', 'anulada');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ── Facturación ────────────────────────────────────────────────
+
+DO $$
+BEGIN
+    -- Lifecycle state of an emitted customer invoice
+    CREATE TYPE factura_estado_enum AS ENUM (
+        'borrador',   -- being built, not yet sent
+        'emitida',    -- issued to client (sent / printed / FE submitted)
+        'anulada'     -- voided (requires nota de crédito in SUNAT context)
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    -- Billing progress on a sales order (partida), independent of production state.
+    -- partida.estado tracks operational lifecycle; this tracks financial closure.
+    CREATE TYPE partida_facturacion_enum AS ENUM (
+        'pendiente',  -- no invoice issued yet
+        'parcial',    -- at least one invoice line issued, not fully billed
+        'facturado'   -- 100% of order value invoiced
+    );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 

@@ -286,7 +286,7 @@ CREATE TABLE inventario.lote (
     cantidad numeric(10,4) CHECK (cantidad > 0),
     detalles JSONB,
     estado_calidad calidad_estado_enum DEFAULT 'PENDIENTE',
-    propietario_id int NULL REFERENCES cliente(id),
+    propietario_id int NULL REFERENCES tercero(id),
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,

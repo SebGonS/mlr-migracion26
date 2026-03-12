@@ -28,16 +28,16 @@ BEGIN
             WHERE gr.id IN (
                 SELECT jsonb_array_elements_text(p_datos->'guia_ids')::bigint
             )
-            AND gr.emisor_proveedor_id IS DISTINCT FROM (p_datos->>'proveedor_id')::INT
+            AND gr.emisor_id IS DISTINCT FROM (p_datos->>'tercero_id')::INT
         ) THEN
             RAISE EXCEPTION 'Una o más guías no pertenecen al proveedor indicado.';
         END IF;
     END IF;
 
     -- Insert header
-    INSERT INTO doc.compra(proveedor_id, fecha, observacion, usr_cre)
+    INSERT INTO doc.compra(tercero_id, fecha, observacion, usr_cre)
     VALUES (
-        (p_datos->>'proveedor_id')::INT,
+        (p_datos->>'tercero_id')::INT,
         COALESCE((p_datos->>'fecha')::DATE, CURRENT_DATE),
         p_datos->>'observacion',
         v_usr_id
@@ -108,14 +108,14 @@ BEGIN
     END IF;
 
     INSERT INTO doc.factura_proveedor(
-        proveedor_id, serie, numero,
+        tercero_id, serie, numero,
         fecha_emision, fecha_vencimiento,
         tipo_pago, moneda, tipo_cambio,
         subtotal, igv, total,
         observacion, usr_cre
     )
     VALUES (
-        (p_datos->>'proveedor_id')::INT,
+        (p_datos->>'tercero_id')::INT,
         p_datos->>'serie',
         (p_datos->>'numero')::INT,
         (p_datos->>'fecha_emision')::DATE,
@@ -313,18 +313,18 @@ DECLARE
     v_proveedor  int;
     v_linked     int;
 BEGIN
-    SELECT proveedor_id INTO v_proveedor
+    SELECT tercero_id INTO v_proveedor
     FROM doc.compra WHERE id = p_compra_id;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Compra #% no encontrada.', p_compra_id;
     END IF;
 
-    -- All guias must belong to the same proveedor as the compra
+    -- All guias must belong to the same tercero as the compra
     IF EXISTS (
         SELECT 1 FROM doc.guia_remision
         WHERE id IN (SELECT jsonb_array_elements_text(p_guia_ids)::bigint)
-          AND emisor_proveedor_id IS DISTINCT FROM v_proveedor
+          AND emisor_id IS DISTINCT FROM v_proveedor
     ) THEN
         RAISE EXCEPTION 'Una o más guías no pertenecen al proveedor de la compra #%.', p_compra_id;
     END IF;
@@ -364,13 +364,13 @@ DECLARE
     v_compra_prov     int;
     v_factura_prov    int;
 BEGIN
-    SELECT proveedor_id INTO v_compra_prov
+    SELECT tercero_id INTO v_compra_prov
     FROM doc.compra WHERE id = p_compra_id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Compra #% no encontrada.', p_compra_id;
     END IF;
 
-    SELECT proveedor_id INTO v_factura_prov
+    SELECT tercero_id INTO v_factura_prov
     FROM doc.factura_proveedor WHERE id = p_factura_id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Factura #% no encontrada.', p_factura_id;

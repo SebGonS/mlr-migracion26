@@ -635,8 +635,8 @@ BEGIN
         -- Cliente & Especificaciones
         'prioridad_id', p.prioridad_id,
         'prioridad', pri.prioridad,
-        'cliente_id', p.cliente_id,
-        'cliente', c.cliente,
+        'tercero_id', p.tercero_id,
+        'cliente', c.nombre,
         'color_x_cliente_id', p.color_x_cliente_id,
         'color', vc.color,
         'color_hex', vc.color_hex,
@@ -896,7 +896,7 @@ BEGIN
     ) INTO v_result
     FROM doc.partida p
     LEFT JOIN prioridad pri ON pri.id = p.prioridad_id
-    LEFT JOIN cliente c ON c.id = p.cliente_id
+    LEFT JOIN tercero c ON c.id = p.tercero_id
     LEFT JOIN tenido ON tenido.id = p.tenido_id
     LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
     WHERE p.id = p_partida_id;
@@ -1203,8 +1203,8 @@ BEGIN
             'numero',               p.numero,
             'codigo',               EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
             'estado',               p.estado,
-            'cliente_id',           p.cliente_id,
-            'cliente',              c.cliente,
+            'tercero_id',           p.tercero_id,
+            'cliente',              c.nombre,
             'color_x_cliente_id',   p.color_x_cliente_id,
             'color',                vc.color,
             'tono',                 vc.tono,
@@ -1399,7 +1399,7 @@ BEGIN
     ) INTO v_result
     FROM mes.orden_produccion op
     JOIN doc.partida p      ON p.id = op.partida_id
-    LEFT JOIN cliente c     ON c.id = p.cliente_id
+    LEFT JOIN tercero c     ON c.id = p.tercero_id
     LEFT JOIN tenido        ON tenido.id = p.tenido_id
     LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
     WHERE op.id = p_orden_produccion_id;
