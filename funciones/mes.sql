@@ -23,7 +23,7 @@ FROM (
         'orden_tipo',                op.tipo,
         'partida_id',                op.partida_id,
         'partida_codigo',            EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
-        'cliente',                   c.cliente,
+        'cliente',                   c.nombre,
         'color',                     vc.color,
         'color_hex',                 vc.color_hex,
         'tono',                      vc.tono,
@@ -73,7 +73,7 @@ FROM (
         'operacion',          o.nombre,
         'operacion_codigo',   o.codigo,
         'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
-        'cliente',            c.cliente,
+        'cliente',            c.nombre,
         'color',              vc.color,
         'color_hex',          vc.color_hex,
         'tono',               vc.tono,
@@ -115,7 +115,7 @@ FROM (
             'operacion',          o.nombre,
             'operacion_codigo',   o.codigo,
             'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
-            'cliente',            c.cliente,
+            'cliente',            c.nombre,
             'color',              vc.color,
             'color_hex',          vc.color_hex,
             'tono',               vc.tono,
@@ -1035,8 +1035,7 @@ FOR UPDATE;
     END IF;
 
     -- 3. Build lote detalles from partida specs
-    SELECT p.tercero_id,
-           jsonb_build_object(
+    SELECT jsonb_build_object(
                'tenido_id', p.tenido_id,
                'color_x_cliente_id', p.color_x_cliente_id,
                'malla', p.malla,
@@ -1044,8 +1043,16 @@ FOR UPDATE;
                'ancho', p.ancho,
                'flg_antipilling', p.flg_antipilling
            )
-    INTO v_propietario_id, v_detalles
+    INTO v_detalles
     FROM doc.partida p WHERE p.id = v_partida_id;
+
+    -- propietario_id inherited from input roll lotes (already locked above)
+    SELECT l.propietario_id INTO v_propietario_id
+    FROM mes.orden_produccion_paso_item oppi
+    JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
+    JOIN inventario.lote l ON l.id = opi.lote_id
+    WHERE oppi.orden_produccion_paso_id = p_orden_paso_id
+    LIMIT 1;
 
     SELECT id INTO v_ing_tipo_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING';

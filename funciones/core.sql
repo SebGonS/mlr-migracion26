@@ -459,16 +459,17 @@ BEGIN
         VALUES ('crear_partida', v_usr_id, p_partida);
 
 -------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,cliente_id,tenido_id,malla,rendimiento,ancho,color_x_cliente_id,flg_antipilling)
+    INSERT INTO doc.partida (prioridad_id,tercero_id,tenido_id,malla,rendimiento,ancho,color_x_cliente_id,flg_antipilling,fecha_acordada)
     VALUES (
        ( p_partida->>'prioridad_id')::INT,
-        (p_partida->>'cliente_id')::INT,
+        (p_partida->>'tercero_id')::INT,
         (p_partida->>'tenido_id')::INT,
         (p_partida->>'malla')::TEXT,
         p_partida->>'rendimiento',
         (p_partida->>'ancho')::TEXT,
         (p_partida->>'color_x_cliente_id')::INT,
-        (p_partida->>'flg_antipilling')::BOOLEAN
+        (p_partida->>'flg_antipilling')::BOOLEAN,
+        (p_partida->>'fecha_acordada')::DATE
     )
     RETURNING id INTO v_partida_id;
      INSERT INTO doc.partida_detalle(partida_id, item_id,cantidad,unidad_id)
@@ -541,8 +542,9 @@ BEGIN
     -------------------------------------------------------------------------
     IF v_estado IN ('CREADA', 'CONFIRMADA') THEN
         UPDATE doc.partida
-        SET malla       = (p_partida->>'malla')::TEXT,
-            rendimiento = p_partida->>'rendimiento'
+        SET malla          = (p_partida->>'malla')::TEXT,
+            rendimiento    = p_partida->>'rendimiento',
+            fecha_acordada = (p_partida->>'fecha_acordada')::DATE
         WHERE id = p_partida_id;
     END IF;
 
@@ -551,10 +553,11 @@ BEGIN
     -------------------------------------------------------------------------
     IF v_estado = 'CREADA' THEN
         UPDATE doc.partida
-        SET cliente_id          = (p_partida->>'cliente_id')::INT,
+        SET tercero_id          = (p_partida->>'tercero_id')::INT,
             tenido_id           = (p_partida->>'tenido_id')::INT,
             color_x_cliente_id  = (p_partida->>'color_x_cliente_id')::INT,
-            flg_antipilling     = (p_partida->>'flg_antipilling')::BOOLEAN
+            flg_antipilling     = (p_partida->>'flg_antipilling')::BOOLEAN,
+            fecha_acordada      = (p_partida->>'fecha_acordada')::DATE
         WHERE id = p_partida_id;
 
         -- Full replace of detail rows
@@ -650,6 +653,7 @@ BEGIN
         'ancho', p.ancho,
         -- Estado y fechas
         'estado', p.estado,
+        'fecha_acordada', p.fecha_acordada,
         'fyh_inicio', p.fyh_inicio,
         'fyh_fin', p.fyh_fin,
         'fyh_cre', p.fyh_cre,
@@ -1216,6 +1220,7 @@ BEGIN
             'malla',                p.malla,
             'rendimiento',          p.rendimiento,
             'ancho',                p.ancho,
+            'fecha_acordada',       p.fecha_acordada,
 
             -- Partida detalles (needed for production output form on flg_genera_produccion steps)
             'detalles', COALESCE((
@@ -1583,44 +1588,28 @@ IF v_guia_tipo.flg_emitida THEN
                 DETAIL  = v_error_payload::text;
     END IF;
 -----------------------------------------------------------------------------------------------------------------------
-    IF (p_guia->>'receptor_id') IS NULL THEN
-        RAISE EXCEPTION 'Guía inválida: se esperaba receptor_id';
+    IF (p_guia->>'tercero_id') IS NULL THEN
+        RAISE EXCEPTION 'Guía inválida: se esperaba tercero_id';
     END IF;
     IF v_guia_tipo.flg_cliente AND NOT EXISTS (
-        SELECT 1 FROM tercero WHERE id = (p_guia->>'receptor_id')::INT AND flg_cliente = true
+        SELECT 1 FROM tercero WHERE id = (p_guia->>'tercero_id')::INT AND flg_cliente = true
     ) THEN
-        RAISE EXCEPTION 'Guía inválida: receptor_id % no corresponde a un cliente', (p_guia->>'receptor_id');
+        RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un cliente', (p_guia->>'tercero_id');
     ELSIF NOT v_guia_tipo.flg_cliente AND NOT EXISTS (
-        SELECT 1 FROM tercero WHERE id = (p_guia->>'receptor_id')::INT AND flg_proveedor = true
+        SELECT 1 FROM tercero WHERE id = (p_guia->>'tercero_id')::INT AND flg_proveedor = true
     ) THEN
-        RAISE EXCEPTION 'Guía inválida: receptor_id % no corresponde a un proveedor', (p_guia->>'receptor_id');
+        RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un proveedor', (p_guia->>'tercero_id');
     END IF;
-ELSE
-    -- incoming
-    IF (p_guia->>'emisor_id') IS NULL THEN
-        RAISE EXCEPTION 'Guía inválida: se esperaba emisor_id';
-    END IF;
-    IF v_guia_tipo.flg_cliente AND NOT EXISTS (
-        SELECT 1 FROM tercero WHERE id = (p_guia->>'emisor_id')::INT AND flg_cliente = true
-    ) THEN
-        RAISE EXCEPTION 'Guía inválida: emisor_id % no corresponde a un cliente', (p_guia->>'emisor_id');
-    ELSIF NOT v_guia_tipo.flg_cliente AND NOT EXISTS (
-        SELECT 1 FROM tercero WHERE id = (p_guia->>'emisor_id')::INT AND flg_proveedor = true
-    ) THEN
-        RAISE EXCEPTION 'Guía inválida: emisor_id % no corresponde a un proveedor', (p_guia->>'emisor_id');
-    END IF;
-END IF;
 
  INSERT INTO logs_api(function_name, user_id, params)
         VALUES ('crear_guia', v_usr_id, p_guia);
 
-    INSERT INTO doc.guia_remision(guia_remision_tipo_id, serie, correlativo, emisor_id, receptor_id, fecha_emision, fecha_recepcion)
+    INSERT INTO doc.guia_remision(guia_remision_tipo_id, tercero_id, serie, correlativo, fecha_emision, fecha_recepcion)
     VALUES (
         (p_guia->>'guia_remision_tipo_id')::INT,
+        (p_guia->>'tercero_id')::INT,
         p_guia->>'serie',
         p_guia->>'correlativo',
-        (p_guia->>'emisor_id')::INT,
-        (p_guia->>'receptor_id')::INT,
         (p_guia->>'fecha_emision')::TIMESTAMPTZ,
         CASE
             WHEN v_guia_tipo.flg_emitida THEN NULL
@@ -1793,14 +1782,15 @@ SELECT jsonb_build_object(
     'correlativo', gr.correlativo,
     'fecha_emision', gr.fecha_emision,
     'fecha_recepcion', gr.fecha_recepcion,
-    'emisor_id', gr.emisor_id,
-    'emisor_codigo', et.codigo,
-    'emisor', COALESCE(et.nombre, 'MLR'),
-    'emisor_ruc', et.ruc,
-    'receptor_id', gr.receptor_id,
-    'receptor_codigo', rt.codigo,
-    'receptor', COALESCE(rt.nombre, 'MLR'),
-    'receptor_ruc', rt.ruc,
+    'tercero_id', gr.tercero_id,
+    'tercero_codigo', t.codigo,
+    'tercero_nombre', t.nombre,
+    'tercero_ruc', t.ruc,
+    -- Derived display: direction determined by flg_emitida (true = MLR sends out)
+    'emisor',        CASE WHEN grt.flg_emitida THEN 'Manufacturas la Real' ELSE t.nombre END,
+    'emisor_ruc',    CASE WHEN grt.flg_emitida THEN NULL                   ELSE t.ruc   END,
+    'receptor',      CASE WHEN grt.flg_emitida THEN t.nombre ELSE 'Manufacturas la Real' END,
+    'receptor_ruc',  CASE WHEN grt.flg_emitida THEN t.ruc   ELSE NULL                   END,
     'fyh_cre', gr.fyh_cre,
     'detalles', (
         SELECT COALESCE(jsonb_agg(
@@ -1827,8 +1817,7 @@ SELECT jsonb_build_object(
 )
 FROM doc.guia_remision gr
 LEFT JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
-LEFT JOIN tercero et ON et.id = gr.emisor_id
-LEFT JOIN tercero rt ON rt.id = gr.receptor_id
+LEFT JOIN tercero t ON t.id = gr.tercero_id
 WHERE gr.id = p_guia_id;
 $$;
 

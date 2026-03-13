@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS doc.partida (
     rendimiento text,
     ancho text,
     flg_antipilling boolean DEFAULT false,
+    fecha_acordada date,                           -- agreed delivery date with client (SAP: EDATU)
     estado partida_estado_enum DEFAULT 'CREADA',
     -- Billing axis — orthogonal to production state.
     -- Updated when doc.factura lines are issued against this order.
@@ -101,10 +102,9 @@ FROM inventario.item_movimiento_tipo imt WHERE imt.codigo = 'SERV_DEV_ING';
 CREATE TABLE IF NOT EXISTS doc.guia_remision (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     guia_remision_tipo_id smallint NOT NULL REFERENCES doc.guia_remision_tipo(id),
+    tercero_id  INT NOT NULL REFERENCES tercero(id),  -- the external party; direction derived from guia_remision_tipo.flg_emitida
     serie TEXT NOT NULL,
     correlativo TEXT NOT NULL,
-    emisor_id   INT NOT NULL REFERENCES tercero(id),
-    receptor_id INT NOT NULL REFERENCES tercero(id),
     fecha_emision TIMESTAMPTZ NOT NULL,
     fecha_recepcion TIMESTAMPTZ DEFAULT now(),
     usr_cre int,
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS doc.guia_remision (
     flg_elm BOOL DEFAULT false,
     usr_elm INT,
     fyh_elm TIMESTAMPTZ,
-    UNIQUE (serie, correlativo, emisor_id)
+    UNIQUE (serie, correlativo, guia_remision_tipo_id)
 );
 
 -- ── doc.guia_remision_detalle ─────────────────────────────────
@@ -461,7 +461,7 @@ CREATE TABLE doc.factura_proveedor (
     observacion TEXT,
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod INT, fyh_mod TIMESTAMPTZ,
-    UNIQUE (proveedor_id, serie, numero),
+    UNIQUE (tercero_id, serie, numero),
     CONSTRAINT chk_factura_montos CHECK (
         subtotal > 0 AND igv >= 0 AND total > 0
         AND ABS(total - (subtotal + igv)) < 0.01

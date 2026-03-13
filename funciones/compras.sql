@@ -28,7 +28,7 @@ BEGIN
             WHERE gr.id IN (
                 SELECT jsonb_array_elements_text(p_datos->'guia_ids')::bigint
             )
-            AND gr.emisor_id IS DISTINCT FROM (p_datos->>'tercero_id')::INT
+            AND gr.tercero_id IS DISTINCT FROM (p_datos->>'tercero_id')::INT
         ) THEN
             RAISE EXCEPTION 'Una o más guías no pertenecen al proveedor indicado.';
         END IF;
@@ -324,7 +324,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM doc.guia_remision
         WHERE id IN (SELECT jsonb_array_elements_text(p_guia_ids)::bigint)
-          AND emisor_id IS DISTINCT FROM v_proveedor
+          AND tercero_id IS DISTINCT FROM v_proveedor
     ) THEN
         RAISE EXCEPTION 'Una o más guías no pertenecen al proveedor de la compra #%.', p_compra_id;
     END IF;

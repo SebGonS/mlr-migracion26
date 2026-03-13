@@ -118,6 +118,7 @@ SELECT
     p.rendimiento,
     p.ancho,
     p.flg_antipilling,
+    p.fecha_acordada,
     p.fyh_cre AS fecha_creacion,
     p.fyh_programacion AS fecha_programacion,
     p.fyh_inicio AS fecha_inicio,
@@ -270,13 +271,14 @@ SELECT DISTINCT
     i.id AS item_id,
     i.codigo AS item_codigo,
     i.nombre AS item_nombre,
-    gr.emisor_proveedor_id AS proveedor_id,
-    p.proveedor AS proveedor_nombre
+    gr.tercero_id AS proveedor_id,
+    t.nombre AS proveedor_nombre
 FROM doc.guia_remision gr
+JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
 JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
 JOIN item i ON i.id = grd.item_id
-JOIN proveedor p ON p.id = gr.emisor_proveedor_id
-WHERE gr.emisor_proveedor_id IS NOT NULL;
+JOIN tercero t ON t.id = gr.tercero_id
+WHERE grt.flg_emitida = false AND t.flg_proveedor = true;
 
 GRANT SELECT ON inventario.vw_item_proveedor_guia TO anon, authenticated;
 

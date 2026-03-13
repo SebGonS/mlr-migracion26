@@ -245,3 +245,17 @@ CREATE TRIGGER trg_bi_letra_audit BEFORE INSERT ON doc.letra
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 CREATE TRIGGER trg_bu_letra_audit BEFORE UPDATE ON doc.letra
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+
+-----FACTURA
+CREATE TRIGGER trg_biud_factura_audit BEFORE INSERT OR UPDATE OR DELETE ON doc.factura
+    FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
+CREATE TRIGGER trg_bi_factura_audit BEFORE INSERT ON doc.factura
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+CREATE TRIGGER trg_bu_factura_audit BEFORE UPDATE ON doc.factura
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+CREATE TRIGGER trg_bu_factura_elm   BEFORE UPDATE ON doc.factura
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_elm_fields();
+
+-----FACTURA DETALLE
+CREATE TRIGGER trg_bi_factura_detalle_audit BEFORE INSERT ON doc.factura_detalle
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();

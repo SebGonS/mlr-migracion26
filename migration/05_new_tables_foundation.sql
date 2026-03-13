@@ -276,6 +276,50 @@ CREATE TRIGGER trg_bi_gen_codigo_ubicacion
 BEFORE INSERT ON inventario.ubicacion
 FOR EACH ROW EXECUTE FUNCTION inventario.fn_trg_gen_codigo_ubicacion();
 
+-- ── tercero ───────────────────────────────────────────────────
+-- Master entity for all external trading parties (ERP concept: "tercero").
+-- Replaces the separate legacy `cliente` and `proveedor` tables as the
+-- canonical source of truth. flg_cliente / flg_proveedor indicate roles —
+-- a party can hold both simultaneously.
+-- cliente_id / proveedor_id are kept as migration cross-references only;
+-- they may be dropped once legacy tables are retired.
+-- Row id=1 = MLR (our own company), with both flags false.
+CREATE TABLE tercero (
+    id               INT  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo           TEXT NOT NULL UNIQUE,
+    codigo_canon     TEXT NOT NULL UNIQUE,
+    nombre           TEXT NOT NULL,              -- commercial / trade name
+    razon_social     TEXT,                       -- legal registered name (razón social)
+    ruc              TEXT UNIQUE,                -- 11-digit Peruvian tax ID
+    direccion        TEXT,
+    telefono         TEXT,
+    correo           TEXT,
+    procedencia      TEXT,                       -- country / region of origin
+    flg_cliente      BOOLEAN NOT NULL DEFAULT false,
+    flg_proveedor    BOOLEAN NOT NULL DEFAULT false,
+    -- Migration cross-references (nullable; removed once legacy tables are retired)
+    cliente_id       INT REFERENCES cliente(id),   -- primary legacy cliente id
+    cliente_id2      INT REFERENCES cliente(id),   -- secondary: MLR/X alias that was merged into this row
+    proveedor_id     INT REFERENCES proveedor(id),
+    -- Audit
+    usr_cre INT REFERENCES usuario(id),
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT REFERENCES usuario(id),
+    fyh_mod TIMESTAMPTZ,
+    flg_elm BOOL DEFAULT false,
+    usr_elm INT,
+    fyh_elm TIMESTAMPTZ
+);
+
+CREATE TRIGGER trg_bi_tercero_codigo_canon
+BEFORE INSERT OR UPDATE ON tercero
+FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
+
+-- Row 1 = MLR (our own company)
+INSERT INTO tercero (codigo, nombre) VALUES ('MLR', 'Manufacturas la Real');
+
+GRANT SELECT ON tercero TO authenticated;
+
 -- ── inventario.lote ───────────────────────────────────────────
 CREATE TABLE inventario.lote (
     id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -443,46 +487,4 @@ FROM inventario.cuadre c;
 GRANT SELECT ON inventario.cuadre         TO authenticated;
 GRANT SELECT ON inventario.cuadre_detalle TO authenticated;
 
--- ── tercero ───────────────────────────────────────────────────
--- Master entity for all external trading parties (ERP concept: "tercero").
--- Replaces the separate legacy `cliente` and `proveedor` tables as the
--- canonical source of truth. flg_cliente / flg_proveedor indicate roles —
--- a party can hold both simultaneously.
--- cliente_id / proveedor_id are kept as migration cross-references only;
--- they may be dropped once legacy tables are retired.
--- Row id=1 = MLR (our own company), with both flags false.
-CREATE TABLE tercero (
-    id               INT  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    codigo           TEXT NOT NULL UNIQUE,
-    codigo_canon     TEXT NOT NULL UNIQUE,
-    nombre           TEXT NOT NULL,              -- commercial / trade name
-    razon_social     TEXT,                       -- legal registered name (razón social)
-    ruc              TEXT UNIQUE,                -- 11-digit Peruvian tax ID
-    direccion        TEXT,
-    telefono         TEXT,
-    correo           TEXT,
-    procedencia      TEXT,                       -- country / region of origin
-    flg_cliente      BOOLEAN NOT NULL DEFAULT false,
-    flg_proveedor    BOOLEAN NOT NULL DEFAULT false,
-    -- Migration cross-references (nullable; removed once legacy tables are retired)
-    cliente_id       INT REFERENCES cliente(id),
-    proveedor_id     INT REFERENCES proveedor(id),
-    -- Audit
-    usr_cre INT REFERENCES usuario(id),
-    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
-    usr_mod INT REFERENCES usuario(id),
-    fyh_mod TIMESTAMPTZ,
-    flg_elm BOOL DEFAULT false,
-    usr_elm INT,
-    fyh_elm TIMESTAMPTZ
-);
-
-CREATE TRIGGER trg_bi_tercero_codigo_canon
-BEFORE INSERT OR UPDATE ON tercero
-FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
-
--- Row 1 = MLR (our own company)
-INSERT INTO tercero (codigo, nombre) VALUES ('MLR', 'Manufacturas la Real');
-
-GRANT SELECT ON tercero TO authenticated;
 GRANT SELECT ON inventario.vw_cuadre      TO authenticated;

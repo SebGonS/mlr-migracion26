@@ -56,6 +56,26 @@ DO $$ DECLARE t TEXT; BEGIN
     END LOOP;
 END $$;
 
+-- doc.factura: only block hard-delete once emitted or annulled.
+-- Borradores (drafts) may be hard-deleted freely.
+CREATE OR REPLACE FUNCTION doc.fn_trg_factura_prevent_hard_delete()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.estado IN ('emitida', 'anulada') THEN
+        RAISE EXCEPTION
+            'Factura id=% (%) no puede eliminarse: es un documento tributario emitido. Use una Nota de Crédito para anularla.',
+            OLD.id, OLD.estado
+            USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_bd_factura_prevent_hard_delete ON doc.factura;
+CREATE TRIGGER trg_bd_factura_prevent_hard_delete
+BEFORE DELETE ON doc.factura
+FOR EACH ROW EXECUTE FUNCTION doc.fn_trg_factura_prevent_hard_delete();
+
 -- ── Audit schema ──────────────────────────────────────────────────────────────
 CREATE SCHEMA IF NOT EXISTS audit;
 CREATE TABLE IF NOT EXISTS audit.data_audit (
@@ -264,3 +284,10 @@ REVOKE INSERT (usr_cre, fyh_cre) ON doc.compra_detalle FROM anon, authenticated;
 -----LETRA
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.letra FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.letra FROM anon, authenticated;
+
+-----FACTURA
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod, usr_elm, fyh_elm) ON doc.factura FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                                      ON doc.factura FROM anon, authenticated;
+
+-----FACTURA DETALLE
+REVOKE INSERT (usr_cre, fyh_cre) ON doc.factura_detalle FROM anon, authenticated;

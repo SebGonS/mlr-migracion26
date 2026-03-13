@@ -163,6 +163,8 @@ ALTER TABLE doc.compra_detalle         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.compra_guia_remision   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.factura_proveedor      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.letra                  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.factura                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.factura_detalle        ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "comercial_ver" ON doc.partida               FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.partida_detalle       FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
@@ -173,6 +175,8 @@ CREATE POLICY "comercial_ver" ON doc.compra_detalle        FOR SELECT TO authent
 CREATE POLICY "comercial_ver" ON doc.compra_guia_remision  FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.factura_proveedor     FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.letra                 FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.factura               FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.factura_detalle       FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 
 -- ── Producción ────────────────────────────────────────────────────────────────
 ALTER TABLE mes.maquina                      ENABLE ROW LEVEL SECURITY;

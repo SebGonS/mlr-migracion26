@@ -682,6 +682,113 @@ FROM inventario.almacen a
 WHERE a.codigo = 'ALM_PT';
 
 -- ============================================================================
+-- TERCERO POPULATION (must precede partida, factura_proveedor, compra, guia_remision)
+-- ============================================================================
+-- id=1 (MLR) already inserted in step 5 with codigo='MLR'.
+-- Proveedores and clientes are entirely separate populations (no entity in both).
+-- All normalisation in CTEs; INSERT at end of each block.
+-- Code formula: UPPER(strip non-alphanum) capped at 20; suffix _{id} on collision.
+-- cliente_id2: bridges the MLR/X alias — "MLR/Rudy" and "Rudy" collapse into one
+--   tercero row with cliente_id = Rudy's id, cliente_id2 = MLR/Rudy's id.
+--   NULL when no MLR/X alias exists for that client.
+-- Bridge columns (proveedor_id, cliente_id, cliente_id2) dropped after migration.
+
+-- ── PROVEEDORES ──────────────────────────────────────────────────────────────
+WITH all_prov AS (
+    SELECT
+        id,
+        proveedor,
+        lower(regexp_replace(proveedor, '[^a-zA-Z0-9]', '', 'g'))  AS name_key,
+        COALESCE(fyh_cre_tz, fyh_cre::timestamptz, now())          AS fyh_cre
+    FROM proveedor
+),
+with_code AS (
+    SELECT *,
+        COALESCE(NULLIF(LEFT(UPPER(name_key), 20), ''), 'PROV' || id::text) AS code_base
+    FROM all_prov
+),
+deduped AS (
+    SELECT *, COUNT(*) OVER (PARTITION BY code_base) AS cnt
+    FROM with_code
+)
+INSERT INTO tercero (proveedor_id, codigo, nombre, flg_proveedor, fyh_cre)
+SELECT
+    id,
+    CASE WHEN cnt > 1 OR EXISTS (SELECT 1 FROM tercero WHERE codigo = d.code_base)
+         THEN d.code_base || '_' || id::text
+         ELSE d.code_base
+    END,
+    proveedor,
+    true,
+    fyh_cre
+FROM deduped d
+ORDER BY id;
+
+-- ── CLIENTES ─────────────────────────────────────────────────────────────────
+WITH all_cli AS (
+    SELECT
+        id,
+        regexp_replace(cliente, '^MLR/', '')                                                    AS nombre_canon,
+        lower(regexp_replace(regexp_replace(cliente, '^MLR/', ''), '[^a-zA-Z0-9]', '', 'g'))   AS name_key,
+        CASE WHEN cliente NOT ILIKE 'MLR/%' THEN id END                                        AS cli_id,   -- plain X
+        CASE WHEN cliente     ILIKE 'MLR/%' THEN id END                                        AS cli_id2,  -- MLR/X alias
+        NULLIF(ruc, '')                                                                         AS ruc,
+        NULLIF(correo, '')                                                                      AS correo,
+        NULLIF(procedencia, '')                                                                 AS procedencia,
+        COALESCE(fyh_cre_tz, fyh_cre::timestamptz, now())                                      AS fyh_cre
+    FROM cliente
+),
+canonical AS (
+    -- One row per normalised name; plain X and MLR/X alias collapse into the same group
+    SELECT
+        name_key,
+        COALESCE(
+            MIN(CASE WHEN cli_id  IS NOT NULL THEN nombre_canon END),  -- prefer plain spelling
+            MIN(nombre_canon)
+        )                                                                       AS nombre,
+        COALESCE(
+            MIN(CASE WHEN cli_id  IS NOT NULL THEN id END),             -- plain X id as primary
+            MIN(CASE WHEN cli_id2 IS NOT NULL THEN id END)              -- MLR/X-only fallback
+        )                                                                       AS primary_id,
+        -- Secondary id only when both plain X and MLR/X exist in the legacy table
+        CASE WHEN COUNT(CASE WHEN cli_id IS NOT NULL THEN 1 END) > 0
+             THEN MIN(CASE WHEN cli_id2 IS NOT NULL THEN id END)
+        END                                                                     AS secondary_id,
+        -- Contact info: prefer plain row, fall back to MLR/X row
+        COALESCE(MAX(CASE WHEN cli_id IS NOT NULL THEN ruc         END), MAX(ruc))         AS ruc,
+        COALESCE(MAX(CASE WHEN cli_id IS NOT NULL THEN correo      END), MAX(correo))      AS correo,
+        COALESCE(MAX(CASE WHEN cli_id IS NOT NULL THEN procedencia END), MAX(procedencia)) AS procedencia,
+        MIN(fyh_cre)                                                            AS fyh_cre
+    FROM all_cli
+    GROUP BY name_key
+),
+with_code AS (
+    SELECT *,
+        COALESCE(NULLIF(LEFT(UPPER(name_key), 20), ''), 'CLI' || primary_id::text) AS code_base
+    FROM canonical
+),
+deduped AS (
+    SELECT *, COUNT(*) OVER (PARTITION BY code_base) AS cnt
+    FROM with_code
+)
+INSERT INTO tercero (cliente_id, cliente_id2, codigo, nombre, ruc, correo, procedencia, flg_cliente, fyh_cre)
+SELECT
+    d.primary_id,
+    d.secondary_id,
+    CASE WHEN d.cnt > 1 OR EXISTS (SELECT 1 FROM tercero WHERE codigo = d.code_base)
+         THEN d.code_base || '_' || d.primary_id::text
+         ELSE d.code_base
+    END,
+    d.nombre,
+    d.ruc,
+    d.correo,
+    d.procedencia,
+    true,
+    d.fyh_cre
+FROM deduped d
+ORDER BY d.primary_id;
+
+-- ============================================================================
 -- MIGRAR PARTIDAS
 -- ============================================================================
 --Mapear Estados existentes
@@ -728,15 +835,8 @@ estado_comercial = CASE estado
     WHEN 'Termofijado' THEN 'EN_PRODUCCION'::partida_estado_enum
     WHEN 'Perchado' THEN 'EN_PRODUCCION'::partida_estado_enum
     ELSE 'CERRADA'::partida_estado_enum
-     END
-
--- SELECT * FROM partida LIMIT 100
--- SELECT * FROM partida_estado_historial
-
-SELECT ROW_NUMBER() OVER (PARTITION BY peh.partida_id ORDER BY peh.id desc) rw,peh.*,e.estado FROM partida_estado_historial peh
-LEFT JOIN estado e ON e.id=peh.estado_id
-ORDER BY partida_id;
-
+     END;
+    
 WITH ult_estado as(SELECT ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY id desc) rw,* FROM partida_estado_historial)
 ,base as(SELECT 
 pp.id,
@@ -781,7 +881,7 @@ SELECT
     p.id,          -- same id as old partida
     p.codigo,
     p.prioridad_id,
-    (SELECT t.id FROM tercero t WHERE t.cliente_id = p.cliente_id),  -- bridge legacy → tercero
+    (SELECT t.id FROM tercero t WHERE t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id),  -- bridge: covers both plain X and MLR/X aliases
     p.color_x_cliente_id,
     p.tenido_id,
     p.malla,
@@ -1464,7 +1564,7 @@ SELECT setval(
 -- Rows with missing or malformed factura are skipped (they produce a compra with NULL factura_proveedor_id).
 -- Run the orphan check query below before go-live to assess the gap.
 INSERT INTO doc.factura_proveedor (
-    proveedor_id,
+    tercero_id,
     serie,
     numero,
     fecha_emision,
@@ -1479,7 +1579,7 @@ INSERT INTO doc.factura_proveedor (
     fyh_cre
 )
 SELECT
-    c.proveedor_id,
+    (SELECT id FROM tercero WHERE proveedor_id = c.proveedor_id),
     SPLIT_PART(c.factura, '-', 1)                    AS serie,
     SPLIT_PART(c.factura, '-', 2)::INT               AS numero,
     COALESCE(c.fecha_giro, c.fecha_remision)         AS fecha_emision,
@@ -1505,7 +1605,7 @@ WHERE c.factura IS NOT NULL
 -- factura_proveedor_id is NULL for compras that had no factura or an unparseable one.
 INSERT INTO doc.compra (
     id,
-    proveedor_id,
+    tercero_id,
     factura_proveedor_id,
     fecha,
     usr_cre,
@@ -1514,16 +1614,16 @@ INSERT INTO doc.compra (
 OVERRIDING SYSTEM VALUE
 SELECT
     c.id,
-    c.proveedor_id,
+    (SELECT id FROM tercero WHERE proveedor_id = c.proveedor_id),
     fp.id,
     COALESCE(c.fecha_remision, c.fyh_cre_tz::DATE) AS fecha,
     NULLIF(c.usr_cre, 'authenticated')::INT,
     c.fyh_cre_tz
 FROM public.compra c
 LEFT JOIN doc.factura_proveedor fp
-    ON  fp.proveedor_id = c.proveedor_id
-    AND fp.serie        = SPLIT_PART(c.factura, '-', 1)
-    AND fp.numero       = SPLIT_PART(c.factura, '-', 2)::INT
+    ON  fp.tercero_id = (SELECT id FROM tercero WHERE proveedor_id = c.proveedor_id)
+    AND fp.serie      = SPLIT_PART(c.factura, '-', 1)
+    AND fp.numero     = SPLIT_PART(c.factura, '-', 2)::INT
 WHERE c.proveedor_id IS NOT NULL;
 
 SELECT setval(
@@ -1606,35 +1706,6 @@ WHERE dc.factura_proveedor_id IS NOT NULL;
 
 -- ============================================================================
 
--- ── tercero population ───────────────────────────────
--- id=1 (MLR / our company) was inserted in step 5 with codigo='MLR'.
--- Proveedores first, then clientes. codigo generated as 'PROV{id}' / 'CLI{id}'
--- to guarantee uniqueness; update manually to meaningful codes post-migration.
--- codigo_canon is set automatically by trg_bi_tercero_codigo_canon.
-
-INSERT INTO tercero (proveedor_id, codigo, nombre, flg_proveedor, fyh_cre)
-    SELECT
-        id,
-        'PROV' || id::text,
-        proveedor,
-        true,
-        COALESCE(fyh_cre_tz, fyh_cre::timestamptz, now())
-    FROM proveedor
-    ORDER BY id;
-
-INSERT INTO tercero (cliente_id, codigo, nombre, ruc, correo, procedencia, flg_cliente, fyh_cre)
-    SELECT
-        id,
-        'CLI' || id::text,
-        cliente,
-        NULLIF(ruc, ''),
-        NULLIF(correo, ''),
-        NULLIF(procedencia, ''),
-        true,
-        COALESCE(fyh_cre_tz, fyh_cre::timestamptz, now())
-    FROM cliente
-    ORDER BY id;
-
 ----CONFIGURAR GUIAS y
 -- TRUNCATE TABLE doc.guia_remision_detalle,doc.guia_remision,doc.compra_guia_remision;
 WITH 
@@ -1672,15 +1743,13 @@ compra_data AS (
 ),
 inserted_guias AS (
     INSERT INTO doc.guia_remision (
-        guia_remision_tipo_id, serie, correlativo,
-        emisor_id, receptor_id, fecha_emision, usr_cre, fyh_cre
+        guia_remision_tipo_id, tercero_id, serie, correlativo, fecha_emision, usr_cre, fyh_cre
     )
     SELECT
         (SELECT id FROM doc.guia_remision_tipo WHERE codigo = 'COMPRA_INGRESO'),
+        (SELECT id FROM tercero WHERE proveedor_id = cd.proveedor_id),
         serie,
         correlativo,
-        (SELECT id FROM tercero WHERE proveedor_id = cd.proveedor_id),
-        1,  -- receptor = MLR (our company)
         fecha_remision::date,
         usr_cre,
         fyh_cre
