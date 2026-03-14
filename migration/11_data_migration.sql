@@ -771,7 +771,7 @@ deduped AS (
     SELECT *, COUNT(*) OVER (PARTITION BY code_base) AS cnt
     FROM with_code
 )
-INSERT INTO tercero (cliente_id, cliente_id2, codigo, nombre, ruc, correo, procedencia, flg_cliente, fyh_cre)
+-- INSERT INTO tercero (cliente_id, cliente_id2, codigo, nombre, ruc, correo, procedencia, flg_cliente, fyh_cre)
 SELECT
     d.primary_id,
     d.secondary_id,
