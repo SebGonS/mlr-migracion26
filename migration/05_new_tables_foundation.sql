@@ -444,7 +444,8 @@ FOR EACH ROW EXECUTE FUNCTION inventario.fn_trg_actualizar_map();
 CREATE TYPE inventario.cuadre_estado_enum AS ENUM (
     'borrador',   -- just created, items being counted
     'preparado',  -- counts complete, ready to finalise
-    'ejecutado'   -- adjustments posted, closed
+    'ejecutado',  -- adjustments posted, closed
+    'cancelado'   -- cancelled before execution
 );
 
 CREATE TABLE inventario.cuadre (

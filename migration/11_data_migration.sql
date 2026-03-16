@@ -1988,4 +1988,196 @@ JOIN doc_posting dp
  AND dp.documento_id   IS NOT DISTINCT FROM i.documento_id
 WHERE i.cantidad > 0;
 
+-- REGISTRAR SALIDAS DE INVENTARIO
+WITH motivo_map (motivo, codigo) AS (
+    VALUES
+        ('receta',        'PROD_CONSUMO'),
+        ('matizado',      'PROD_CONSUMO'),
+        ('lavado',        'PROD_CONSUMO'),
+        ('lavado maquina','PROD_CONSUMO'),
+        ('desmontado',    'PROD_CONSUMO'),
+        ('ajuste receta', 'PROD_CONSUMO'),
+        ('ajuste',        'AJUSTE_NEG'),
+        ('reconteo',      'AJUSTE_NEG'),
+        ('merma',         'AJUSTE_NEG'),
+        ('muestra',       'AJUSTE_NEG'),
+        ('mantenimiento', 'AJUSTE_NEG'),
+        ('otros',         'AJUSTE_NEG')
+),
+doc_posting AS (
+    SELECT DISTINCT
+        si.id AS salida_inventario_id,
+        nextval('inventario.mov_doc_seq') AS doc_movimiento_id
+    FROM public.salida_inventario si
+    WHERE si.estado = 'ejecutado'
+)
+INSERT INTO inventario.item_movimientos (
+    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+    origen_ubicacion_id, cantidad, documento_tipo, documento_id,
+    observacion, usr_cre, fyh_cre
+)
+SELECT
+    dp.doc_movimiento_id,
+    l.item_id,
+    sdxs.inventario_id,
+    (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = mm.codigo),
+    (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_INS'),
+    sdxs.cantidad,
+    'SALIDA_INVENTARIO',
+    si.id,
+    si.observacion,
+    si.usr_solicita,
+    COALESCE(si.fyh_salida_real, si.fyh_solicitud_tz)
+FROM public.salida_inventario si
+JOIN public.salida_inventario_detalle sid ON sid.salida_inventario_id = si.id
+JOIN public.salida_inventario_detalle_x_stock sdxs ON sdxs.salida_inventario_detalle_id = sid.id
+JOIN inventario.lote l ON l.id = sdxs.inventario_id
+JOIN motivo_map mm ON mm.motivo = si.motivo::text
+JOIN doc_posting dp ON dp.salida_inventario_id = si.id
+WHERE si.estado = 'ejecutado';
+
 COMMIT;
+
+Here's what you're missing:
+
+Migrated (ingress only):
+
+COMPRA_ING — purchases via entrada_inventario
+AJUSTE_POS — positive adjustments/reconteos
+Initial lote balances (qty > 0)
+Not migrated (egress):
+The file even has a comment ---LUEGO RECIEN SALIDAS (line ~1503) explicitly deferring these:
+
+Type	Source table
+desmontado	public.salida_inventario
+lavado	same
+matizado	same
+mantenimiento	same
+lavado maquina	same
+receta (consumption)	same
+ajuste_receta	same
+ajuste negativo	same
+reconteo negativo	same
+Also missing:
+
+Sales-side documents: VENTA, DESPACHO, guia_remision for venta/egreso
+The salida_inventario table has no INSERT block at all
+So yes — you've got all the entrances but none of the exits. The current lote balances in the migration reflect the total received quantity, not net stock. The egress movements need to be migrated to get correct balances.
+
+CREATE TABLE IF NOT EXISTS public.salida_inventario_detalle_x_stock
+(
+    id integer NOT NULL GENERATED ALWAYS AS IDENTITY ( INCREMENT 1 MINVALUE 1 MAXVALUE 2147483647 CACHE 1 ),
+    salida_inventario_detalle_id integer NOT NULL,
+    inventario_id integer,
+    cantidad numeric(12,5) NOT NULL,
+    fecha timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    fyh_cre timestamp with time zone DEFAULT now(),
+    CONSTRAINT salida_inventario_detalle_x_stock_pkey PRIMARY KEY (id),
+    CONSTRAINT salida_inventario_detalle_x_s_fk_salida_inventario_detalle__key UNIQUE (salida_inventario_detalle_id, inventario_id),
+    CONSTRAINT salida_inventario_detalle_x_s_fk_salida_inventario_detalle_fkey FOREIGN KEY (salida_inventario_detalle_id)
+        REFERENCES public.salida_inventario_detalle (id) MATCH SIMPLE
+        ON UPDATE NO ACTION
+        ON DELETE NO ACTION,
+    CONSTRAINT salida_inventario_detalle_x_stock_fk_inventario_fkey FOREIGN KEY (inventario_id)
+        REFERENCES public.inventario (id) MATCH SIMPLE
+        ON UPDATE NO ACTION
+        ON DELETE NO ACTION,
+    CONSTRAINT salida_inventario_detalle_x_stock_cantidad_check CHECK (cantidad > 0::numeric)
+)
+
+CREATE TABLE IF NOT EXISTS public.salida_inventario_detalle
+(
+    id integer NOT NULL GENERATED ALWAYS AS IDENTITY ( INCREMENT 1 MINVALUE 1 MAXVALUE 2147483647 CACHE 1 ),
+    salida_inventario_id integer NOT NULL,
+    cantidad_solicitada numeric(12,5) NOT NULL,
+    insumo_id smallint NOT NULL,
+    estado estado_salida_inventario_enum DEFAULT 'pendiente'::estado_salida_inventario_enum,
+    observacion text COLLATE pg_catalog."default",
+    CONSTRAINT salida_inventario_detalle_pkey PRIMARY KEY (id),
+    CONSTRAINT salida_inventario_detalle_fk_insumo_fkey FOREIGN KEY (insumo_id)
+        REFERENCES public.insumo (id) MATCH SIMPLE
+        ON UPDATE NO ACTION
+        ON DELETE NO ACTION,
+    CONSTRAINT salida_inventario_detalle_fk_salida_inventario_fkey FOREIGN KEY (salida_inventario_id)
+        REFERENCES public.salida_inventario (id) MATCH SIMPLE
+        ON UPDATE NO ACTION
+        ON DELETE NO ACTION,
+    CONSTRAINT salida_inventario_detalle_cantidad_solicitada_check CHECK (cantidad_solicitada > 0::numeric)
+)
+CREATE TABLE IF NOT EXISTS public.salida_inventario
+(
+    id integer NOT NULL GENERATED ALWAYS AS IDENTITY ( INCREMENT 1 MINVALUE 1 MAXVALUE 2147483647 CACHE 1 ),
+    motivo motivo_salida_inventario_enum NOT NULL,
+    partida_x_recetas_id integer,
+    estado estado_salida_inventario_enum DEFAULT 'pendiente'::estado_salida_inventario_enum,
+    fyh_solicitud timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    fyh_revision timestamp without time zone,
+    usr_solicita smallint DEFAULT get_user_id(),
+    usr_revisa smallint,
+    observacion text COLLATE pg_catalog."default",
+    fecha_salida date DEFAULT (CURRENT_DATE AT TIME ZONE 'America/Lima'::text),
+    fyh_solicitud_tz timestamp with time zone DEFAULT now(),
+    fyh_salida_real timestamp with time zone,
+    CONSTRAINT salida_inventario_pkey PRIMARY KEY (id),
+    CONSTRAINT salida_inventario_fk_partida_x_recetas_fkey FOREIGN KEY (partida_x_recetas_id)
+        REFERENCES public.partida_x_recetas (id) MATCH SIMPLE
+        ON UPDATE NO ACTION
+        ON DELETE NO ACTION
+)
+
+This is the enum for motivo
+valor
+receta
+matizado
+ajuste
+mantenimiento
+muestra
+merma
+transferencia
+otros
+lavado maquina
+lavado
+ajuste receta
+desmontado
+reconteo
+Show less
+Let me check what egress movement types already exist in the new schema before planning the migration.
+
+Grep "item_movimiento_tipo|AJUSTE_NEG|SALIDA|EGRESO|RECETA|LAVADO|AJUSTE" (in d:/Documentos/Sebas/Trabajo/Manufacturas la Real/Aplicación/mlr-migracion26/migration, glob: *.sql)
+23 lines of output
+Grep "INSERT INTO inventario.item_movimiento_tipo|'COMPRA_ING'|'AJUSTE_POS'|'AJUSTE_NEG'|flg_egreso|flg_ingreso" (in d:/Documentos/Sebas/Trabajo/Manufacturas la Real/Aplicación/mlr-migracion26/migration, glob: *.sql)
+35 lines of output
+Here's the full picture. The new schema's movement types and the mapping from legacy motivos:
+
+Legacy motivo	New item_movimiento_tipo	factor
+receta	PROD_CONSUMO	-1
+matizado	PROD_CONSUMO	-1
+lavado	PROD_CONSUMO	-1
+lavado maquina	PROD_CONSUMO	-1
+desmontado	PROD_CONSUMO	-1
+ajuste receta	PROD_CONSUMO	-1
+ajuste	AJUSTE_NEG	-1
+reconteo	AJUSTE_NEG	-1
+merma	AJUSTE_NEG	-1
+muestra	AJUSTE_NEG	-1
+mantenimiento	AJUSTE_NEG	-1
+otros	AJUSTE_NEG	-1
+transferencia	⚠️ missing	—
+transferencia has no equivalent — it implies stock moving between locations/warehouses, which would need two movements (AJUSTE_NEG + AJUSTE_POS on different ubicaciones), but you have no multi-ubicacion tracking in the migration yet.
+
+The actual consumption data lives in salida_inventario_detalle_x_stock — that's the lote-level table:
+
+inventario_id → lote.id (IDs preserved, direct FK)
+cantidad → how much was consumed from that lote
+So the migration is: join salida_inventario → detalle → detalle_x_stock, map motivo, insert into item_movimientos. Want me to write that block?
+
+no trasnsferencia ever recorded anyways, lets write the script
+Read 11_data_migration.sql (lines 1961-1995)
+Edit 11_data_migration.sql
+Added 48 lines
+Done. A few notes on the script:
+
+Only migrates estado = 'ejecutado' rows — pending/cancelled salidas don't have actual stock movements
+Uses origen_ubicacion_id (not destino) since these are egress — stock is leaving ALM_INS
+doc_movimiento_id groups per salida_inventario header (one posting per document)
+transferencia rows are silently excluded by the JOIN motivo_map — if any exist they'll be skipped without error. If you want to catch them, add a WHERE si.motivo::text != 'transferencia' or a check query first

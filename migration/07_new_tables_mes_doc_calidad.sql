@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS doc.guia_remision (
     flg_elm BOOL DEFAULT false,
     usr_elm INT,
     fyh_elm TIMESTAMPTZ,
-    UNIQUE (serie, correlativo, guia_remision_tipo_id)
+    UNIQUE (tercero_id, serie, correlativo, guia_remision_tipo_id)
 );
 
 -- ── doc.guia_remision_detalle ─────────────────────────────────
