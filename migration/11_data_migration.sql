@@ -724,14 +724,15 @@ SELECT
 FROM deduped d
 ORDER BY id;
 
+
 -- ── CLIENTES ─────────────────────────────────────────────────────────────────
 WITH all_cli AS (
     SELECT
         id,
-        regexp_replace(cliente, '^MLR/', '')                                                    AS nombre_canon,
-        lower(regexp_replace(regexp_replace(cliente, '^MLR/', ''), '[^a-zA-Z0-9]', '', 'g'))   AS name_key,
-        CASE WHEN cliente NOT ILIKE 'MLR/%' THEN id END                                        AS cli_id,   -- plain X
-        CASE WHEN cliente     ILIKE 'MLR/%' THEN id END                                        AS cli_id2,  -- MLR/X alias
+        regexp_replace(cliente, '^(MLR|OSWALDO)/', '', 'i')                                                    AS nombre_canon,
+        lower(regexp_replace(regexp_replace(cliente, '^(MLR|OSWALDO)/', '', 'i'), '[^a-zA-Z0-9]', '', 'g'))   AS name_key,
+        CASE WHEN cliente NOT ILIKE 'MLR/%' AND cliente NOT ILIKE 'OSWALDO/%' THEN id END      AS cli_id,   -- plain X
+        CASE WHEN cliente ILIKE 'MLR/%' OR  cliente ILIKE 'OSWALDO/%'         THEN id END      AS cli_id2,  -- MLR/X or OSWALDO/X alias
         NULLIF(ruc, '')                                                                         AS ruc,
         NULLIF(correo, '')                                                                      AS correo,
         NULLIF(procedencia, '')                                                                 AS procedencia,
@@ -754,11 +755,15 @@ canonical AS (
         CASE WHEN COUNT(CASE WHEN cli_id IS NOT NULL THEN 1 END) > 0
              THEN MIN(CASE WHEN cli_id2 IS NOT NULL THEN id END)
         END                                                                     AS secondary_id,
-        -- Contact info: prefer plain row, fall back to MLR/X row
-        COALESCE(MAX(CASE WHEN cli_id IS NOT NULL THEN ruc         END), MAX(ruc))         AS ruc,
-        COALESCE(MAX(CASE WHEN cli_id IS NOT NULL THEN correo      END), MAX(correo))      AS correo,
-        COALESCE(MAX(CASE WHEN cli_id IS NOT NULL THEN procedencia END), MAX(procedencia)) AS procedencia,
-        MIN(fyh_cre)                                                            AS fyh_cre
+        -- Contact info: prefer plain row, fall back to alias row
+        COALESCE(MAX(CASE WHEN cli_id IS NOT NULL THEN ruc         END), MAX(ruc))    AS ruc,
+        COALESCE(MAX(CASE WHEN cli_id IS NOT NULL THEN correo      END), MAX(correo)) AS correo,
+        -- procedencia = MLR whenever the group has an MLR/ or OSWALDO/ alias
+        CASE WHEN COUNT(CASE WHEN cli_id2 IS NOT NULL THEN 1 END) > 0
+             THEN 'MLR'
+             ELSE COALESCE(MAX(CASE WHEN cli_id IS NOT NULL THEN procedencia END), MAX(procedencia))
+        END                                                                            AS procedencia,
+        MIN(fyh_cre)                                                                   AS fyh_cre
     FROM all_cli
     GROUP BY name_key
 ),
@@ -766,27 +771,20 @@ with_code AS (
     SELECT *,
         COALESCE(NULLIF(LEFT(UPPER(name_key), 20), ''), 'CLI' || primary_id::text) AS code_base
     FROM canonical
-),
-deduped AS (
-    SELECT *, COUNT(*) OVER (PARTITION BY code_base) AS cnt
-    FROM with_code
 )
--- INSERT INTO tercero (cliente_id, cliente_id2, codigo, nombre, ruc, correo, procedencia, flg_cliente, fyh_cre)
+INSERT INTO tercero (cliente_id, cliente_id2, codigo, nombre, ruc, correo, procedencia, flg_cliente, fyh_cre)
 SELECT
-    d.primary_id,
-    d.secondary_id,
-    CASE WHEN d.cnt > 1 OR EXISTS (SELECT 1 FROM tercero WHERE codigo = d.code_base)
-         THEN d.code_base || '_' || d.primary_id::text
-         ELSE d.code_base
-    END,
-    d.nombre,
-    d.ruc,
-    d.correo,
-    d.procedencia,
+    w.primary_id,
+    w.secondary_id,
+    w.code_base,   -- no collision-avoidance: UNIQUE constraint on tercero.codigo will catch duplicates
+    w.nombre,
+    w.ruc,
+    w.correo,
+    w.procedencia,
     true,
-    d.fyh_cre
-FROM deduped d
-ORDER BY d.primary_id;
+    w.fyh_cre
+FROM with_code w
+ORDER BY w.primary_id;
 
 -- ============================================================================
 -- MIGRAR PARTIDAS
@@ -1527,7 +1525,6 @@ SELECT setval(
 
 
 
-
 -- SELECT * FROM inventario.lote WHERE id NOT IN (SELECT id FROM inventario)
 
 -- WITH 
@@ -1571,31 +1568,38 @@ INSERT INTO doc.factura_proveedor (
     fecha_vencimiento,
     tipo_pago,
     moneda,
+    tipo_cambio,
     subtotal,
     igv,
     total,
     estado_pago,
+    observacion,
     usr_cre,
     fyh_cre
 )
-SELECT
+SELECT DISTINCT ON (c.proveedor_id, SPLIT_PART(c.factura, '-', 1), NULLIF(regexp_replace(SPLIT_PART(c.factura, '-', 2), '[^0-9].*$', ''), '')::INT)
     (SELECT id FROM tercero WHERE proveedor_id = c.proveedor_id),
-    SPLIT_PART(c.factura, '-', 1)                    AS serie,
-    SPLIT_PART(c.factura, '-', 2)::INT               AS numero,
-    COALESCE(c.fecha_giro, c.fecha_remision)         AS fecha_emision,
+    SPLIT_PART(c.factura, '-', 1)                                                          AS serie,
+    NULLIF(regexp_replace(SPLIT_PART(c.factura, '-', 2), '[^0-9].*$', ''), '')::INT       AS numero,
+    COALESCE(c.fecha_giro, c.fecha_remision, c.fyh_cre_tz::DATE)                          AS fecha_emision,
     c.fecha_vencimiento,
     c.tipo_pago,
     'USD'::CHAR(3),
-    0              AS subtotal,   -- no legacy breakdown available
+    NULL                                                                                   AS tipo_cambio,
+    c.total_usd    AS subtotal,   -- no legacy breakdown; subtotal = total satisfies CHECK
     0              AS igv,
     c.total_usd    AS total,
-    c.estado_pago,
-    NULLIF(c.usr_cre, 'authenticated')::INT,
+    COALESCE(c.estado_pago, 'pendiente')                                                   AS estado_pago,
+    NULL                                                                                   AS observacion,
+    CASE WHEN c.usr_cre NOT IN ('authenticated', 'anon', 'postgres') THEN c.usr_cre::INT ELSE NULL END,
     c.fyh_cre_tz
 FROM public.compra c
 WHERE c.factura IS NOT NULL
-  AND c.factura LIKE '%-%'         -- must be parseable as SERIE-CORRELATIVO
-  AND c.proveedor_id IS NOT NULL;
+  AND c.factura LIKE '%-%'
+  AND c.proveedor_id IS NOT NULL
+  AND NULLIF(regexp_replace(SPLIT_PART(c.factura, '-', 2), '[^0-9].*$', ''), '') IS NOT NULL
+  AND c.total_usd > 0
+ORDER BY c.proveedor_id, SPLIT_PART(c.factura, '-', 1), NULLIF(regexp_replace(SPLIT_PART(c.factura, '-', 2), '[^0-9].*$', ''), '')::INT, c.fyh_cre_tz DESC;
 
 -- Orphan check: compras with a factura that couldn't be parsed → no factura_proveedor created
 -- SELECT id, factura FROM public.compra WHERE factura IS NOT NULL AND factura NOT LIKE '%-%';
@@ -1617,13 +1621,13 @@ SELECT
     (SELECT id FROM tercero WHERE proveedor_id = c.proveedor_id),
     fp.id,
     COALESCE(c.fecha_remision, c.fyh_cre_tz::DATE) AS fecha,
-    NULLIF(c.usr_cre, 'authenticated')::INT,
+    CASE WHEN c.usr_cre NOT IN ('authenticated', 'anon', 'postgres') THEN c.usr_cre::INT ELSE NULL END,
     c.fyh_cre_tz
 FROM public.compra c
 LEFT JOIN doc.factura_proveedor fp
     ON  fp.tercero_id = (SELECT id FROM tercero WHERE proveedor_id = c.proveedor_id)
     AND fp.serie      = SPLIT_PART(c.factura, '-', 1)
-    AND fp.numero     = SPLIT_PART(c.factura, '-', 2)::INT
+    AND fp.numero     = NULLIF(regexp_replace(SPLIT_PART(c.factura, '-', 2), '[^0-9].*$', ''), '')::INT
 WHERE c.proveedor_id IS NOT NULL;
 
 SELECT setval(
@@ -1729,7 +1733,7 @@ compra_data AS (
         c.proveedor_id,  -- adjust column name as needed
         c.fecha_remision,         -- adjust column name as needed
         c.fyh_cre + INTERVAL '5 hours' fyh_cre,
-        NULLIF(c.usr_cre, 'authenticated')::int AS usr_cre,
+        CASE WHEN c.usr_cre NOT IN ('authenticated', 'anon', 'postgres') THEN c.usr_cre::INT ELSE NULL END AS usr_cre,
         CASE 
             WHEN inv.rw = 1 THEN SPLIT_PART(c.guia_remision, '-', 1)
             ELSE SPLIT_PART(c.guia_remision, '-', 1)  -- same serie?
@@ -1754,7 +1758,7 @@ inserted_guias AS (
         usr_cre,
         fyh_cre
     FROM compra_data cd
-    GROUP BY 1,2,3,4,5,6,7,8
+    GROUP BY 1,2,3,4,5,6,7
     RETURNING id, serie, correlativo
 ),inserted_compra_guias_remision AS (
     INSERT INTO doc.compra_guia_remision(guia_remision_id,compra_id)
