@@ -234,7 +234,12 @@ VALUES
 ('AJUSTE_POS',       'Ajuste Inventario (+)',                     'AJUSTE',          1,  true,  true,  true,  false, false, true,  'Sobrante físico'),
 ('AJUSTE_NEG',       'Ajuste Inventario (-)',                     'AJUSTE',          -1, true,  true,  false, false, true,  false, 'Faltante físico / Merma'),
 ('PESAJE_POS',       'Pesaje – Corrección (+)',                   'AJUSTE',          1,  true,  false, false, false, false, true,  'Corrección de peso (real > declarado)'),
-('PESAJE_NEG',       'Pesaje – Corrección (-)',                   'AJUSTE',          -1, true,  false, false, false, true,  false, 'Corrección de peso (real < declarado)');
+('PESAJE_NEG',       'Pesaje – Corrección (-)',                   'AJUSTE',          -1, true,  false, false, false, true,  false, 'Corrección de peso (real < declarado)'),
+-- Muestras: no valorizables ni recalculan costo — son movimientos de trazabilidad, no de compra.
+-- MUESTRA_ING cubre recepciones de muestra de proveedor sin documento de compra.
+-- MUESTRA_EGR cubre salidas de muestra (cliente, proceso, etc.) registradas en salida_inventario con motivo='muestra'.
+('MUESTRA_ING',      'Muestra – Ingreso',                         'AJUSTE',          1,  true,  false, false, false, false, true,  'Ingreso de muestra de proveedor'),
+('MUESTRA_EGR',      'Muestra – Egreso',                          'AJUSTE',          -1, true,  false, false, false, true,  false, 'Salida de muestra para cliente/proceso');
 
 -- ── inventario.almacen ────────────────────────────────────────
 CREATE TABLE inventario.almacen (

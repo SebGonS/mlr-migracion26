@@ -1754,11 +1754,13 @@ inserted_guias AS (
         (SELECT id FROM tercero WHERE proveedor_id = cd.proveedor_id),
         serie,
         correlativo,
-        fecha_remision::date,
-        usr_cre,
-        fyh_cre
+        MAX(fecha_remision::date) AS fecha_emision,
+        MAX(usr_cre)              AS usr_cre,
+        MAX(fyh_cre)              AS fyh_cre
     FROM compra_data cd
-    GROUP BY 1,2,3,4,5,6,7
+    -- GROUP BY unique key only: same (tipo,tercero,serie,correlativo) from multiple lotes → one guia.
+    -- UNIQUE constraint is (tercero_id, serie, correlativo, guia_remision_tipo_id) — see 07_new_tables.
+    GROUP BY 1,2,3,4
     RETURNING id, serie, correlativo
 ),inserted_compra_guias_remision AS (
     INSERT INTO doc.compra_guia_remision(guia_remision_id,compra_id)
@@ -1994,6 +1996,14 @@ JOIN doc_posting dp
 WHERE i.cantidad > 0;
 
 -- REGISTRAR SALIDAS DE INVENTARIO
+-- Fuente: public.salida_inventario (header) → salida_inventario_detalle (líneas)
+--         → salida_inventario_detalle_x_stock (consumo real por lote)
+-- Solo se migran registros con estado='ejecutado'; pendientes/cancelados no generaron movimiento real.
+-- motivo_map traduce el enum legacy al codigo de item_movimiento_tipo del nuevo esquema:
+--   - Motivos de proceso productivo (receta, lavado, etc.) → PROD_CONSUMO
+--   - Motivos de ajuste puro (ajuste, reconteo, merma, etc.) → AJUSTE_NEG
+--   - muestra → MUESTRA_EGR (tipo dedicado, no valorizable; ver 05_new_tables_foundation.sql)
+--   - transferencia: excluida del mapa — no hubo transferencias registradas en el sistema legacy.
 WITH motivo_map (motivo, codigo) AS (
     VALUES
         ('receta',        'PROD_CONSUMO'),
@@ -2005,7 +2015,7 @@ WITH motivo_map (motivo, codigo) AS (
         ('ajuste',        'AJUSTE_NEG'),
         ('reconteo',      'AJUSTE_NEG'),
         ('merma',         'AJUSTE_NEG'),
-        ('muestra',       'AJUSTE_NEG'),
+        ('muestra',       'MUESTRA_EGR'), -- dedicated type, not valorizable
         ('mantenimiento', 'AJUSTE_NEG'),
         ('otros',         'AJUSTE_NEG')
 ),
