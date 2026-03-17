@@ -1437,13 +1437,18 @@ WHERE EXISTS (SELECT 1 FROM receta.lavado_maquina_paso WHERE id = rlmp.id);
 -- ============================================================================
 
 ------INSERTAR PRIMERO TEÑIDOS como primer paso de la orden de produccion default de todas las partidas
+-- OVERRIDING SYSTEM VALUE preserves pxr.id as paso.id so egress movements can link
+-- directly via salida_inventario.partida_x_recetas_id → documento_id = 'ORDEN_PRODUCCION_PASO'
 INSERT INTO mes.orden_produccion_paso(
+id,
 orden_produccion_id,
 secuencia,operacion_id,maquina_asignada_id,relacion_bano,receta_id,fyh_inicio,fyh_fin,
 fyh_cre,
 estado
 )
-SELECT op.id,
+OVERRIDING SYSTEM VALUE
+SELECT pxr.id,
+op.id,
 row_NUMBER() OVER (PARTITION BY op.id ORDER BY pxr.fecha,pxr.fyh_cre) AS secuencia,
 tr.operacion_id,
 pxr.maquina_id,
@@ -1456,9 +1461,14 @@ pxr.fyh_cre,
 FROM partida_x_recetas pxr
 LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
 LEFT JOIN public.maquina m ON m.id=pxr.maquina_id
-LEFT JOIN mes.orden_produccion op ON op.partida_id = pxr.partida_id 
+LEFT JOIN mes.orden_produccion op ON op.partida_id = pxr.partida_id
 AND ((op.tipo = 'NORMAL' AND tipo_receta='Teñido') OR (op.tipo = 'REPROCESO' AND tipo_receta!='Teñido'))
 WHERE pxr.receta_id IS not NULL;
+
+SELECT setval(
+    pg_get_serial_sequence('mes.orden_produccion_paso', 'id'),
+    (SELECT MAX(id) FROM mes.orden_produccion_paso)
+);
 
 -- ============================================================================
 -- MIGRAR LOTES Y MOVIMIENTOS INICIALES DE INSUMOS
@@ -1935,10 +1945,15 @@ WHERE cid.cuadre_inventario_id IN (SELECT id FROM inventario.cuadre);
 -- WHERE it.id IS NULL;
 
 -- ============================================================================
-
--------------------ACTUALIZAR DOC DE ENTRADADAS POR AJUSTES y/o CUADRES
---pendiente
--- documento_tipo = 'CUADRE' to match inventario.finalizar_cuadre convention
+-- TAG CUADRE-SOURCED LOTES  →  inventario.lote (UPDATE)
+-- ============================================================================
+-- Scope:   Insumo lotes whose legacy entrada_inventario had motivo ∈ (ajuste, reconteo)
+--          and whose timestamp matches a cuadre.fecha_cierre.
+-- Effect:  Sets documento_tipo = 'CUADRE', documento_id = cuadre.id on those lotes,
+--          overwriting the NULL originally set during the insumo lote INSERT.
+-- Must run BEFORE the INSUMO INGRESS MOVEMENTS block so the lote.documento_tipo
+-- values read there are already correct.
+-- ============================================================================
 UPDATE inventario.lote
 SET documento_tipo = 'CUADRE',
     documento_id   = ci.id
@@ -1959,19 +1974,48 @@ WHERE ei.motivo IN ('ajuste', 'reconteo')
 -- LEFT JOIN inventario.cuadre ci ON ci.fecha_cierre = ei.fyh_solicitud_tz
 -- WHERE ei.motivo IN ('ajuste','reconteo') AND ci.id IS NOT NULL
 
---REGISTRAR MOVIMIENTO INICIAL
-WITH doc_posting AS (
-    -- One doc_movimiento_id per distinct source document (mirrors one function call = one ID)
-    -- DISTINCT must be in a subquery: nextval() fires per input row, so DISTINCT on the outer
-    -- SELECT would never collapse rows (each nextval result is unique).
+-- ============================================================================
+-- INSUMO INGRESS MOVEMENTS  →  inventario.item_movimientos
+-- ============================================================================
+-- Source:  inventario.lote  (already migrated from public.inventario + public.compra)
+--          joined to public.entrada_inventario via public.inventario to recover motivo.
+-- Scope:   All insumo lotes with cantidad > 0.  Excludes roll lotes (those are in the
+--          BACKFILL ROLL LOTES section below and have documento_tipo = 'PARTIDA').
+--
+-- Movement type mapping:
+--   lote.documento_tipo = 'GUIA_REMISION'  → COMPRA_ING  (purchase arrival)
+--   lote.documento_tipo = 'CUADRE'         → AJUSTE_POS  (positive adjustment from count)
+--   entrada_inventario.motivo = 'muestra'  → MUESTRA_ING (non-valorizable sample receipt)
+--   anything else (orphan/manual entries)  → AJUSTE_POS  (safe fallback)
+--
+-- doc_movimiento_id grouping:
+--   One posting document per distinct (documento_tipo, documento_id) pair — i.e. one
+--   per guia_remision or per cuadre.  Muestra events group by entrada_inventario.id.
+--   nextval fires inside the inner DISTINCT subquery so each group gets exactly one seq.
+-- ============================================================================
+WITH lote_source AS (
+    -- Enrich each lote with its legacy entrada motivo for movement type + grouping.
+    -- Muestra lotes have documento_tipo = NULL on the lote; we use entrada_inventario.id
+    -- as the grouping key so each muestra event gets its own doc_movimiento_id.
     SELECT
-        documento_tipo,
-        documento_id,
-        nextval('inventario.mov_doc_seq') AS doc_movimiento_id
+        i.id, i.item_id, i.cantidad, i.documento_tipo, i.documento_id, i.usr_cre, i.fyh_cre,
+        ei.motivo,
+        -- Effective grouping key: lote's own doc for known types, entrada id for muestra
+        COALESCE(i.documento_tipo, CASE WHEN ei.motivo = 'muestra' THEN 'MUESTRA' END) AS grp_tipo,
+        COALESCE(i.documento_id,   CASE WHEN ei.motivo = 'muestra' THEN ei.id      END) AS grp_id
+    FROM inventario.lote i
+    LEFT JOIN public.inventario                inv ON inv.id  = i.id
+    LEFT JOIN public.entrada_inventario_detalle eid ON eid.id = inv.entrada_inventario_detalle_id
+    LEFT JOIN public.entrada_inventario         ei  ON ei.id  = eid.entrada_inventario_id
+    WHERE i.cantidad > 0
+),
+doc_posting AS (
+    -- One doc_movimiento_id per distinct grouping key
+    -- DISTINCT in subquery so nextval fires once per unique group, not per row
+    SELECT grp_tipo, grp_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
     FROM (
-        SELECT DISTINCT documento_tipo, documento_id
-        FROM inventario.lote
-        WHERE cantidad > 0
+        SELECT DISTINCT grp_tipo, grp_id
+        FROM lote_source
     ) t
 )
 INSERT INTO inventario.item_movimientos(
@@ -1979,31 +2023,51 @@ INSERT INTO inventario.item_movimientos(
 )
 SELECT
     dp.doc_movimiento_id,
-    i.item_id,
-    i.id,
-    CASE WHEN i.documento_tipo = 'GUIA_REMISION' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING') ELSE (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS') END,
+    ls.item_id,
+    ls.id,
+    CASE ls.documento_tipo
+        WHEN 'GUIA_REMISION' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING')
+        WHEN 'CUADRE'        THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS')
+        ELSE CASE ls.motivo
+            WHEN 'muestra' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'MUESTRA_ING')
+            ELSE                (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS')
+        END
+    END,
     (SELECT inventario.ubicacion.id FROM inventario.ubicacion JOIN inventario.almacen ON inventario.almacen.id = inventario.ubicacion.almacen_id WHERE inventario.almacen.codigo = 'ALM_INS'),
-    i.cantidad,
-    i.documento_tipo,
-    i.documento_id,
+    ls.cantidad,
+    ls.documento_tipo,
+    ls.documento_id,
     'Migración Inicial',
-    i.usr_cre,
-    i.fyh_cre
-FROM inventario.lote i
+    ls.usr_cre,
+    ls.fyh_cre
+FROM lote_source ls
 JOIN doc_posting dp
-  ON dp.documento_tipo IS NOT DISTINCT FROM i.documento_tipo
- AND dp.documento_id   IS NOT DISTINCT FROM i.documento_id
-WHERE i.cantidad > 0;
+  ON dp.grp_tipo IS NOT DISTINCT FROM ls.grp_tipo
+ AND dp.grp_id   IS NOT DISTINCT FROM ls.grp_id;
 
--- REGISTRAR SALIDAS DE INVENTARIO
--- Fuente: public.salida_inventario (header) → salida_inventario_detalle (líneas)
---         → salida_inventario_detalle_x_stock (consumo real por lote)
--- Solo se migran registros con estado='ejecutado'; pendientes/cancelados no generaron movimiento real.
--- motivo_map traduce el enum legacy al codigo de item_movimiento_tipo del nuevo esquema:
---   - Motivos de proceso productivo (receta, lavado, etc.) → PROD_CONSUMO
---   - Motivos de ajuste puro (ajuste, reconteo, merma, etc.) → AJUSTE_NEG
---   - muestra → MUESTRA_EGR (tipo dedicado, no valorizable; ver 05_new_tables_foundation.sql)
---   - transferencia: excluida del mapa — no hubo transferencias registradas en el sistema legacy.
+-- ============================================================================
+-- INSUMO EGRESS MOVEMENTS  →  inventario.item_movimientos
+-- ============================================================================
+-- Source:  public.salida_inventario (header)
+--          → public.salida_inventario_detalle (line items)
+--          → public.salida_inventario_detalle_x_stock (actual per-lote consumption)
+-- Scope:   Only salidas with estado = 'aprobado' (pending/cancelled never executed).
+--          Excludes roll-lote consumptions — those are handled in BACKFILL ROLL LOTES.
+--
+-- Movement type mapping via motivo_map:
+--   receta / matizado / lavado / lavado maquina / desmontado / ajuste receta → PROD_CONSUMO
+--   ajuste / reconteo / merma / mantenimiento / otros                        → AJUSTE_NEG
+--   muestra                                                                  → MUESTRA_EGR
+--   transferencia: excluded — none were ever recorded in the legacy system.
+--
+-- documento_tipo / documento_id on the movement:
+--   CUADRE-linked:      salida matches a cuadre by timestamp AND motivo ∈ (ajuste, reconteo)
+--                       → documento_tipo = 'CUADRE', documento_id = cuadre.id
+--                       → doc_movimiento_id reused from that cuadre's ingress posting
+--   PROD_CONSUMO + pxr: salida.partida_x_recetas_id IS NOT NULL
+--                       → documento_tipo = 'ORDEN_PRODUCCION_PASO', documento_id = pxr.id
+--   all other:          documento_tipo / documento_id = NULL
+-- ============================================================================
 WITH motivo_map (motivo, codigo) AS (
     VALUES
         ('receta',        'PROD_CONSUMO'),
@@ -2037,7 +2101,7 @@ doc_posting AS (
     LEFT JOIN inventario.cuadre ci
            ON ci.fecha_cierre = si.fyh_solicitud_tz
           AND si.motivo::text IN ('ajuste', 'reconteo')
-    WHERE ci.estado = 'ejecutado'
+    WHERE si.estado = 'aprobado'
 )
 INSERT INTO inventario.item_movimientos (
     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
@@ -2051,8 +2115,14 @@ SELECT
     (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = mm.codigo),
     (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_INS'),
     sdxs.cantidad,
-    CASE WHEN dp.cuadre_id IS NOT NULL THEN 'CUADRE' END,
-    dp.cuadre_id,
+    CASE
+        WHEN dp.cuadre_id IS NOT NULL  THEN 'CUADRE'
+        WHEN mm.codigo = 'PROD_CONSUMO' AND si.partida_x_recetas_id IS NOT NULL THEN 'ORDEN_PRODUCCION_PASO'
+    END,
+    CASE
+        WHEN dp.cuadre_id IS NOT NULL  THEN dp.cuadre_id
+        WHEN mm.codigo = 'PROD_CONSUMO' AND si.partida_x_recetas_id IS NOT NULL THEN si.partida_x_recetas_id
+    END,
     si.observacion,
     si.usr_solicita,
     COALESCE(si.fyh_salida_real, si.fyh_solicitud_tz)
@@ -2064,9 +2134,148 @@ JOIN motivo_map mm ON mm.motivo = si.motivo::text
 JOIN doc_posting dp ON dp.salida_inventario_id = si.id
 
 
--- Replace 'my_enum_type' with the actual name of your ENUM type
-SELECT unnest(enum_range(NULL::my_enum_type));
 
+-- ============================================================================
+-- BACKFILL ROLL LOTES (HISTÓRICO)
+-- ============================================================================
+-- No per-roll tracking existed in the legacy system. We reconstruct one lote
+-- per physical roll from partida aggregate data:
+--   cantidad  = peso_rollos / rollos  (or peso_rib / rib for rib rolls)
+--   propietario_id:
+--     legacy cliente.cliente started with 'MLR/' or 'OSWALDO/' → MLR (id=1)
+--     otherwise → tercero.id (client owns the roll)
+--   Note: the prefix check is done on public.cliente directly because tercero.cliente_id2
+--   is NULL when only the prefixed alias existed (no plain client entry), making the
+--   tercero.cliente_id2 check insufficient on its own.
+-- Movement type SERV_ING for ingress regardless of owner (service context).
+-- Egress is PROD_CONSUMO linked to the first paso of the orden_produccion.
+-- ============================================================================
+
+-- Step 1–4: Insert lotes → orden_produccion_item → orden_produccion_paso_item → ingress movements
+WITH roll_source AS (
+    -- Regular rolls
+    SELECT
+        p.id          AS partida_id,
+        ird.item_id,
+        p.peso_rollos / NULLIF(p.rollos, 0)  AS cantidad,
+        CASE WHEN c.cliente ILIKE 'MLR/%' OR c.cliente ILIKE 'OSWALDO/%' THEN 1 ELSE t.id END AS propietario_id,
+        p.fyh_cre_tz  AS fyh_cre,
+        p.usr_cre
+    FROM public.partida p
+    JOIN public.cliente c ON c.id = p.cliente_id
+    JOIN item_rollo_detalle ird
+        ON ird.articulo_id = p.articulo_id AND ird.flg_tenido = false AND ird.flg_rib = false
+    JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
+    CROSS JOIN generate_series(1, GREATEST(p.rollos, 0))
+    WHERE p.rollos > 0 AND p.peso_rollos > 0
+
+    UNION ALL
+
+    -- Rib rolls
+    SELECT
+        p.id          AS partida_id,
+        ird.item_id,
+        p.peso_rib / NULLIF(p.rib, 0)        AS cantidad,
+        CASE WHEN c.cliente ILIKE 'MLR/%' OR c.cliente ILIKE 'OSWALDO/%' THEN 1 ELSE t.id END AS propietario_id,
+        p.fyh_cre_tz  AS fyh_cre,
+        p.usr_cre
+    FROM public.partida p
+    JOIN public.cliente c ON c.id = p.cliente_id
+    JOIN item_rollo_detalle ird
+        ON ird.articulo_id = p.articulo_id AND ird.flg_tenido = false AND ird.flg_rib = true
+    JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
+    CROSS JOIN generate_series(1, GREATEST(p.rib, 0))
+    WHERE p.rib > 0 AND p.peso_rib > 0
+),
+ingress_posting AS (
+    -- One doc_movimiento_id per partida — DISTINCT in subquery before nextval fires
+    SELECT partida_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
+    FROM (SELECT DISTINCT partida_id FROM roll_source) t
+),
+lote_insert AS (
+    INSERT INTO inventario.lote (item_id, cantidad, documento_tipo, documento_id, propietario_id, usr_cre, fyh_cre)
+    SELECT item_id, cantidad, 'PARTIDA', partida_id, propietario_id, usr_cre, fyh_cre
+    FROM roll_source
+    RETURNING id AS lote_id, item_id, documento_id AS partida_id, cantidad, propietario_id, usr_cre, fyh_cre
+),
+opi_insert AS (
+    INSERT INTO mes.orden_produccion_item (orden_produccion_id, item_id, lote_id, ubicacion_id, usr_cre, fyh_cre)
+    SELECT
+        op.id,
+        li.item_id,
+        li.lote_id,
+        (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
+        li.usr_cre,
+        li.fyh_cre
+    FROM lote_insert li
+    JOIN mes.orden_produccion op ON op.partida_id = li.partida_id
+    RETURNING id AS opi_id, orden_produccion_id, lote_id
+),
+oppi_insert AS (
+    INSERT INTO mes.orden_produccion_paso_item (orden_produccion_paso_id, orden_produccion_item_id, usr_cre, fyh_cre)
+    SELECT
+        opp.id,
+        opi.opi_id,
+        li.usr_cre,
+        li.fyh_cre
+    FROM opi_insert opi
+    JOIN mes.orden_produccion_paso opp
+        ON opp.orden_produccion_id = opi.orden_produccion_id AND opp.secuencia = 1
+    JOIN lote_insert li ON li.lote_id = opi.lote_id
+    RETURNING orden_produccion_paso_id, orden_produccion_item_id
+)
+INSERT INTO inventario.item_movimientos (
+    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+    destino_ubicacion_id, cantidad, documento_tipo, documento_id,
+    usr_cre, fyh_cre
+)
+SELECT
+    ip.doc_movimiento_id,
+    li.item_id,
+    li.lote_id,
+    (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_ING'),
+    (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
+    li.cantidad,
+    'PARTIDA',
+    li.partida_id,
+    li.usr_cre,
+    li.fyh_cre
+FROM lote_insert li
+JOIN ingress_posting ip ON ip.partida_id = li.partida_id;
+
+-- Step 5: Egress movements — consume each roll lote via PROD_CONSUMO linked to its first paso
+-- One doc_movimiento_id per orden_produccion_paso (separate from insumo consumptions)
+WITH egress_posting AS (
+    SELECT opp.id AS paso_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
+    FROM (
+        SELECT DISTINCT opp.id
+        FROM mes.orden_produccion_paso opp
+        JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_paso_id = opp.id
+        JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
+        JOIN inventario.lote l ON l.id = opi.lote_id AND l.documento_tipo = 'PARTIDA'
+    ) t
+)
+INSERT INTO inventario.item_movimientos (
+    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+    origen_ubicacion_id, cantidad, documento_tipo, documento_id,
+    usr_cre, fyh_cre
+)
+SELECT
+    ep.doc_movimiento_id,
+    l.item_id,
+    l.id,
+    (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO'),
+    (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
+    l.cantidad,
+    'ORDEN_PRODUCCION_PASO',
+    opp.id,
+    l.usr_cre,
+    l.fyh_cre
+FROM mes.orden_produccion_paso opp
+JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_paso_id = opp.id
+JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
+JOIN inventario.lote l ON l.id = opi.lote_id AND l.documento_tipo = 'PARTIDA'
+JOIN egress_posting ep ON ep.paso_id = opp.id;
 
 COMMIT;
 
