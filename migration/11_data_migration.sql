@@ -2202,69 +2202,117 @@ WHERE si.motivo IS NOT NULL
 
 -- Steps 1–4 (single CTE chain — must run atomically)
 WITH roll_source AS (
-    -- Regular rolls
+    -- Regular rolls — rn = position within partida (1..rollos)
     SELECT
         p.id          AS partida_id,
         ird.item_id,
         p.peso_rollos / NULLIF(p.rollos, 0)  AS cantidad,
         CASE WHEN c.cliente ILIKE 'MLR/%' OR c.cliente ILIKE 'OSWALDO/%' THEN 1 ELSE t.id END AS propietario_id,
         p.fyh_cre_tz  AS fyh_cre,
-        p.usr_cre
+        p.usr_cre,
+        false         AS flg_rib,
+        gs.n          AS rn
     FROM public.partida p
     JOIN public.cliente c ON c.id = p.cliente_id
     JOIN item_rollo_detalle ird
         ON ird.articulo_id = p.articulo_id AND ird.flg_tenido = false AND ird.flg_rib = false
     JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
-    CROSS JOIN generate_series(1, GREATEST(p.rollos, 0))
+    CROSS JOIN generate_series(1, GREATEST(p.rollos, 0)) gs(n)
     WHERE p.rollos > 0 AND p.peso_rollos > 0
 
     UNION ALL
 
-    -- Rib rolls
+    -- Rib rolls — rn = position within partida (1..rib)
     SELECT
         p.id          AS partida_id,
         ird.item_id,
         p.peso_rib / NULLIF(p.rib, 0)        AS cantidad,
         CASE WHEN c.cliente ILIKE 'MLR/%' OR c.cliente ILIKE 'OSWALDO/%' THEN 1 ELSE t.id END AS propietario_id,
         p.fyh_cre_tz  AS fyh_cre,
-        p.usr_cre
+        p.usr_cre,
+        true          AS flg_rib,
+        gs.n          AS rn
     FROM public.partida p
     JOIN public.cliente c ON c.id = p.cliente_id
     JOIN item_rollo_detalle ird
         ON ird.articulo_id = p.articulo_id AND ird.flg_tenido = false AND ird.flg_rib = true
     JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
-    CROSS JOIN generate_series(1, GREATEST(p.rib, 0))
+    CROSS JOIN generate_series(1, GREATEST(p.rib, 0)) gs(n)
     WHERE p.rib > 0 AND p.peso_rib > 0
+),
+pxr_ranges AS (
+    -- Roll/rib ranges per pxr row, ordered by fecha, id within partida.
+    -- NORMAL  pasos: cumulative offset — rolls assigned sequentially across NORMAL rows.
+    -- REPROCESO pasos: offset always 0 — they re-process a subset of the same rolls
+    --   (rolls 1..pxr.rollos) independently, so each REPROCESO overlaps with NORMAL.
+    SELECT
+        pxr.id                                                                          AS pxr_id,
+        pxr.partida_id,
+        tr.orden_produccion_tipo,
+        COALESCE(pxr.rollos, 0)                                                         AS rollos,
+        COALESCE(pxr.rib, 0)                                                            AS rib,
+        CASE WHEN tr.orden_produccion_tipo = 'NORMAL'
+             THEN COALESCE(SUM(COALESCE(pxr.rollos, 0)) OVER (
+                      PARTITION BY pxr.partida_id, tr.orden_produccion_tipo
+                      ORDER BY pxr.fecha, pxr.id
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                  ), 0)
+             ELSE 0
+        END                                                                             AS rollos_start,
+        CASE WHEN tr.orden_produccion_tipo = 'NORMAL'
+             THEN COALESCE(SUM(COALESCE(pxr.rib, 0)) OVER (
+                      PARTITION BY pxr.partida_id, tr.orden_produccion_tipo
+                      ORDER BY pxr.fecha, pxr.id
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                  ), 0)
+             ELSE 0
+        END                                                                             AS rib_start
+    FROM partida_x_recetas pxr
+    JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+    WHERE pxr.receta_id IS NOT NULL AND pxr.flg_elm = false
 ),
 ingress_posting AS (
     -- One doc_movimiento_id per partida — DISTINCT in subquery before nextval fires
     SELECT partida_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
     FROM (SELECT DISTINCT partida_id FROM roll_source) t
 ),
-lote_insert AS ( -- Step 1: raw roll lotes
+lote_insert AS ( -- Step 1: raw roll lotes — inserted ordered by (partida_id, flg_rib, rn)
+    -- so that lote IDs are assigned in roll_source order, allowing rn re-derivation below
     INSERT INTO inventario.lote (item_id, cantidad, documento_tipo, documento_id, propietario_id, usr_cre, fyh_cre)
     SELECT item_id, cantidad, 'PARTIDA', partida_id, propietario_id, usr_cre, fyh_cre
-    FROM roll_source
+    FROM (SELECT * FROM roll_source ORDER BY partida_id, flg_rib, rn) rs
     RETURNING id AS lote_id, item_id, documento_id AS partida_id, cantidad, propietario_id, usr_cre, fyh_cre
 ),
-opi_insert AS ( -- Step 2: link lotes → orden_produccion_item
+lote_with_rn AS (
+    -- Re-derive rn from lote_id order (matches insertion order above).
+    -- flg_rib recovered via item_rollo_detalle.
+    SELECT
+        li.*,
+        ird.flg_rib,
+        ROW_NUMBER() OVER (PARTITION BY li.partida_id, ird.flg_rib ORDER BY li.lote_id) AS rn
+    FROM lote_insert li
+    JOIN item_rollo_detalle ird ON ird.item_id = li.item_id AND ird.flg_tenido = false
+),
+opi_insert AS ( -- Step 2: link each lote to every pxr whose range covers its rn
+    -- op.id = pxr.id (OVERRIDING SYSTEM VALUE), so JOIN directly.
+    -- One lote → one opi per NORMAL pxr it falls into (sequential range).
+    -- One lote → one opi per REPROCESO pxr whose rollos/rib >= lote's rn (overlink).
+    -- Lotes that fall outside all ranges (count mismatch) get no opi here;
+    -- ghost Step 6 gives them a SERV_EGR to close their inventory balance.
     INSERT INTO mes.orden_produccion_item (orden_produccion_id, item_id, lote_id, ubicacion_id, usr_cre, fyh_cre)
     SELECT
-        op.id,
-        li.item_id,
-        li.lote_id,
+        pr.pxr_id,
+        lwr.item_id,
+        lwr.lote_id,
         (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
-        li.usr_cre,
-        li.fyh_cre
-    FROM lote_insert li
-    -- Pick the earliest NORMAL orden for the partida (Teñido step = entry point for rolls).
-    -- LATERAL + LIMIT 1 avoids fan-out when multiple pxr rows exist per partida.
-    JOIN LATERAL (
-        SELECT id FROM mes.orden_produccion
-        WHERE partida_id = li.partida_id AND tipo = 'NORMAL'
-        ORDER BY fyh_inicio ASC NULLS LAST, id ASC
-        LIMIT 1
-    ) op ON true
+        lwr.usr_cre,
+        lwr.fyh_cre
+    FROM lote_with_rn lwr
+    JOIN pxr_ranges pr ON pr.partida_id = lwr.partida_id
+        AND CASE WHEN lwr.flg_rib
+                 THEN lwr.rn > pr.rib_start    AND lwr.rn <= pr.rib_start    + pr.rib
+                 ELSE lwr.rn > pr.rollos_start AND lwr.rn <= pr.rollos_start + pr.rollos
+            END
     RETURNING id AS opi_id, orden_produccion_id, lote_id
 ),
 oppi_insert AS ( -- Step 3: link opi → orden_produccion_paso_item
@@ -2277,7 +2325,7 @@ oppi_insert AS ( -- Step 3: link opi → orden_produccion_paso_item
     FROM opi_insert opi
     JOIN mes.orden_produccion_paso opp
         ON opp.orden_produccion_id = opi.orden_produccion_id AND opp.secuencia = 1
-    JOIN lote_insert li ON li.lote_id = opi.lote_id
+    JOIN lote_with_rn li ON li.lote_id = opi.lote_id
     RETURNING orden_produccion_paso_id, orden_produccion_item_id
 )
 INSERT INTO inventario.item_movimientos (
@@ -2299,13 +2347,99 @@ SELECT
 FROM lote_insert li
 JOIN ingress_posting ip ON ip.partida_id = li.partida_id; -- Step 4: SERV_ING
 
--- Step 5: PROD_CONSUMO — raw roll consumed by paso (only rolls that got oppi in step 3)
--- One doc_movimiento_id per orden_produccion_paso (separate from insumo consumptions)
+-- ============================================================================
+-- RERUN SNIPPET — Steps 2–3 only (opi + oppi reassignment)
+-- ============================================================================
+-- Use this if inventario.lote rows for documento_tipo='PARTIDA' already exist
+-- (Steps 1 + 4 already ran) but opi/oppi need to be redone — e.g. after logic
+-- changes to pxr_ranges or opi_insert without re-seeding lotes.
+--
+-- Prerequisites:
+--   DELETE FROM mes.orden_produccion_paso_item
+--   WHERE orden_produccion_item_id IN (
+--       SELECT id FROM mes.orden_produccion_item
+--       WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo = 'PARTIDA')
+--   );
+--   DELETE FROM mes.orden_produccion_item
+--   WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo = 'PARTIDA');
+--
+-- NOTE: SERV_ING movements (Step 4) are NOT re-created here — they already exist.
+-- Run Steps 5 onward after this snippet.
+-- ============================================================================
+-- WITH pxr_ranges AS (
+--     SELECT
+--         pxr.id                                                                          AS pxr_id,
+--         pxr.partida_id,
+--         tr.orden_produccion_tipo,
+--         COALESCE(pxr.rollos, 0)                                                         AS rollos,
+--         COALESCE(pxr.rib, 0)                                                            AS rib,
+--         CASE WHEN tr.orden_produccion_tipo = 'NORMAL'
+--              THEN COALESCE(SUM(COALESCE(pxr.rollos, 0)) OVER (
+--                       PARTITION BY pxr.partida_id, tr.orden_produccion_tipo
+--                       ORDER BY pxr.fecha, pxr.id
+--                       ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+--                   ), 0)
+--              ELSE 0
+--         END                                                                             AS rollos_start,
+--         CASE WHEN tr.orden_produccion_tipo = 'NORMAL'
+--              THEN COALESCE(SUM(COALESCE(pxr.rib, 0)) OVER (
+--                       PARTITION BY pxr.partida_id, tr.orden_produccion_tipo
+--                       ORDER BY pxr.fecha, pxr.id
+--                       ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+--                   ), 0)
+--              ELSE 0
+--         END                                                                             AS rib_start
+--     FROM partida_x_recetas pxr
+--     JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
+--     WHERE pxr.receta_id IS NOT NULL AND pxr.flg_elm = false
+-- ),
+-- lote_existing AS (
+--     SELECT
+--         l.id AS lote_id, l.item_id, l.documento_id AS partida_id,
+--         l.cantidad, l.propietario_id, l.usr_cre, l.fyh_cre,
+--         ird.flg_rib,
+--         ROW_NUMBER() OVER (PARTITION BY l.documento_id, ird.flg_rib ORDER BY l.id) AS rn
+--     FROM inventario.lote l
+--     JOIN item_rollo_detalle ird ON ird.item_id = l.item_id AND ird.flg_tenido = false
+--     WHERE l.documento_tipo = 'PARTIDA'
+-- ),
+-- opi_insert AS (
+--     INSERT INTO mes.orden_produccion_item (orden_produccion_id, item_id, lote_id, ubicacion_id, usr_cre, fyh_cre)
+--     SELECT
+--         pr.pxr_id,
+--         le.item_id,
+--         le.lote_id,
+--         (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
+--         le.usr_cre,
+--         le.fyh_cre
+--     FROM lote_existing le
+--     JOIN pxr_ranges pr ON pr.partida_id = le.partida_id
+--         AND CASE WHEN le.flg_rib
+--                  THEN le.rn > pr.rib_start    AND le.rn <= pr.rib_start    + pr.rib
+--                  ELSE le.rn > pr.rollos_start AND le.rn <= pr.rollos_start + pr.rollos
+--             END
+--     RETURNING id AS opi_id, orden_produccion_id, lote_id
+-- )
+-- INSERT INTO mes.orden_produccion_paso_item (orden_produccion_paso_id, orden_produccion_item_id, usr_cre, fyh_cre)
+-- SELECT
+--     opp.id,
+--     opi.opi_id,
+--     le.usr_cre,
+--     le.fyh_cre
+-- FROM opi_insert opi
+-- JOIN mes.orden_produccion_paso opp
+--     ON opp.orden_produccion_id = opi.orden_produccion_id AND opp.secuencia = 1
+-- JOIN lote_existing le ON le.lote_id = opi.lote_id;
+
+-- Step 5: PROD_CONSUMO — raw roll consumed by NORMAL paso only
+-- REPROCESO pasos intentionally excluded: they share the same raw lotes via opi/oppi
+-- for roll-count traceability, but no inventory debit is recorded for re-processing.
 WITH egress_posting AS (
     SELECT opp.id AS paso_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
     FROM (
         SELECT DISTINCT opp.id
         FROM mes.orden_produccion_paso opp
+        JOIN mes.orden_produccion       op   ON op.id  = opp.orden_produccion_id AND op.tipo = 'NORMAL'
         JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_paso_id = opp.id
         JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
         JOIN inventario.lote l ON l.id = opi.lote_id AND l.documento_tipo = 'PARTIDA'
@@ -2328,6 +2462,7 @@ SELECT
     l.usr_cre,
     l.fyh_cre
 FROM mes.orden_produccion_paso opp
+JOIN mes.orden_produccion       op   ON op.id  = opp.orden_produccion_id AND op.tipo = 'NORMAL'
 JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_paso_id = opp.id
 JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
 JOIN inventario.lote l ON l.id = opi.lote_id AND l.documento_tipo = 'PARTIDA'
@@ -2387,27 +2522,43 @@ JOIN ghost_posting gp ON gp.paso_id = gs.paso_id;
 -- ============================================================================
 -- Steps 7–8: Dyed roll output + dispatch
 -- ============================================================================
--- Applies to raw lotes that completed production (have oppi).
+-- Applies to raw lotes on the LAST paso of their partida's chain.
 -- Step 7 — PROD_ING: creates a new dyed roll lote (flg_tenido=true item) linked
---           to the paso, ingressed at fecha_entrega.
--- Step 8 — SERV_EGR: immediately dispatches the dyed lote back to the client,
---           same paso + same date. Net stock effect = 0.
--- Both movements share one doc_movimiento_id per paso (single posting event).
+--           to the last paso, ingressed at fecha_entrega.
+-- Step 8 — SERV_EGR: dispatches the dyed lote back to the client.
+--           Net stock effect = 0.
+-- "Last paso" = the paso belonging to the pxr with the latest (fecha, id) for
+-- that partida. REPROCESO pasos share the raw lote via opi/oppi for traceability
+-- but only the final paso produces the output and dispatch movements.
 -- Falls through silently if articulo_id has no flg_tenido=true item_rollo_detalle
 -- row — add that item first and re-run if needed.
 -- ============================================================================
-WITH dyed_source AS (
+WITH last_paso_per_partida AS (
+    -- One paso_id per partida: the paso belonging to the last pxr (fecha DESC, id DESC)
+    SELECT DISTINCT ON (op.partida_id)
+        op.partida_id,
+        opp.id AS paso_id
+    FROM mes.orden_produccion op
+    JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id
+    JOIN partida_x_recetas pxr ON pxr.id = op.id  -- op.id = pxr.id (1:1:1 model)
+    WHERE pxr.receta_id IS NOT NULL AND pxr.flg_elm = false
+    ORDER BY op.partida_id, pxr.fecha DESC, pxr.id DESC
+),
+dyed_source AS (
     SELECT
         l.cantidad,
         l.propietario_id,
         l.usr_cre,
         ird_dyed.item_id                                                           AS dyed_item_id,
-        opp.id                                                                     AS paso_id,
+        lpp.paso_id,
         COALESCE(p.fecha_entrega::TIMESTAMP + INTERVAL '5 hours', opp.fyh_fin, l.fyh_cre) AS fyh_out
     FROM inventario.lote l
     JOIN mes.orden_produccion_item       opi  ON opi.lote_id                      = l.id
     JOIN mes.orden_produccion_paso_item  oppi ON oppi.orden_produccion_item_id    = opi.id
     JOIN mes.orden_produccion_paso       opp  ON opp.id                           = oppi.orden_produccion_paso_id
+    -- Only the last paso for this partida
+    JOIN last_paso_per_partida           lpp  ON lpp.partida_id                   = l.documento_id
+                                             AND lpp.paso_id                      = opp.id
     JOIN item_rollo_detalle              ird_raw  ON ird_raw.item_id              = l.item_id
     JOIN item_rollo_detalle              ird_dyed ON ird_dyed.articulo_id         = ird_raw.articulo_id
                                                  AND ird_dyed.flg_tenido = true
