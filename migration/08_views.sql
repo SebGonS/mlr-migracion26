@@ -217,9 +217,14 @@ LEFT JOIN LATERAL (
     WHERE opi.orden_produccion_id = op.id
 ) materiales_stats ON true
 LEFT JOIN LATERAL (
+    -- Lotes are stamped at paso level (documento_tipo = 'ORDEN_PRODUCCION_PASO',
+    -- documento_id = orden_produccion_paso.id), so we must go through pasos to
+    -- count output lotes at the order level.
     SELECT COUNT(*) AS lotes_generados
     FROM inventario.lote l
-    WHERE l.documento_tipo = 'orden_produccion' AND l.documento_id = op.id
+    JOIN mes.orden_produccion_paso opp2 ON opp2.id = l.documento_id
+    WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+      AND opp2.orden_produccion_id = op.id
 ) produccion_stats ON true;
 
 GRANT SELECT ON mes.vw_ordenes_produccion TO anon, authenticated;
@@ -310,7 +315,7 @@ SELECT
     vc.color_hex,
     vc.color_x_cliente_hex,
     c.id AS propietario_id,
-    c.cliente AS propietario
+    c.nombre AS propietario
 FROM inventario.lote l
 LEFT JOIN inventario.vw_stock_actual sa ON l.id = sa.lote_id
 JOIN item i ON i.id = l.item_id
@@ -321,7 +326,7 @@ JOIN unidad un ON un.id = i.unidad_id
 LEFT JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
 LEFT JOIN inventario.almacen a ON a.id = u.almacen_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
-LEFT JOIN cliente c ON c.id = l.propietario_id
+LEFT JOIN tercero c ON c.id = l.propietario_id
 WHERE it.codigo = 'ROLLO' AND sa.cantidad_disponible IS NULL
 AND EXISTS (
     SELECT 1 FROM inventario.item_movimientos im
@@ -443,13 +448,13 @@ SELECT
     vc.color_hex,
     vc.color_x_cliente_hex,
     c.id AS propietario_id,
-    c.cliente AS propietario
+    c.nombre AS propietario
 FROM rollos r
 JOIN item_rollo_detalle ird ON ird.item_id = r.item_id
 JOIN articulo art ON art.id = ird.articulo_id
 LEFT JOIN doc.partida p ON p.id = r.partida_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
-LEFT JOIN cliente c ON c.id = r.propietario_id
+LEFT JOIN tercero c ON c.id = r.propietario_id
 LEFT JOIN tenido t ON t.id = p.tenido_id
 ORDER BY art.nombre, r.item_nombre;  -- FIX: art.articulo → art.nombre
 
@@ -507,7 +512,7 @@ DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion;
 CREATE OR REPLACE VIEW calidad.vw_lotes_pendientes_inspeccion AS
 SELECT
     l.id AS lote_id,
-    EXTRACT(YEAR FROM l.fyh_cre) || '-' || l.secuencia AS lote_codigo,
+    EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0') AS lote_codigo,
     l.item_id,
     vi.item_codigo,
     vi.item_nombre,
@@ -527,7 +532,7 @@ SELECT
     p.prioridad_id,
     pr.prioridad,
     l.propietario_id,
-    c.cliente AS cliente_nombre,
+    c.nombre AS cliente_nombre,
     l.fyh_cre AS fecha_creacion_lote
 FROM inventario.lote l
 LEFT JOIN vw_items vi ON vi.item_id = l.item_id
@@ -537,7 +542,7 @@ LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
 LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id
 LEFT JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
 LEFT JOIN doc.partida p ON p.id = op.partida_id
-LEFT JOIN cliente c ON l.propietario_id = c.id
+LEFT JOIN tercero c ON l.propietario_id = c.id
 LEFT JOIN prioridad pr ON pr.id = p.prioridad_id
 WHERE l.estado_calidad = 'PENDIENTE'
   AND vi.item_tipo_codigo = 'ROLLO'

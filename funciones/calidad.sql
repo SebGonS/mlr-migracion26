@@ -70,15 +70,15 @@ BEGIN
     LEFT JOIN iam.rol r ON ur.rol_id = r.id
     WHERE r.code IN ('jefe_planta','calidad') AND v_usr_id <> ur.user_id;
 
-   RETURN jsonb_build_object(
-    'inspeccion_id', v_inspeccion_id,
-    'defecto_ids', (
-        SELECT jsonb_agg(id ORDER BY id) 
-        FROM calidad.inspeccion_defecto 
-        WHERE inspeccion_id = v_inspeccion_id
-    ),
-    'message', format('Inspección %s creada', v_inspeccion_id)
-);
+       RETURN jsonb_build_object(
+        'inspeccion_id', v_inspeccion_id,
+        'defecto_ids', (
+            SELECT jsonb_agg(id ORDER BY id)
+            FROM calidad.inspeccion_defecto
+            WHERE inspeccion_id = v_inspeccion_id
+        ),
+        'message', format('Inspección %s creada', v_inspeccion_id)
+    );
 
 EXCEPTION
     WHEN OTHERS THEN
@@ -93,11 +93,6 @@ EXCEPTION
         RAISE;
 END;
 $function$;
-
-
-SELECT * FROM doc.partida_detalle where partida_id=3858;
-SELECT * FROm inventario.vw_lotes_rollos_stock WHERE item_id=91
-SELECT * FROm inventario.vw_lotes_rollos_stock WHERE articulo_id=32
 
 
 CREATE OR REPLACE FUNCTION calidad.get_inspeccion(p_inspeccion_id BIGINT)

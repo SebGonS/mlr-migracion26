@@ -3,9 +3,9 @@
 -- Must come BEFORE mes.orden_produccion_paso and mes.lavado_maquina
 -- which have FK → receta.tenido and receta.lavado_maquina.
 --
--- FIX: receta.tenido uses articulo_id (final normalized schema),
---      not the old articulo_tipo_id + fibra columns.
---      This matches funciones/receta.sql which uses p_articulo_id.
+-- NOTE: receta.tenido uses articulo_tipo_id + fibra (not a specific articulo_id).
+--       A recipe applies to all fabric variants of the same type + fiber composition.
+--       Both crear_tenido() and generar_receta() key off articulo_tipo_id + fibra.
 -- FIX (BUG 4): removed stray "SELECT * FROM paso" query.
 -- ═══════════════════════════════════════════════════════════════
 

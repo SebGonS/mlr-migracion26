@@ -3,6 +3,9 @@
 -- Execute after tablas.sql and funciones.sql are loaded
 
 BEGIN;
+UPDATE letra_compra
+SET fyh_cre_tz = fyh_cre::timestamp + INTERVAL '5 hours'
+WHERE fyh_cre!=fyh_cre_tz::timestamp;
 
 -- Update colors with hex values
 UPDATE color SET hex = '#0066CC' WHERE color = 'A. Brasil';
@@ -784,7 +787,17 @@ SELECT
     true,
     w.fyh_cre
 FROM with_code w
+WHERE NOT EXISTS (SELECT 1 FROM tercero t WHERE t.codigo = w.code_base)
 ORDER BY w.primary_id;
+
+-- Bridge MLR's legacy cliente_id so the roll backfill JOIN resolves propietario_id = 1
+-- for all partidas owned by MLR (public.cliente.id = 13 = 'MLR').
+UPDATE tercero SET cliente_id = 13 WHERE id = 1;
+---CHECK 
+
+SELECT p.id, p.cliente_id FROM public.partida p
+LEFT JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
+WHERE p.rollos > 0 AND p.peso_rollos > 0 AND t.id IS NULL;
 
 -- ============================================================================
 -- MIGRAR PARTIDAS
@@ -868,6 +881,7 @@ LEFT JOIN estado e ON ue.estado_id = e.id)
     rendimiento,
     ancho,
     estado,
+    fecha_acordada,
     fyh_programacion,
     fyh_inicio,
     fyh_fin,
@@ -886,9 +900,10 @@ SELECT
     p.rendimiento,
     p.ancho,
     p.estado_comercial,
-    p.fecha_registro,
-    p.fecha_registro,
     p.fecha_entrega,
+    p.fecha_registro::TIMESTAMP + INTERVAL '5 hours',
+    p.fecha_registro::TIMESTAMP + INTERVAL '5 hours',
+    p.fecha_entrega::TIMESTAMP  + INTERVAL '5 hours',
     p.usr_cre,
     p.fyh_cre_tz
 FROM base p
@@ -927,48 +942,9 @@ SELECT setval(
 UPDATE doc.partida SET flg_antipilling=(CASE p.adicional_id WHEN 1 THEN true ELSE false END) FROM partida p WHERE p.id=doc.partida.id;
 
 
-INSERT INTO mes.orden_produccion(
-  partida_id,
-  tipo,
-  estado,
-  fyh_cre,
-  fyh_inicio,
-  fyh_fin
-)
-SELECT 
-  p.id partida_id,
-  'NORMAL' tipo,
-  CASE COALESCE(p.estado,'ENTREGADA')
-  WHEN 'CONFIRMADA' THEN 'PLANIFICADA'::orden_produccion_estado_enum
-  WHEN 'ENTREGADA' THEN 'CERRADA'::orden_produccion_estado_enum
-  WHEN 'EN_PRODUCCION' THEN 'EN_PROCESO'::orden_produccion_estado_enum
-  END estado,
-  NOW() fyh_cre,
-  pp.fecha_registro fyh_inicio,
-  pp.fecha_entrega fyh_fin
-FROM doc.partida p
-LEFT JOIN public.partida pp ON pp.id=p.id
-;
-
----INSERTAR REPROCESOS
-INSERT INTO mes.orden_produccion(
-  partida_id,
-  tipo,
-  estado,
-  fyh_cre,
-  fyh_inicio,
-  fyh_fin
-)
-WITH ult_estado as(SELECT ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY id desc) rw,* FROM partida_estado_historial)
-SELECT p.id,'REPROCESO'::orden_produccion_tipo_enum tipo, 'CERRADA'::orden_produccion_estado_enum,NOW() fyh_cre,   
-ue.fecha_ejecucion fyh_inicio,
-  ue.fecha_ejecucion fyh_fin
-FROM doc.partida p
-LEFT JOIN public.partida pp ON pp.id=p.id
-LEFT JOIN ult_estado ue ON p.id = ue.partida_id
-LEFT JOIN estado e ON e.id=ue.estado_id
-WHERE e.estado LIKE '%Reprocesado%'
-GROUP BY 1,2,3,4,5;
+-- Replaced by combined 1-pxr → 1-orden → 1-paso CTE below (after tipo_receta setup).
+-- TRUNCATE here so re-runs are safe and the combined insert starts clean.
+TRUNCATE mes.orden_produccion CASCADE;
 --===========================================
 --Migrar pasos
 --===========================================
@@ -988,6 +964,13 @@ WHERE tipo_receta IN (
     'Lavado x Suavidad', 'Lavado x Manchas', 'Lavado x Migrado',
     'Lavado x Quebradura', 'Lavado x Fijado', 'Lavado Hidrofilo'
 );
+
+-- Lookup column: maps each tipo_receta to the orden_produccion.tipo it belongs to.
+-- Only plain 'Teñido' is the original dyeing step → NORMAL.
+-- All re-dye variants (Reteñido, Reproceso Matizado, etc.) and all lavado types → REPROCESO.
+ALTER TABLE tipo_receta ADD COLUMN IF NOT EXISTS orden_produccion_tipo orden_produccion_tipo_enum;
+UPDATE tipo_receta SET orden_produccion_tipo = 'NORMAL'    WHERE tipo_receta = 'Teñido';
+UPDATE tipo_receta SET orden_produccion_tipo = 'REPROCESO' WHERE tipo_receta != 'Teñido';
 -----------------TERMINAR DE CONFIGUARAR MAQUINAS ANTES DE MIGRAR PASOS
 -- ============================================================================
 -- MIGRATE MAQUINAS
@@ -1132,25 +1115,8 @@ ORDER BY m.id;
 -- WHERE pxr.partida_id IN (SELECT partida_id FROM partida_x_recetas GROUP BY partida_id HAVING COUNT(*) > 1)
 -- AND flg_elm=false AND tipo_receta_id IS NOT NULL AND partida_id IN (SELECT partida_id FROM o)
 -- ORDER BY 1,3; 
------SE CONFIRMA QUE TODOS LOS QUE nO JOINEAN SON PROQUE SON REPROCESOS O AJUSTES NO REGISTRADOS COMO TAL, se procede a INSERTAR LAS ORDENES DE PRODUCCION ADECUADAS
-INSERT INTO mes.orden_produccion(
-  partida_id,
-  tipo,
-  estado,
-  fyh_cre,
-  fyh_inicio,
-  fyh_fin
-)
-WITH o AS (
-SELECT op.id,pxr.partida_id
-FROM partida_x_recetas pxr
-LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
-LEFT JOIN mes.orden_produccion op ON op.partida_id = pxr.partida_id 
-AND ((op.tipo = 'NORMAL' AND tipo_receta='Teñido') OR (op.tipo = 'REPROCESO' AND tipo_receta!='Teñido'))
-WHERE op.id IS NULL
-)SELECT  pxr.partida_id, 'REPROCESO', 'CERRADA', pxr.fyh_cre, pxr.fecha, pxr.fecha
-FROM partida_x_recetas pxr
-WHERE flg_elm=false AND tipo_receta_id IS NOT NULL AND partida_id IN (SELECT partida_id FROM o);
+-----SE CONFIRMA QUE TODOS LOS QUE nO JOINEAN SON PROQUE SON REPROCESOS O AJUSTES NO REGISTRADOS COMO TAL
+-- (Stale patch block removed — superseded by 1:1:1 combined CTE above)
 
 -- ============================================================================
 -- MIGRAR RECETAS
@@ -1436,39 +1402,80 @@ WHERE EXISTS (SELECT 1 FROM receta.lavado_maquina_paso WHERE id = rlmp.id);
 -- END MIGRAR RECETAS
 -- ============================================================================
 
-------INSERTAR PRIMERO TEÑIDOS como primer paso de la orden de produccion default de todas las partidas
--- OVERRIDING SYSTEM VALUE preserves pxr.id as paso.id so egress movements can link
--- directly via salida_inventario.partida_x_recetas_id → documento_id = 'ORDEN_PRODUCCION_PASO'
-INSERT INTO mes.orden_produccion_paso(
-id,
-orden_produccion_id,
-secuencia,operacion_id,maquina_asignada_id,relacion_bano,receta_id,fyh_inicio,fyh_fin,
-fyh_cre,
-estado
+-- ============================================================================
+-- 1 pxr → 1 orden_produccion → 1 orden_produccion_paso
+-- ============================================================================
+-- orden.id = paso.id = pxr.id (OVERRIDING SYSTEM VALUE on both).
+-- tipo derived from tipo_receta.orden_produccion_tipo (set above).
+-- secuencia always 1 — one paso per orden in this model.
+-- OVERRIDING SYSTEM VALUE on paso preserves pxr.id so egress movements resolve
+-- directly via salida_inventario.partida_x_recetas_id → documento_id.
+--
+-- NOTE: partidas with NO entry in partida_x_recetas (receta_id IS NULL or all
+-- rows flg_elm=true) will get NO orden_produccion here. Before go-live, audit:
+--
+--   SELECT p.id, p.codigo
+--   FROM doc.partida p
+--   WHERE NOT EXISTS (
+--       SELECT 1 FROM mes.orden_produccion op WHERE op.partida_id = p.id
+--   );
+--
+-- Decide per-case: create a placeholder orden manually, link existing egress
+-- movements, or accept the gap for very old / cancelled partidas.
+-- ============================================================================
+WITH pxr_data AS (
+    SELECT
+        pxr.id                                                              AS pxr_id,
+        pxr.partida_id,
+        pxr.maquina_id,
+        pxr.receta_id,
+        COALESCE(pxr.relacion_bano, m."RB")                                AS relacion_bano,
+        pxr.fecha,
+        COALESCE(pxr.fyh_cre_tz, pxr.fyh_cre + INTERVAL '5 hours')        AS fyh_cre,
+        tr.operacion_id,
+        tr.orden_produccion_tipo
+    FROM partida_x_recetas pxr
+    JOIN tipo_receta tr   ON tr.id  = pxr.tipo_receta_id
+    LEFT JOIN public.maquina m ON m.id = pxr.maquina_id
+    WHERE pxr.receta_id IS NOT NULL
+      AND pxr.flg_elm = false
+),
+op_insert AS (
+    INSERT INTO mes.orden_produccion (id, partida_id, tipo, estado, fyh_cre, fyh_inicio, fyh_fin)
+    OVERRIDING SYSTEM VALUE
+    SELECT
+        pxr_id,
+        partida_id,
+        orden_produccion_tipo,
+        'CERRADA',
+        fyh_cre,
+        fecha::TIMESTAMP + INTERVAL '5 hours',
+        fecha::TIMESTAMP + INTERVAL '5 hours'
+    FROM pxr_data
+    RETURNING id
+)
+INSERT INTO mes.orden_produccion_paso (
+    id, orden_produccion_id, secuencia, operacion_id, maquina_asignada_id,
+    relacion_bano, receta_id, fyh_inicio, fyh_fin, fyh_cre, estado
 )
 OVERRIDING SYSTEM VALUE
-SELECT pxr.id,
-op.id,
-row_NUMBER() OVER (PARTITION BY op.id ORDER BY pxr.fecha,pxr.fyh_cre) AS secuencia,
-tr.operacion_id,
-pxr.maquina_id,
-COALESCE(relacion_bano,m."RB"),
-pxr.receta_id,
-pxr.fecha,
-pxr.fecha,
-pxr.fyh_cre,
-'COMPLETADO'
-FROM partida_x_recetas pxr
-LEFT JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
-LEFT JOIN public.maquina m ON m.id=pxr.maquina_id
-LEFT JOIN mes.orden_produccion op ON op.partida_id = pxr.partida_id
-AND ((op.tipo = 'NORMAL' AND tipo_receta='Teñido') OR (op.tipo = 'REPROCESO' AND tipo_receta!='Teñido'))
-WHERE pxr.receta_id IS not NULL;
+SELECT
+    pd.pxr_id,
+    op.id,
+    1,
+    pd.operacion_id,
+    pd.maquina_id,
+    pd.relacion_bano,
+    pd.receta_id,
+    pd.fecha::TIMESTAMP + INTERVAL '5 hours',
+    pd.fecha::TIMESTAMP + INTERVAL '5 hours',
+    pd.fyh_cre,
+    'COMPLETADO'
+FROM pxr_data pd
+JOIN op_insert op ON op.id = pd.pxr_id;
 
-SELECT setval(
-    pg_get_serial_sequence('mes.orden_produccion_paso', 'id'),
-    (SELECT MAX(id) FROM mes.orden_produccion_paso)
-);
+SELECT setval(pg_get_serial_sequence('mes.orden_produccion',      'id'), (SELECT MAX(id) FROM mes.orden_produccion));
+SELECT setval(pg_get_serial_sequence('mes.orden_produccion_paso', 'id'), (SELECT MAX(id) FROM mes.orden_produccion_paso));
 
 -- ============================================================================
 -- MIGRAR LOTES Y MOVIMIENTOS INICIALES DE INSUMOS
@@ -1712,6 +1719,7 @@ FROM public.letra_compra lc
 JOIN doc.compra dc ON dc.id = lc.compra_id
 WHERE dc.factura_proveedor_id IS NOT NULL;
 
+
 -- Unmigrated letras: compras that had letras but no linked factura
 -- SELECT lc.id, lc.compra_id, lc.numero_letra, lc.monto_usd
 -- FROM public.letra_compra lc
@@ -1764,7 +1772,7 @@ inserted_guias AS (
         (SELECT id FROM tercero WHERE proveedor_id = cd.proveedor_id),
         serie,
         correlativo,
-        MAX(fecha_remision::date) AS fecha_emision,
+        MAX(fecha_remision::date)::TIMESTAMP + INTERVAL '5 hours' AS fecha_emision,
         MAX(usr_cre)              AS usr_cre,
         MAX(fyh_cre)              AS fyh_cre
     FROM compra_data cd
@@ -1788,10 +1796,9 @@ INSERT INTO doc.guia_remision_detalle(
 guia_remision_id, item_id, cantidad
 )
 SELECT doc.guia_remision.id, l.item_id, l.cantidad
-FROM inventario.lote l 
-JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_tipo='GUIA_REMISION'
+FROM inventario.lote l
+JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_tipo='GUIA_REMISION';
 
- 
 
 -- WITH 
 -- ec as(
@@ -2044,7 +2051,6 @@ FROM lote_source ls
 JOIN doc_posting dp
   ON dp.grp_tipo IS NOT DISTINCT FROM ls.grp_tipo
  AND dp.grp_id   IS NOT DISTINCT FROM ls.grp_id;
-
 -- ============================================================================
 -- INSUMO EGRESS MOVEMENTS  →  inventario.item_movimientos
 -- ============================================================================
@@ -2058,7 +2064,8 @@ JOIN doc_posting dp
 --   receta / matizado / lavado / lavado maquina / desmontado / ajuste receta → PROD_CONSUMO
 --   ajuste / reconteo / merma / mantenimiento / otros                        → AJUSTE_NEG
 --   muestra                                                                  → MUESTRA_EGR
---   transferencia: excluded — none were ever recorded in the legacy system.
+--   transferencia: excluded — exists in the enum but no rows recorded with this motivo.
+--   NULL motivo: excluded via WHERE below — rows without a motivo cannot be classified.
 --
 -- documento_tipo / documento_id on the movement:
 --   CUADRE-linked:      salida matches a cuadre by timestamp AND motivo ∈ (ajuste, reconteo)
@@ -2132,6 +2139,7 @@ JOIN public.salida_inventario_detalle_x_stock sdxs ON sdxs.salida_inventario_det
 JOIN inventario.lote l ON l.id = sdxs.inventario_id
 JOIN motivo_map mm ON mm.motivo = si.motivo::text
 JOIN doc_posting dp ON dp.salida_inventario_id = si.id
+WHERE si.motivo IS NOT NULL
 
 
 
@@ -2139,19 +2147,60 @@ JOIN doc_posting dp ON dp.salida_inventario_id = si.id
 -- BACKFILL ROLL LOTES (HISTÓRICO)
 -- ============================================================================
 -- No per-roll tracking existed in the legacy system. We reconstruct one lote
--- per physical roll from partida aggregate data:
---   cantidad  = peso_rollos / rollos  (or peso_rib / rib for rib rolls)
---   propietario_id:
---     legacy cliente.cliente started with 'MLR/' or 'OSWALDO/' → MLR (id=1)
---     otherwise → tercero.id (client owns the roll)
---   Note: the prefix check is done on public.cliente directly because tercero.cliente_id2
---   is NULL when only the prefixed alias existed (no plain client entry), making the
---   tercero.cliente_id2 check insufficient on its own.
--- Movement type SERV_ING for ingress regardless of owner (service context).
--- Egress is PROD_CONSUMO linked to the first paso of the orden_produccion.
+-- per physical roll from partida aggregate data.
+--
+-- Full movement lifecycle per roll:
+--   Step 1  lote_insert      Create raw roll lote (flg_tenido=false), doc=PARTIDA
+--   Step 2  opi_insert       Link lote → orden_produccion_item (earliest NORMAL orden)
+--   Step 3  oppi_insert      Link opi → orden_produccion_paso_item (secuencia=1)
+--   Step 4  SERV_ING         Raw roll received from client → ALM_CRU, doc=PARTIDA
+--   Step 5  PROD_CONSUMO     Raw roll consumed by paso → ALM_CRU, doc=ORDEN_PRODUCCION_PASO
+--                            (only for rolls that got an oppi in step 3)
+--   Step 6  SERV_EGR (ghost) Raw roll returned as-is for rolls that got an opi
+--                            but no oppi (no paso link), doc=ORDEN_PRODUCCION_PASO
+--   Step 7  PROD_ING         Dyed roll lote (flg_tenido=true) produced at fecha_entrega,
+--                            doc=ORDEN_PRODUCCION_PASO
+--                            (only for rolls with oppi; falls through if no dyed item exists)
+--   Step 8  SERV_EGR         Dyed roll dispatched to client at fecha_entrega,
+--                            doc=ORDEN_PRODUCCION_PASO
+--
+-- propietario_id:
+--   legacy cliente.cliente started with 'MLR/' or 'OSWALDO/' → MLR (id=1)
+--   otherwise → tercero.id (client owns the roll)
+--   Note: prefix check done on public.cliente directly; tercero.cliente_id2 is NULL
+--   when only the prefixed alias existed, so it is insufficient on its own.
 -- ============================================================================
 
--- Step 1–4: Insert lotes → orden_produccion_item → orden_produccion_paso_item → ingress movements
+-- GAP AUDIT: expected roll count vs migrated lote count
+-- Run before/after to verify parity. Known exclusion causes:
+--   A) articulo_id has no item_rollo_detalle row (missing item mapping)
+--   B) cliente_id has no tercero row (bridge gap)
+--
+-- Expected (legacy):
+--   SELECT SUM(rollos)+SUM(rib) FROM public.partida
+--   WHERE (rollos > 0 AND peso_rollos > 0) OR (rib > 0 AND peso_rib > 0)
+-- Migrated:
+--   SELECT COUNT(*) FROM inventario.lote WHERE documento_tipo = 'PARTIDA'
+--
+-- Exclusion cause A — partidas with no item_rollo_detalle match:
+--   SELECT p.id, p.codigo, p.articulo_id, p.rollos, p.rib
+--   FROM public.partida p
+--   WHERE ((p.rollos > 0 AND p.peso_rollos > 0) OR (p.rib > 0 AND p.peso_rib > 0))
+--     AND NOT EXISTS (SELECT 1 FROM item_rollo_detalle ird WHERE ird.articulo_id = p.articulo_id)
+--   ORDER BY p.id;
+--
+-- Exclusion cause B — partidas with no tercero bridge match:
+--   SELECT p.id, p.codigo, p.cliente_id, c.cliente
+--   FROM public.partida p
+--   JOIN public.cliente c ON c.id = p.cliente_id
+--   WHERE ((p.rollos > 0 AND p.peso_rollos > 0) OR (p.rib > 0 AND p.peso_rib > 0))
+--     AND NOT EXISTS (
+--         SELECT 1 FROM tercero t
+--         WHERE t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
+--     )
+--   ORDER BY p.id;
+
+-- Steps 1–4 (single CTE chain — must run atomically)
 WITH roll_source AS (
     -- Regular rolls
     SELECT
@@ -2192,13 +2241,13 @@ ingress_posting AS (
     SELECT partida_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
     FROM (SELECT DISTINCT partida_id FROM roll_source) t
 ),
-lote_insert AS (
+lote_insert AS ( -- Step 1: raw roll lotes
     INSERT INTO inventario.lote (item_id, cantidad, documento_tipo, documento_id, propietario_id, usr_cre, fyh_cre)
     SELECT item_id, cantidad, 'PARTIDA', partida_id, propietario_id, usr_cre, fyh_cre
     FROM roll_source
     RETURNING id AS lote_id, item_id, documento_id AS partida_id, cantidad, propietario_id, usr_cre, fyh_cre
 ),
-opi_insert AS (
+opi_insert AS ( -- Step 2: link lotes → orden_produccion_item
     INSERT INTO mes.orden_produccion_item (orden_produccion_id, item_id, lote_id, ubicacion_id, usr_cre, fyh_cre)
     SELECT
         op.id,
@@ -2208,10 +2257,17 @@ opi_insert AS (
         li.usr_cre,
         li.fyh_cre
     FROM lote_insert li
-    JOIN mes.orden_produccion op ON op.partida_id = li.partida_id
+    -- Pick the earliest NORMAL orden for the partida (Teñido step = entry point for rolls).
+    -- LATERAL + LIMIT 1 avoids fan-out when multiple pxr rows exist per partida.
+    JOIN LATERAL (
+        SELECT id FROM mes.orden_produccion
+        WHERE partida_id = li.partida_id AND tipo = 'NORMAL'
+        ORDER BY fyh_inicio ASC NULLS LAST, id ASC
+        LIMIT 1
+    ) op ON true
     RETURNING id AS opi_id, orden_produccion_id, lote_id
 ),
-oppi_insert AS (
+oppi_insert AS ( -- Step 3: link opi → orden_produccion_paso_item
     INSERT INTO mes.orden_produccion_paso_item (orden_produccion_paso_id, orden_produccion_item_id, usr_cre, fyh_cre)
     SELECT
         opp.id,
@@ -2241,9 +2297,9 @@ SELECT
     li.usr_cre,
     li.fyh_cre
 FROM lote_insert li
-JOIN ingress_posting ip ON ip.partida_id = li.partida_id;
+JOIN ingress_posting ip ON ip.partida_id = li.partida_id; -- Step 4: SERV_ING
 
--- Step 5: Egress movements — consume each roll lote via PROD_CONSUMO linked to its first paso
+-- Step 5: PROD_CONSUMO — raw roll consumed by paso (only rolls that got oppi in step 3)
 -- One doc_movimiento_id per orden_produccion_paso (separate from insumo consumptions)
 WITH egress_posting AS (
     SELECT opp.id AS paso_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
@@ -2277,5 +2333,198 @@ JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
 JOIN inventario.lote l ON l.id = opi.lote_id AND l.documento_tipo = 'PARTIDA'
 JOIN egress_posting ep ON ep.paso_id = opp.id;
 
-COMMIT;
+-- ============================================================================
+-- Step 6: Ghost egress — roll lotes with no paso assignment (SERV_EGR)
+-- ============================================================================
+-- Covers roll lotes that received a SERV_ING ingress (Step 1–4) and have an
+-- orden_produccion_item entry, but whose orden_produccion has no pasos
+-- (receta_id was NULL), so Step 5's oppi JOIN never fired for them.
+-- Without this, those lotes show as permanently in-stock (open balance).
+--
+-- Movement type: SERV_EGR — material dispatched back to client.
+-- Date:          partida.fecha_entrega (best proxy for delivery; fallback to fyh_cre).
+-- One doc_movimiento_id per partida — same grouping as ingress (Step 1–4).
+-- ============================================================================
+WITH ghost_source AS (
+    SELECT
+        l.id        AS lote_id,
+        l.item_id,
+        l.cantidad,
+        opp.id      AS paso_id,
+        l.usr_cre,
+        COALESCE(p.fecha_entrega::TIMESTAMP + INTERVAL '5 hours', p.fyh_cre) AS fyh_egr
+    FROM inventario.lote l
+    JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id
+    LEFT JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_item_id = opi.id
+    JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = opi.orden_produccion_id AND opp.secuencia = 1
+    JOIN doc.partida p ON p.id = l.documento_id
+    WHERE l.documento_tipo = 'PARTIDA'
+      AND oppi.id IS NULL   -- has opi but no paso assignment
+),
+ghost_posting AS (
+    SELECT paso_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
+    FROM (SELECT DISTINCT paso_id FROM ghost_source) t
+)
+INSERT INTO inventario.item_movimientos (
+    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+    origen_ubicacion_id, cantidad, documento_tipo, documento_id,
+    usr_cre, fyh_cre
+)
+SELECT
+    gp.doc_movimiento_id,
+    gs.item_id,
+    gs.lote_id,
+    (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_EGR'),
+    (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
+    gs.cantidad,
+    'ORDEN_PRODUCCION_PASO',
+    gs.paso_id,
+    gs.usr_cre,
+    gs.fyh_egr
+FROM ghost_source gs
+JOIN ghost_posting gp ON gp.paso_id = gs.paso_id;
 
+-- ============================================================================
+-- Steps 7–8: Dyed roll output + dispatch
+-- ============================================================================
+-- Applies to raw lotes that completed production (have oppi).
+-- Step 7 — PROD_ING: creates a new dyed roll lote (flg_tenido=true item) linked
+--           to the paso, ingressed at fecha_entrega.
+-- Step 8 — SERV_EGR: immediately dispatches the dyed lote back to the client,
+--           same paso + same date. Net stock effect = 0.
+-- Both movements share one doc_movimiento_id per paso (single posting event).
+-- Falls through silently if articulo_id has no flg_tenido=true item_rollo_detalle
+-- row — add that item first and re-run if needed.
+-- ============================================================================
+WITH dyed_source AS (
+    SELECT
+        l.cantidad,
+        l.propietario_id,
+        l.usr_cre,
+        ird_dyed.item_id                                                           AS dyed_item_id,
+        opp.id                                                                     AS paso_id,
+        COALESCE(p.fecha_entrega::TIMESTAMP + INTERVAL '5 hours', opp.fyh_fin, l.fyh_cre) AS fyh_out
+    FROM inventario.lote l
+    JOIN mes.orden_produccion_item       opi  ON opi.lote_id                      = l.id
+    JOIN mes.orden_produccion_paso_item  oppi ON oppi.orden_produccion_item_id    = opi.id
+    JOIN mes.orden_produccion_paso       opp  ON opp.id                           = oppi.orden_produccion_paso_id
+    JOIN item_rollo_detalle              ird_raw  ON ird_raw.item_id              = l.item_id
+    JOIN item_rollo_detalle              ird_dyed ON ird_dyed.articulo_id         = ird_raw.articulo_id
+                                                 AND ird_dyed.flg_tenido = true
+                                                 AND ird_dyed.flg_rib    = ird_raw.flg_rib
+    JOIN doc.partida p ON p.id = l.documento_id
+    WHERE l.documento_tipo = 'PARTIDA'
+),
+posting AS (
+    SELECT paso_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
+    FROM (SELECT DISTINCT paso_id FROM dyed_source) t
+),
+dyed_lote_insert AS (
+    INSERT INTO inventario.lote (item_id, cantidad, documento_tipo, documento_id, propietario_id, usr_cre, fyh_cre)
+    SELECT dyed_item_id, cantidad, 'ORDEN_PRODUCCION_PASO', paso_id, propietario_id, usr_cre, fyh_out
+    FROM dyed_source
+    RETURNING id AS lote_id, item_id, cantidad, documento_id AS paso_id, propietario_id, usr_cre, fyh_cre
+),
+prod_ing_insert AS (
+    INSERT INTO inventario.item_movimientos (
+        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+        destino_ubicacion_id, cantidad, documento_tipo, documento_id,
+        usr_cre, fyh_cre
+    )
+    SELECT
+        po.doc_movimiento_id,
+        dl.item_id,
+        dl.lote_id,
+        (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING'),
+        (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
+        dl.cantidad,
+        'ORDEN_PRODUCCION_PASO',
+        dl.paso_id,
+        dl.usr_cre,
+        dl.fyh_cre
+    FROM dyed_lote_insert dl
+    JOIN posting po ON po.paso_id = dl.paso_id
+)
+INSERT INTO inventario.item_movimientos (
+    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+    origen_ubicacion_id, cantidad, documento_tipo, documento_id,
+    usr_cre, fyh_cre
+)
+SELECT
+    po.doc_movimiento_id,
+    dl.item_id,
+    dl.lote_id,
+    (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_EGR'),
+    (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
+    dl.cantidad,
+    'ORDEN_PRODUCCION_PASO',
+    dl.paso_id,
+    dl.usr_cre,
+    dl.fyh_cre
+FROM dyed_lote_insert dl
+JOIN posting po ON po.paso_id = dl.paso_id;
+
+-- ============================================================================
+-- BACKFILL PESAJE  →  inventario.pesaje
+-- ============================================================================
+-- No per-roll weighing records existed in the legacy system.
+-- We synthesize one pesaje row per roll lote using lote.cantidad as peso_real
+-- (which equals peso_rollos/rollos — the average roll weight from the partida).
+-- This satisfies the weighing gate (EXISTS pesaje WHERE lote_id = ?) for all
+-- historical lotes so they can be processed through the new system without
+-- being blocked as "unweighed".
+-- ============================================================================
+INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, observacion, usr_cre, fyh_cre)
+SELECT
+    opi.orden_produccion_id,
+    l.id,
+    l.cantidad,
+    'Migración — peso promedio calculado de partida',
+    l.usr_cre,
+    l.fyh_cre
+FROM inventario.lote l
+JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id
+WHERE l.documento_tipo = 'PARTIDA';
+
+-- ============================================================================
+-- SEED ITEM_VALORACION  →  inventario.item_valoracion
+-- ============================================================================
+-- The MAP trigger (fn_trg_actualizar_map) skipped all migration inserts because
+-- precio_unitario was NULL. We seed the table directly from:
+--   precio_promedio : weighted average of compra_x_insumo.precio_x_kg_usd
+--                     weighted by cantidad across all historical purchases.
+--   stock_qty       : current total lote.cantidad for the item (cantidad > 0 lotes only).
+--   stock_valorado  : precio_promedio * stock_qty
+-- Only insumo items are valorizable; roll items are excluded (no purchase price).
+-- ============================================================================
+INSERT INTO inventario.item_valoracion (item_id, precio_promedio, stock_qty, stock_valorado, fyh_mod)
+SELECT
+    i.id                                                                  AS item_id,
+    SUM(cxi.precio_x_kg_usd * cxi.cantidad) / NULLIF(SUM(cxi.cantidad), 0) AS precio_promedio,
+    COALESCE((SELECT SUM(l.cantidad) FROM inventario.lote l WHERE l.item_id = i.id), 0) AS stock_qty,
+    (SUM(cxi.precio_x_kg_usd * cxi.cantidad) / NULLIF(SUM(cxi.cantidad), 0))
+        * COALESCE((SELECT SUM(l.cantidad) FROM inventario.lote l WHERE l.item_id = i.id), 0) AS stock_valorado,
+    NOW()
+FROM public.compra_x_insumo cxi
+JOIN item i ON i.id = cxi.insumo_id
+WHERE cxi.precio_x_kg_usd IS NOT NULL
+  AND cxi.precio_x_kg_usd > 0
+GROUP BY i.id
+ON CONFLICT (item_id) DO UPDATE
+    SET precio_promedio = EXCLUDED.precio_promedio,
+        stock_qty       = EXCLUDED.stock_qty,
+        stock_valorado  = EXCLUDED.stock_valorado,
+        fyh_mod         = EXCLUDED.fyh_mod;
+
+-- ============================================================================
+-- DROP BRIDGE COLUMNS  →  tercero  (run manually after go-live stabilizes)
+-- ============================================================================
+-- cliente_id, cliente_id2, proveedor_id were temporary join bridges used only
+-- during migration. Keep for a few months as a safety net, then drop.
+-- ============================================================================
+-- ALTER TABLE tercero
+--     DROP COLUMN IF EXISTS cliente_id,
+--     DROP COLUMN IF EXISTS cliente_id2,
+--     DROP COLUMN IF EXISTS proveedor_id;
+
+COMMIT;
