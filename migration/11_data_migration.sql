@@ -1478,6 +1478,98 @@ SELECT setval(pg_get_serial_sequence('mes.orden_produccion',      'id'), (SELECT
 SELECT setval(pg_get_serial_sequence('mes.orden_produccion_paso', 'id'), (SELECT MAX(id) FROM mes.orden_produccion_paso));
 
 -- ============================================================================
+-- COMPACTADO operacion — run on live DB if 07 migration already executed
+-- ============================================================================
+INSERT INTO mes.operacion (codigo, nombre, requiere_receta)
+VALUES ('COMPACTADO', 'Compactado', false)
+ON CONFLICT (codigo) DO NOTHING;
+
+-- ============================================================================
+-- ENRICH / BACKFILL DYEING ORDENES FROM produccion_tenido
+-- ============================================================================
+-- produccion_tenido is the ground truth for dyeing production — it covers ~2
+-- months more history than partida_x_recetas (pxr).
+--
+-- Strategy:
+--   A) UPDATE existing pxr-derived ordenes with accurate fyh_inicio/fyh_fin
+--      (match: partida_id + maquina_id, closest fecha to pxr.fecha wins).
+--   B) INSERT new orden_produccion + paso for produccion_tenido rows that have
+--      no matching pxr entry (357 rows = older history).
+--
+-- produccion_tenido.maquina is an integer matching public.maquina.id directly.
+-- produccion_tenido.tipo matches tipo_receta.tipo_receta (same value set).
+-- hora_inicio/hora_fin are TIME — combined with fecha and UTC-5 correction.
+-- ============================================================================
+
+-- A) Enrich timing on existing pxr-derived ordenes
+UPDATE mes.orden_produccion op
+SET fyh_inicio = sub.fyh_inicio,
+    fyh_fin    = sub.fyh_fin
+FROM (
+    SELECT DISTINCT ON (pxr.id)
+        pxr.id AS op_id,
+        (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours' AS fyh_inicio,
+        (pt.fecha + pt.hora_fin  )::TIMESTAMP + INTERVAL '5 hours' AS fyh_fin
+    FROM partida_x_recetas pxr
+    JOIN produccion_tenido pt
+        ON  pt.partida_id   = pxr.partida_id
+        AND pt.maquina::int = pxr.maquina_id
+    WHERE pxr.receta_id IS NOT NULL AND pxr.flg_elm = false
+    ORDER BY pxr.id, ABS(EXTRACT(EPOCH FROM (pt.fecha::date - pxr.fecha::date))) ASC
+) sub
+WHERE op.id = sub.op_id;
+
+-- B) Insert ordenes for produccion_tenido rows with no pxr match
+WITH unmatched AS (
+    SELECT pt.*
+    FROM produccion_tenido pt
+    WHERE NOT EXISTS (
+        SELECT 1 FROM partida_x_recetas pxr
+        WHERE pxr.partida_id = pt.partida_id
+          AND pxr.maquina_id = pt.maquina::int
+          AND pxr.flg_elm    = false
+          AND pxr.receta_id  IS NOT NULL
+    )
+),
+op_insert AS (
+    INSERT INTO mes.orden_produccion (partida_id, tipo, estado, fyh_inicio, fyh_fin, fyh_cre)
+    SELECT
+        pt.partida_id,
+        COALESCE(tr.orden_produccion_tipo, 'REPROCESO'),
+        'CERRADA',
+        (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours',
+        (pt.fecha + pt.hora_fin  )::TIMESTAMP + INTERVAL '5 hours',
+        (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours'
+    FROM unmatched pt
+    LEFT JOIN tipo_receta tr ON tr.tipo_receta = pt.tipo
+    RETURNING id, partida_id,
+              fyh_inicio  -- used to re-match for paso insert below
+)
+INSERT INTO mes.orden_produccion_paso (
+    orden_produccion_id, secuencia, operacion_id, maquina_asignada_id,
+    fyh_inicio, fyh_fin, fyh_cre, estado
+)
+SELECT
+    op.id,
+    1,
+    COALESCE(tr.operacion_id, (SELECT id FROM mes.operacion WHERE codigo = 'TENIDO')),
+    pt.maquina::int,
+    op.fyh_inicio,
+    (pt.fecha + pt.hora_fin)::TIMESTAMP + INTERVAL '5 hours',
+    op.fyh_inicio,
+    'COMPLETADO'
+FROM op_insert op
+-- re-match via (partida_id, fyh_inicio) — unique within a partida at this granularity
+JOIN unmatched pt
+    ON  pt.partida_id = op.partida_id
+    AND (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours' = op.fyh_inicio
+LEFT JOIN tipo_receta tr ON tr.tipo_receta = pt.tipo;
+
+-- Reset sequences to cover newly inserted rows
+SELECT setval(pg_get_serial_sequence('mes.orden_produccion',      'id'), (SELECT MAX(id) FROM mes.orden_produccion));
+SELECT setval(pg_get_serial_sequence('mes.orden_produccion_paso', 'id'), (SELECT MAX(id) FROM mes.orden_produccion_paso));
+
+-- ============================================================================
 -- MIGRAR LOTES Y MOVIMIENTOS INICIALES DE INSUMOS
 -- ============================================================================
 -- SELECT DISTINCT motivo FROM entrada_inventario
@@ -2130,6 +2222,7 @@ SELECT
         WHEN dp.cuadre_id IS NOT NULL  THEN dp.cuadre_id
         WHEN mm.codigo = 'PROD_CONSUMO' AND si.partida_x_recetas_id IS NOT NULL THEN si.partida_x_recetas_id
     END,
+
     si.observacion,
     si.usr_solicita,
     COALESCE(si.fyh_salida_real, si.fyh_solicitud_tz)
@@ -2141,7 +2234,23 @@ JOIN motivo_map mm ON mm.motivo = si.motivo::text
 JOIN doc_posting dp ON dp.salida_inventario_id = si.id
 WHERE si.motivo IS NOT NULL
 
-
+SELECT COUNT(*) FROM termofijado;
+SELECT COUNT(*) FROM produccion_tenido;
+SELECT COUNT(*) FROM compactado;
+SELECT COUNT(*) FROM observado;
+SELECT COUNT(*) FROM perchado;
+SELECT * FROM termofijado LIMIT 5;
+SELECT * FROM produccion_tenido LIMIT 5;
+SELECT * FROM compactado LIMIT 5;
+SELECT * FROM observado LIMIT 5;
+SELECT * FROM perchado LIMIT 5;
+SELECT codigo, nombre FROM mes.operacion ORDER BY id;
+SELECT COUNT(*) FROM produccion_tenido pt
+JOIN partida_x_recetas pxr ON pxr.partida_id = pt.partida_id
+    AND pxr.maquina_id::text = pt.maquina::text
+WHERE pxr.flg_elm = false AND pxr.receta_id IS NOT NULL;
+SELECT DISTINCT tipo FROM produccion_tenido ORDER BY 1;
+SELECT DISTINCT maquina FROM produccion_tenido ORDER BY 1 LIMIT 20;
 
 -- ============================================================================
 -- BACKFILL ROLL LOTES (HISTÓRICO)
