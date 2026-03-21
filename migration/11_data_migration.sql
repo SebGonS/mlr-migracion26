@@ -1401,7 +1401,17 @@ WHERE EXISTS (SELECT 1 FROM receta.lavado_maquina_paso WHERE id = rlmp.id);
 -- ============================================================================
 -- END MIGRAR RECETAS
 -- ============================================================================
+SELECT COUNT(*) FROM partida_x_recetas; --4877
+SELECT COUNT(*) FROM produccion_tenido; --5634
+SELECT MIN(fyh_cre) FROM partida_x_recetas; --2025-04-04
+SELECT MIN(fecha) FROM produccion_tenido; --2025-01-09 
+SELECT COUNT(*) FROM produccion_tenido WHERE fecha>='2025-04-04'; --4335
 
+SELECT * FROM produccion_tenido pt JOIN
+partida_x_recetas pxr ON pt.partida_id=pxr.partida_id AND pt.tipo
+SELECT distinct tipo,tipo_receta FROM produccion_tenido
+FULL OUTER JOIN tipo_receta ON tipo=tipo_receta
+SELECT DISTINCT tipo_receta FROM tipo_receta LEFT JOIN produccion_tenido ON tipo=tipo_receta
 -- ============================================================================
 -- 1 pxr → 1 orden_produccion → 1 orden_produccion_paso
 -- ============================================================================
@@ -2234,23 +2244,23 @@ JOIN motivo_map mm ON mm.motivo = si.motivo::text
 JOIN doc_posting dp ON dp.salida_inventario_id = si.id
 WHERE si.motivo IS NOT NULL
 
-SELECT COUNT(*) FROM termofijado;
-SELECT COUNT(*) FROM produccion_tenido;
-SELECT COUNT(*) FROM compactado;
-SELECT COUNT(*) FROM observado;
-SELECT COUNT(*) FROM perchado;
-SELECT * FROM termofijado LIMIT 5;
-SELECT * FROM produccion_tenido LIMIT 5;
-SELECT * FROM compactado LIMIT 5;
-SELECT * FROM observado LIMIT 5;
-SELECT * FROM perchado LIMIT 5;
-SELECT codigo, nombre FROM mes.operacion ORDER BY id;
-SELECT COUNT(*) FROM produccion_tenido pt
-JOIN partida_x_recetas pxr ON pxr.partida_id = pt.partida_id
-    AND pxr.maquina_id::text = pt.maquina::text
-WHERE pxr.flg_elm = false AND pxr.receta_id IS NOT NULL;
-SELECT DISTINCT tipo FROM produccion_tenido ORDER BY 1;
-SELECT DISTINCT maquina FROM produccion_tenido ORDER BY 1 LIMIT 20;
+-- SELECT COUNT(*) FROM termofijado;
+-- SELECT COUNT(*) FROM produccion_tenido;
+-- SELECT COUNT(*) FROM compactado;
+-- SELECT COUNT(*) FROM observado;
+-- SELECT COUNT(*) FROM perchado;
+-- SELECT * FROM termofijado LIMIT 5;
+-- SELECT * FROM produccion_tenido LIMIT 5;
+-- SELECT * FROM compactado LIMIT 5;
+-- SELECT * FROM observado LIMIT 5;
+-- SELECT * FROM perchado LIMIT 5;
+-- SELECT codigo, nombre FROM mes.operacion ORDER BY id;
+-- SELECT COUNT(*) FROM produccion_tenido pt
+-- JOIN partida_x_recetas pxr ON pxr.partida_id = pt.partida_id
+--     AND pxr.maquina_id::text = pt.maquina::text
+-- WHERE pxr.flg_elm = false AND pxr.receta_id IS NOT NULL;
+-- SELECT DISTINCT tipo FROM produccion_tenido ORDER BY 1;
+-- SELECT DISTINCT maquina FROM produccion_tenido ORDER BY 1 LIMIT 20;
 
 -- ============================================================================
 -- BACKFILL ROLL LOTES (HISTÓRICO)
@@ -2308,7 +2318,6 @@ SELECT DISTINCT maquina FROM produccion_tenido ORDER BY 1 LIMIT 20;
 --         WHERE t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
 --     )
 --   ORDER BY p.id;
-
 -- Steps 1–4 (single CTE chain — must run atomically)
 WITH roll_source AS (
     -- Regular rolls — rn = position within partida (1..rollos)
@@ -2454,7 +2463,8 @@ SELECT
     li.usr_cre,
     li.fyh_cre
 FROM lote_insert li
-JOIN ingress_posting ip ON ip.partida_id = li.partida_id; -- Step 4: SERV_ING
+JOIN ingress_posting ip ON ip.partida_id = li.partida_id; 
+-- Step 4: SERV_ING
 
 -- ============================================================================
 -- RERUN SNIPPET — Steps 2–3 only (opi + oppi reassignment)
