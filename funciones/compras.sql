@@ -194,7 +194,7 @@ BEGIN
     -- Idempotent: wipe pending letras and rewrite
     DELETE FROM doc.letra
     WHERE factura_proveedor_id = p_factura_proveedor_id
-      AND estado = 'pendiente';
+      AND estado = 'emitida';
 
     INSERT INTO doc.letra(
         factura_proveedor_id, numero, monto,
@@ -277,7 +277,7 @@ BEGIN
         fyh_mod     = NOW()
     WHERE id = v_factura_id;
 
-    RETURN format('Letra #% pagada el %%.%s',
+    RETURN format('Letra #%s pagada el %s.%s',
         p_letra_id,
         p_fecha_pago,
         CASE WHEN v_todas_pagadas

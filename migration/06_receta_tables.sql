@@ -164,8 +164,10 @@ BEGIN
 END;
 $$;
 
+-- Only guard the three definition fields; flg_activo / audit cols can still be updated
+-- even when the recipe has completed executions (activate/deactivate remains possible).
 CREATE TRIGGER trg_bu_lavado_maquina_immutable
-BEFORE UPDATE ON receta.lavado_maquina
+BEFORE UPDATE OF tipo_lavado_mq_id, valor_origen_id, valor_destino_id ON receta.lavado_maquina
 FOR EACH ROW EXECUTE FUNCTION receta.fn_trg_lavado_maquina_immutable();
 
 -- ── receta.lavado_maquina_paso ────────────────────────────────

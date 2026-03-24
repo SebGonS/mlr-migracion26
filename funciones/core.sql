@@ -43,16 +43,16 @@ jsonb_build_object(
         'rollo', (
           SELECT jsonb_build_object(
             'articulo_id', ir.articulo_id,
-            'articulo',ar.articulo,
-            'tipo_articulo_id', ta.id,
-            'tipo_articulo', ta.tipo_articulo,
+            'articulo',ar.nombre,
+            'articulo_tipo_id', ta.id,
+            'articulo_tipo', ta.nombre,
             'fibra', ar.fibra,
             'flg_tenido', ir.flg_tenido,
             'flg_rib', ir.flg_rib
           )
           FROM item_rollo_detalle ir
           LEFT JOIN articulo ar ON ar.id=ir.articulo_id
-          LEFT JOIN tipo_articulo ta ON ta.id=ar.tipo_articulo_id
+          LEFT JOIN articulo_tipo ta ON ta.id=ar.articulo_tipo_id
           WHERE ir.item_id = i.item_id
         )
       )
@@ -800,7 +800,7 @@ BEGIN
                                     LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
                                     LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
                                     LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
-                                    WHERE m.documento_tipo = 'orden_produccion_paso' 
+                                    WHERE m.documento_tipo = 'ORDEN_PRODUCCION_PASO'
                                     AND m.documento_id = opp.id
                                 ), '[]'::jsonb),
                                 
@@ -1283,7 +1283,7 @@ BEGIN
                             'nota',      prog.nota
                         )
                         FROM mes.programacion prog
-                        WHERE prog.orden_produccion_paso_id = opp.id
+                        WHERE prog.actividad_tipo = 'ORDEN_PRODUCCION_PASO' AND prog.actividad_id = opp.id
                         LIMIT 1
                     ),
 
@@ -1307,7 +1307,7 @@ BEGIN
                         LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
                         LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
                         LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
-                        WHERE m.documento_tipo = 'orden_produccion_paso'
+                        WHERE m.documento_tipo = 'ORDEN_PRODUCCION_PASO'
                           AND m.documento_id = opp.id
                     ), '[]'::jsonb),
 
@@ -1514,7 +1514,7 @@ DECLARE
     v_hint      text;
     v_context   text;
     v_sqlstate  text;
-    v_guia_id           INT;
+    v_guia_id           BIGINT;
     v_guia_tipo         guia_remision_tipo%ROWTYPE;
     v_doc_movimiento_id BIGINT;
     v_usr_id            int := get_user_id();
@@ -1587,19 +1587,21 @@ IF v_guia_tipo.flg_emitida THEN
             USING
                 DETAIL  = v_error_payload::text;
     END IF;
+END IF; -- stock validation (flg_emitida only)
 -----------------------------------------------------------------------------------------------------------------------
-    IF (p_guia->>'tercero_id') IS NULL THEN
-        RAISE EXCEPTION 'Guía inválida: se esperaba tercero_id';
-    END IF;
-    IF v_guia_tipo.flg_cliente AND NOT EXISTS (
-        SELECT 1 FROM tercero WHERE id = (p_guia->>'tercero_id')::INT AND flg_cliente = true
-    ) THEN
-        RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un cliente', (p_guia->>'tercero_id');
-    ELSIF NOT v_guia_tipo.flg_cliente AND NOT EXISTS (
-        SELECT 1 FROM tercero WHERE id = (p_guia->>'tercero_id')::INT AND flg_proveedor = true
-    ) THEN
-        RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un proveedor', (p_guia->>'tercero_id');
-    END IF;
+-- tercero validation applies to all guia types
+IF (p_guia->>'tercero_id') IS NULL THEN
+    RAISE EXCEPTION 'Guía inválida: se esperaba tercero_id';
+END IF;
+IF v_guia_tipo.flg_cliente AND NOT EXISTS (
+    SELECT 1 FROM tercero WHERE id = (p_guia->>'tercero_id')::INT AND flg_cliente = true
+) THEN
+    RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un cliente', (p_guia->>'tercero_id');
+ELSIF NOT v_guia_tipo.flg_cliente AND NOT EXISTS (
+    SELECT 1 FROM tercero WHERE id = (p_guia->>'tercero_id')::INT AND flg_proveedor = true
+) THEN
+    RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un proveedor', (p_guia->>'tercero_id');
+END IF;
 
  INSERT INTO logs_api(function_name, user_id, params)
         VALUES ('crear_guia', v_usr_id, p_guia);
@@ -1675,8 +1677,8 @@ ELSE
     FROM jsonb_array_elements(p_guia->'items') AS item
     WHERE item->>'lote_id' IS NOT NULL;
     -- This is missing (detail line):
-INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, cantidad, lote_id)
-SELECT v_guia_id, (item->>'item_id')::INT, (item->>'cantidad')::NUMERIC, (item->>'lote_id')::INT
+INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, cantidad, lote_id, ubicacion_id)
+SELECT v_guia_id, (item->>'item_id')::INT, (item->>'cantidad')::NUMERIC, (item->>'lote_id')::INT, (item->>'ubicacion_id')::INT
 FROM jsonb_array_elements(p_guia->'items') AS item
 WHERE item->>'lote_id' IS NOT NULL;
     ---INSERSION de items sin lote existente (nuevos lotes) y registro de movimientos de ingreso al almacen
@@ -1686,8 +1688,8 @@ expanded AS (
         (item->>'item_id')::INT AS item_id,
         (item->>'ubicacion_id')::INT AS ubicacion_id,
         (item->>'cantidad')::NUMERIC AS cantidad,
-        (item->>'cantidad')::NUMERIC 
-            / (item->>'cantidad_rollos')::INT AS peso_estimado,
+        (item->>'cantidad')::NUMERIC
+            / NULLIF((item->>'cantidad_rollos')::INT, 0) AS peso_estimado,
         (p_guia->>'propietario_id')::INT AS propietario_id
     FROM jsonb_array_elements(p_guia->'items') AS item
     LEFT JOIN LATERAL generate_series(1, (item->>'cantidad_rollos')::INT) rollo_numero ON true

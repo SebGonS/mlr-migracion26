@@ -1401,88 +1401,76 @@ WHERE EXISTS (SELECT 1 FROM receta.lavado_maquina_paso WHERE id = rlmp.id);
 -- ============================================================================
 -- END MIGRAR RECETAS
 -- ============================================================================
-SELECT COUNT(*) FROM partida_x_recetas; --4877
-SELECT COUNT(*) FROM produccion_tenido; --5634
-SELECT MIN(fyh_cre) FROM partida_x_recetas; --2025-04-04
-SELECT MIN(fecha) FROM produccion_tenido; --2025-01-09 
-SELECT COUNT(*) FROM produccion_tenido WHERE fecha>='2025-04-04'; --4335
-
-SELECT * FROM produccion_tenido pt JOIN
-partida_x_recetas pxr ON pt.partida_id=pxr.partida_id AND pt.tipo
-SELECT distinct tipo,tipo_receta FROM produccion_tenido
-FULL OUTER JOIN tipo_receta ON tipo=tipo_receta
-SELECT DISTINCT tipo_receta FROM tipo_receta LEFT JOIN produccion_tenido ON tipo=tipo_receta
 -- ============================================================================
--- 1 pxr → 1 orden_produccion → 1 orden_produccion_paso
+-- MIGRAR ORDENES DE PRODUCCION
 -- ============================================================================
--- orden.id = paso.id = pxr.id (OVERRIDING SYSTEM VALUE on both).
--- tipo derived from tipo_receta.orden_produccion_tipo (set above).
--- secuencia always 1 — one paso per orden in this model.
--- OVERRIDING SYSTEM VALUE on paso preserves pxr.id so egress movements resolve
--- directly via salida_inventario.partida_x_recetas_id → documento_id.
+-- Source: produccion_tenido (pt) — one row per dyeing run, has accurate
+-- timing (hora_inicio/hora_fin) and covers the full history.
 --
--- NOTE: partidas with NO entry in partida_x_recetas (receta_id IS NULL or all
--- rows flg_elm=true) will get NO orden_produccion here. Before go-live, audit:
+-- op.id = opp.id = pt.id (OVERRIDING SYSTEM VALUE) so the roll lote backfill
+-- can join directly via pt_id without any pxr indirection.
 --
---   SELECT p.id, p.codigo
---   FROM doc.partida p
---   WHERE NOT EXISTS (
---       SELECT 1 FROM mes.orden_produccion op WHERE op.partida_id = p.id
+-- receta_id / relacion_bano intentionally left NULL here — to be enriched
+-- from partida_x_recetas in a later pass once base migration is stable.
+--
+-- TODO: enrich from pxr:
+--   UPDATE mes.orden_produccion_paso opp
+--   SET receta_id     = pxr.receta_id,
+--       relacion_bano = COALESCE(pxr.relacion_bano, m."RB")
+--   FROM partida_x_recetas pxr
+--   LEFT JOIN public.maquina m ON m.id = pxr.maquina_id
+--   WHERE opp.orden_produccion_id IN (
+--       SELECT op.id FROM mes.orden_produccion op
+--       JOIN produccion_tenido pt ON pt.id = op.id
+--       WHERE pt.partida_id = pxr.partida_id AND pt.maquina::int = pxr.maquina_id
 --   );
---
--- Decide per-case: create a placeholder orden manually, link existing egress
--- movements, or accept the gap for very old / cancelled partidas.
 -- ============================================================================
-WITH pxr_data AS (
-    SELECT
-        pxr.id                                                              AS pxr_id,
-        pxr.partida_id,
-        pxr.maquina_id,
-        pxr.receta_id,
-        COALESCE(pxr.relacion_bano, m."RB")                                AS relacion_bano,
-        pxr.fecha,
-        COALESCE(pxr.fyh_cre_tz, pxr.fyh_cre + INTERVAL '5 hours')        AS fyh_cre,
-        tr.operacion_id,
-        tr.orden_produccion_tipo
-    FROM partida_x_recetas pxr
-    JOIN tipo_receta tr   ON tr.id  = pxr.tipo_receta_id
-    LEFT JOIN public.maquina m ON m.id = pxr.maquina_id
-    WHERE pxr.receta_id IS NOT NULL
-      AND pxr.flg_elm = false
-),
-op_insert AS (
-    INSERT INTO mes.orden_produccion (id, partida_id, tipo, estado, fyh_cre, fyh_inicio, fyh_fin)
+-- SELECT * FROM produccion_tenido
+-- SELECT DISTINCT kilos,estandar FROM produccion_tenido
+-- TRUNCATE mes.orden_produccion CASCADE;
+-- SELECT distinct tipo, tipo_receta
+-- FROM produccion_tenido pt
+--     LEFT JOIN tipo_receta tr ON tr.tipo_receta = pt.tipo
+
+WITH op_insert AS (
+    INSERT INTO mes.orden_produccion (id, partida_id, tipo, estado, fyh_inicio, fyh_fin, fyh_cre)
     OVERRIDING SYSTEM VALUE
     SELECT
-        pxr_id,
-        partida_id,
-        orden_produccion_tipo,
-        'CERRADA',
-        fyh_cre,
-        fecha::TIMESTAMP + INTERVAL '5 hours',
-        fecha::TIMESTAMP + INTERVAL '5 hours'
-    FROM pxr_data
+        pt.id,
+        pt.partida_id,
+        COALESCE(tr.orden_produccion_tipo, 'REPROCESO'),
+        CASE WHEN pt.hora_fin IS NOT NULL
+             THEN 'CERRADA'::orden_produccion_estado_enum
+             ELSE 'EN_PROCESO'::orden_produccion_estado_enum
+        END,
+        (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours',
+        (pt.fecha + pt.hora_fin  )::TIMESTAMP + INTERVAL '5 hours',
+        (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours'
+    FROM produccion_tenido pt
+    LEFT JOIN tipo_receta tr ON tr.tipo_receta = pt.tipo
+    WHERE partida_id IN (SELECT id FROM partida)
     RETURNING id
 )
 INSERT INTO mes.orden_produccion_paso (
     id, orden_produccion_id, secuencia, operacion_id, maquina_asignada_id,
-    relacion_bano, receta_id, fyh_inicio, fyh_fin, fyh_cre, estado
+    fyh_inicio, fyh_fin, fyh_cre, estado
 )
 OVERRIDING SYSTEM VALUE
 SELECT
-    pd.pxr_id,
-    op.id,
+    pt.id,
+    pt.id,
     1,
-    pd.operacion_id,
-    pd.maquina_id,
-    pd.relacion_bano,
-    pd.receta_id,
-    pd.fecha::TIMESTAMP + INTERVAL '5 hours',
-    pd.fecha::TIMESTAMP + INTERVAL '5 hours',
-    pd.fyh_cre,
+    COALESCE(tr.operacion_id, (SELECT id FROM mes.operacion WHERE codigo = 'TENIDO')),
+    pt.maquina::int,
+    (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours',
+    (pt.fecha + pt.hora_fin  )::TIMESTAMP + INTERVAL '5 hours',
+    (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours',
     'COMPLETADO'
-FROM pxr_data pd
-JOIN op_insert op ON op.id = pd.pxr_id;
+-- Only completed runs get a paso — EN PROCESO runs have no hora_fin to close on.
+FROM op_insert oi
+JOIN produccion_tenido pt ON pt.id = oi.id --AND pt.hora_fin IS NOT NULL
+LEFT JOIN tipo_receta tr ON tr.tipo_receta = pt.tipo
+WHERE partida_id IN (SELECT id FROM partida);
 
 SELECT setval(pg_get_serial_sequence('mes.orden_produccion',      'id'), (SELECT MAX(id) FROM mes.orden_produccion));
 SELECT setval(pg_get_serial_sequence('mes.orden_produccion_paso', 'id'), (SELECT MAX(id) FROM mes.orden_produccion_paso));
@@ -1493,91 +1481,6 @@ SELECT setval(pg_get_serial_sequence('mes.orden_produccion_paso', 'id'), (SELECT
 INSERT INTO mes.operacion (codigo, nombre, requiere_receta)
 VALUES ('COMPACTADO', 'Compactado', false)
 ON CONFLICT (codigo) DO NOTHING;
-
--- ============================================================================
--- ENRICH / BACKFILL DYEING ORDENES FROM produccion_tenido
--- ============================================================================
--- produccion_tenido is the ground truth for dyeing production — it covers ~2
--- months more history than partida_x_recetas (pxr).
---
--- Strategy:
---   A) UPDATE existing pxr-derived ordenes with accurate fyh_inicio/fyh_fin
---      (match: partida_id + maquina_id, closest fecha to pxr.fecha wins).
---   B) INSERT new orden_produccion + paso for produccion_tenido rows that have
---      no matching pxr entry (357 rows = older history).
---
--- produccion_tenido.maquina is an integer matching public.maquina.id directly.
--- produccion_tenido.tipo matches tipo_receta.tipo_receta (same value set).
--- hora_inicio/hora_fin are TIME — combined with fecha and UTC-5 correction.
--- ============================================================================
-
--- A) Enrich timing on existing pxr-derived ordenes
-UPDATE mes.orden_produccion op
-SET fyh_inicio = sub.fyh_inicio,
-    fyh_fin    = sub.fyh_fin
-FROM (
-    SELECT DISTINCT ON (pxr.id)
-        pxr.id AS op_id,
-        (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours' AS fyh_inicio,
-        (pt.fecha + pt.hora_fin  )::TIMESTAMP + INTERVAL '5 hours' AS fyh_fin
-    FROM partida_x_recetas pxr
-    JOIN produccion_tenido pt
-        ON  pt.partida_id   = pxr.partida_id
-        AND pt.maquina::int = pxr.maquina_id
-    WHERE pxr.receta_id IS NOT NULL AND pxr.flg_elm = false
-    ORDER BY pxr.id, ABS(EXTRACT(EPOCH FROM (pt.fecha::date - pxr.fecha::date))) ASC
-) sub
-WHERE op.id = sub.op_id;
-
--- B) Insert ordenes for produccion_tenido rows with no pxr match
-WITH unmatched AS (
-    SELECT pt.*
-    FROM produccion_tenido pt
-    WHERE NOT EXISTS (
-        SELECT 1 FROM partida_x_recetas pxr
-        WHERE pxr.partida_id = pt.partida_id
-          AND pxr.maquina_id = pt.maquina::int
-          AND pxr.flg_elm    = false
-          AND pxr.receta_id  IS NOT NULL
-    )
-),
-op_insert AS (
-    INSERT INTO mes.orden_produccion (partida_id, tipo, estado, fyh_inicio, fyh_fin, fyh_cre)
-    SELECT
-        pt.partida_id,
-        COALESCE(tr.orden_produccion_tipo, 'REPROCESO'),
-        'CERRADA',
-        (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours',
-        (pt.fecha + pt.hora_fin  )::TIMESTAMP + INTERVAL '5 hours',
-        (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours'
-    FROM unmatched pt
-    LEFT JOIN tipo_receta tr ON tr.tipo_receta = pt.tipo
-    RETURNING id, partida_id,
-              fyh_inicio  -- used to re-match for paso insert below
-)
-INSERT INTO mes.orden_produccion_paso (
-    orden_produccion_id, secuencia, operacion_id, maquina_asignada_id,
-    fyh_inicio, fyh_fin, fyh_cre, estado
-)
-SELECT
-    op.id,
-    1,
-    COALESCE(tr.operacion_id, (SELECT id FROM mes.operacion WHERE codigo = 'TENIDO')),
-    pt.maquina::int,
-    op.fyh_inicio,
-    (pt.fecha + pt.hora_fin)::TIMESTAMP + INTERVAL '5 hours',
-    op.fyh_inicio,
-    'COMPLETADO'
-FROM op_insert op
--- re-match via (partida_id, fyh_inicio) — unique within a partida at this granularity
-JOIN unmatched pt
-    ON  pt.partida_id = op.partida_id
-    AND (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours' = op.fyh_inicio
-LEFT JOIN tipo_receta tr ON tr.tipo_receta = pt.tipo;
-
--- Reset sequences to cover newly inserted rows
-SELECT setval(pg_get_serial_sequence('mes.orden_produccion',      'id'), (SELECT MAX(id) FROM mes.orden_produccion));
-SELECT setval(pg_get_serial_sequence('mes.orden_produccion_paso', 'id'), (SELECT MAX(id) FROM mes.orden_produccion_paso));
 
 -- ============================================================================
 -- MIGRAR LOTES Y MOVIMIENTOS INICIALES DE INSUMOS
@@ -1854,10 +1757,7 @@ compra_data AS (
         c.fecha_remision,         -- adjust column name as needed
         c.fyh_cre + INTERVAL '5 hours' fyh_cre,
         CASE WHEN c.usr_cre NOT IN ('authenticated', 'anon', 'postgres') THEN c.usr_cre::INT ELSE NULL END AS usr_cre,
-        CASE 
-            WHEN inv.rw = 1 THEN SPLIT_PART(c.guia_remision, '-', 1)
-            ELSE SPLIT_PART(c.guia_remision, '-', 1)  -- same serie?
-        END AS serie,
+        SPLIT_PART(c.guia_remision, '-', 1) AS serie, -- serie is always the prefix before '-'
         CASE 
             WHEN inv.rw = 1 THEN SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1)
             ELSE SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1) || '-' || inv.rw::text
@@ -2174,10 +2074,24 @@ JOIN doc_posting dp
 --                       → documento_tipo = 'CUADRE', documento_id = cuadre.id
 --                       → doc_movimiento_id reused from that cuadre's ingress posting
 --   PROD_CONSUMO + pxr: salida.partida_x_recetas_id IS NOT NULL
---                       → documento_tipo = 'ORDEN_PRODUCCION_PASO', documento_id = pxr.id
+--                       → documento_tipo = 'ORDEN_PRODUCCION_PASO', documento_id = pt.id
+--                         (pxr.id mapped → pt.id via pxr_to_opp CTE)
 --   all other:          documento_tipo / documento_id = NULL
 -- ============================================================================
-WITH motivo_map (motivo, codigo) AS (
+WITH pxr_to_opp AS (
+    -- Maps legacy pxr.id → new opp.id (= pt.id) for PROD_CONSUMO documento_id resolution.
+    -- salida_inventario.partida_x_recetas_id references pxr.id; opp.id is now pt.id.
+    SELECT DISTINCT ON (pxr.id)
+        pxr.id AS pxr_id,
+        pt.id  AS opp_id
+    FROM partida_x_recetas pxr
+    JOIN produccion_tenido pt
+        ON pt.partida_id   = pxr.partida_id
+       AND pt.maquina::int = pxr.maquina_id
+    WHERE pxr.receta_id IS NOT NULL AND pxr.flg_elm = false
+    ORDER BY pxr.id, ABS(EXTRACT(EPOCH FROM (pt.fecha::date - pxr.fecha::date)))
+),
+motivo_map (motivo, codigo) AS (
     VALUES
         ('receta',        'PROD_CONSUMO'),
         ('matizado',      'PROD_CONSUMO'),
@@ -2230,7 +2144,7 @@ SELECT
     END,
     CASE
         WHEN dp.cuadre_id IS NOT NULL  THEN dp.cuadre_id
-        WHEN mm.codigo = 'PROD_CONSUMO' AND si.partida_x_recetas_id IS NOT NULL THEN si.partida_x_recetas_id
+        WHEN mm.codigo = 'PROD_CONSUMO' AND si.partida_x_recetas_id IS NOT NULL THEN pto.opp_id
     END,
 
     si.observacion,
@@ -2242,7 +2156,8 @@ JOIN public.salida_inventario_detalle_x_stock sdxs ON sdxs.salida_inventario_det
 JOIN inventario.lote l ON l.id = sdxs.inventario_id
 JOIN motivo_map mm ON mm.motivo = si.motivo::text
 JOIN doc_posting dp ON dp.salida_inventario_id = si.id
-WHERE si.motivo IS NOT NULL
+LEFT JOIN pxr_to_opp pto ON pto.pxr_id = si.partida_x_recetas_id
+WHERE si.motivo IS NOT NULL;
 
 -- SELECT COUNT(*) FROM termofijado;
 -- SELECT COUNT(*) FROM produccion_tenido;
@@ -2319,6 +2234,27 @@ WHERE si.motivo IS NOT NULL
 --     )
 --   ORDER BY p.id;
 -- Steps 1–4 (single CTE chain — must run atomically)
+-- 1. oppi — must go first (FK → opi)
+-- DELETE FROM mes.orden_produccion_paso_item
+-- WHERE orden_produccion_item_id IN (
+--     SELECT id FROM mes.orden_produccion_item
+--     WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo = 'PARTIDA')
+-- );
+
+-- -- 2. opi
+-- DELETE FROM mes.orden_produccion_item
+-- WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo = 'PARTIDA');
+
+-- -- 3. SERV_ING movements
+-- DELETE FROM inventario.item_movimientos
+-- WHERE documento_tipo = 'PARTIDA'
+--   AND item_movimiento_tipo_id = (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_ING');
+-- -- 4. roll lotes
+-- ALTER TABLE inventario.lote DISABLE TRIGGER USER;
+-- DELETE FROM inventario.lote WHERE documento_tipo = 'PARTIDA';
+-- ALTER TABLE inventario.lote ENABLE TRIGGER USER;
+
+
 WITH roll_source AS (
     -- Regular rolls — rn = position within partida (1..rollos)
     SELECT
@@ -2358,37 +2294,6 @@ WITH roll_source AS (
     CROSS JOIN generate_series(1, GREATEST(p.rib, 0)) gs(n)
     WHERE p.rib > 0 AND p.peso_rib > 0
 ),
-pxr_ranges AS (
-    -- Roll/rib ranges per pxr row, ordered by fecha, id within partida.
-    -- NORMAL  pasos: cumulative offset — rolls assigned sequentially across NORMAL rows.
-    -- REPROCESO pasos: offset always 0 — they re-process a subset of the same rolls
-    --   (rolls 1..pxr.rollos) independently, so each REPROCESO overlaps with NORMAL.
-    SELECT
-        pxr.id                                                                          AS pxr_id,
-        pxr.partida_id,
-        tr.orden_produccion_tipo,
-        COALESCE(pxr.rollos, 0)                                                         AS rollos,
-        COALESCE(pxr.rib, 0)                                                            AS rib,
-        CASE WHEN tr.orden_produccion_tipo = 'NORMAL'
-             THEN COALESCE(SUM(COALESCE(pxr.rollos, 0)) OVER (
-                      PARTITION BY pxr.partida_id, tr.orden_produccion_tipo
-                      ORDER BY pxr.fecha, pxr.id
-                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                  ), 0)
-             ELSE 0
-        END                                                                             AS rollos_start,
-        CASE WHEN tr.orden_produccion_tipo = 'NORMAL'
-             THEN COALESCE(SUM(COALESCE(pxr.rib, 0)) OVER (
-                      PARTITION BY pxr.partida_id, tr.orden_produccion_tipo
-                      ORDER BY pxr.fecha, pxr.id
-                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                  ), 0)
-             ELSE 0
-        END                                                                             AS rib_start
-    FROM partida_x_recetas pxr
-    JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id
-    WHERE pxr.receta_id IS NOT NULL AND pxr.flg_elm = false
-),
 ingress_posting AS (
     -- One doc_movimiento_id per partida — DISTINCT in subquery before nextval fires
     SELECT partida_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
@@ -2411,26 +2316,47 @@ lote_with_rn AS (
     FROM lote_insert li
     JOIN item_rollo_detalle ird ON ird.item_id = li.item_id AND ird.flg_tenido = false
 ),
-opi_insert AS ( -- Step 2: link each lote to every pxr whose range covers its rn
-    -- op.id = pxr.id (OVERRIDING SYSTEM VALUE), so JOIN directly.
-    -- One lote → one opi per NORMAL pxr it falls into (sequential range).
-    -- One lote → one opi per REPROCESO pxr whose rollos/rib >= lote's rn (overlink).
-    -- Lotes that fall outside all ranges (count mismatch) get no opi here;
-    -- ghost Step 6 gives them a SERV_EGR to close their inventory balance.
+pt_ranges AS (
+    -- Roll ranges per pt row (= per op), using pt.rollos directly.
+    -- NORMAL runs: cumulative sequential offset across runs ordered by fecha.
+    -- REPROCESO runs: always start at roll 1 (re-process a subset of the same rolls).
+    -- Only includes pt rows that produced a completed paso (EN PROCESO excluded).
+    SELECT
+        pt.id                                                                           AS op_id,
+        pt.partida_id,
+        COALESCE(tr.orden_produccion_tipo, 'REPROCESO')                                 AS orden_produccion_tipo,
+        COALESCE(pt.rollos, 0)                                                          AS rollos,
+        CASE WHEN COALESCE(tr.orden_produccion_tipo, 'REPROCESO') = 'NORMAL'
+             THEN COALESCE(SUM(COALESCE(pt.rollos, 0)) OVER (
+                      PARTITION BY pt.partida_id
+                      ORDER BY pt.fecha, pt.id
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                  ), 0)
+             ELSE 0
+        END                                                                             AS rollos_start
+    FROM produccion_tenido pt
+    LEFT JOIN tipo_receta tr ON tr.tipo_receta = pt.tipo
+    JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = pt.id  -- completed runs only
+),
+opi_insert AS ( -- Step 2: assign each lote to the op(s) whose roll range covers its rn
+    -- NORMAL: each roll falls into exactly one run (sequential ranges, no overlap).
+    -- REPROCESO: overlaps from roll 1 — a roll may link to multiple REPROCESO ops.
+    -- Rolls outside all ranges (pt.rollos sum < partida.rollos) get no opi;
+    -- ghost Step 6 will close their inventory balance with a SERV_EGR.
+    -- TODO: add rib support when pt gains a rib column (currently only regular rolls assigned).
     INSERT INTO mes.orden_produccion_item (orden_produccion_id, item_id, lote_id, ubicacion_id, usr_cre, fyh_cre)
     SELECT
-        pr.pxr_id,
+        pr.op_id,
         lwr.item_id,
         lwr.lote_id,
         (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
         lwr.usr_cre,
         lwr.fyh_cre
     FROM lote_with_rn lwr
-    JOIN pxr_ranges pr ON pr.partida_id = lwr.partida_id
-        AND CASE WHEN lwr.flg_rib
-                 THEN lwr.rn > pr.rib_start    AND lwr.rn <= pr.rib_start    + pr.rib
-                 ELSE lwr.rn > pr.rollos_start AND lwr.rn <= pr.rollos_start + pr.rollos
-            END
+    JOIN pt_ranges pr ON pr.partida_id = lwr.partida_id
+        AND NOT lwr.flg_rib
+        AND lwr.rn > pr.rollos_start
+        AND lwr.rn <= pr.rollos_start + pr.rollos
     RETURNING id AS opi_id, orden_produccion_id, lote_id
 ),
 oppi_insert AS ( -- Step 3: link opi → orden_produccion_paso_item
@@ -2554,7 +2480,7 @@ JOIN ingress_posting ip ON ip.partida_id = li.partida_id;
 -- REPROCESO pasos intentionally excluded: they share the same raw lotes via opi/oppi
 -- for roll-count traceability, but no inventory debit is recorded for re-processing.
 WITH egress_posting AS (
-    SELECT opp.id AS paso_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
+    SELECT t.id AS paso_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
     FROM (
         SELECT DISTINCT opp.id
         FROM mes.orden_produccion_paso opp
@@ -2600,24 +2526,27 @@ JOIN egress_posting ep ON ep.paso_id = opp.id;
 -- One doc_movimiento_id per partida — same grouping as ingress (Step 1–4).
 -- ============================================================================
 WITH ghost_source AS (
+    -- Catches ALL roll lotes with no completed paso assignment:
+    --   • lotes with opi but no oppi (assigned to op, paso link missing)
+    --   • lotes with no opi at all (outside pt.rollos range, rib lotes, etc.)
+    -- Both leave an open inventory balance without this egress.
     SELECT
-        l.id        AS lote_id,
+        l.id                                                                        AS lote_id,
         l.item_id,
         l.cantidad,
-        opp.id      AS paso_id,
+        l.documento_id                                                              AS partida_id,
         l.usr_cre,
-        COALESCE(p.fecha_entrega::TIMESTAMP + INTERVAL '5 hours', p.fyh_cre) AS fyh_egr
+        COALESCE(p.fecha_entrega::TIMESTAMP + INTERVAL '5 hours', p.fyh_cre)       AS fyh_egr
     FROM inventario.lote l
-    JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id
+    LEFT JOIN mes.orden_produccion_item      opi  ON opi.lote_id                   = l.id
     LEFT JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_item_id = opi.id
-    JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = opi.orden_produccion_id AND opp.secuencia = 1
-    JOIN doc.partida p ON p.id = l.documento_id
+    JOIN public.partida p ON p.id = l.documento_id
     WHERE l.documento_tipo = 'PARTIDA'
-      AND oppi.id IS NULL   -- has opi but no paso assignment
+      AND oppi.id IS NULL  -- no completed paso assignment (covers no-opi AND opi-without-oppi)
 ),
 ghost_posting AS (
-    SELECT paso_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
-    FROM (SELECT DISTINCT paso_id FROM ghost_source) t
+    SELECT partida_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
+    FROM (SELECT DISTINCT partida_id FROM ghost_source) t
 )
 INSERT INTO inventario.item_movimientos (
     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
@@ -2631,12 +2560,12 @@ SELECT
     (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_EGR'),
     (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
     gs.cantidad,
-    'ORDEN_PRODUCCION_PASO',
-    gs.paso_id,
+    'PARTIDA',
+    gs.partida_id,
     gs.usr_cre,
     gs.fyh_egr
 FROM ghost_source gs
-JOIN ghost_posting gp ON gp.paso_id = gs.paso_id;
+JOIN ghost_posting gp ON gp.partida_id = gs.partida_id;
 
 -- ============================================================================
 -- Steps 7–8: Dyed roll output + dispatch
@@ -2653,15 +2582,14 @@ JOIN ghost_posting gp ON gp.paso_id = gs.paso_id;
 -- row — add that item first and re-run if needed.
 -- ============================================================================
 WITH last_paso_per_partida AS (
-    -- One paso_id per partida: the paso belonging to the last pxr (fecha DESC, id DESC)
+    -- One paso_id per partida: the paso of the temporally last orden (fyh_fin DESC).
+    -- op.id = pt.id after migration — ordering by op.fyh_fin replaces the old pxr.fecha sort.
     SELECT DISTINCT ON (op.partida_id)
         op.partida_id,
         opp.id AS paso_id
     FROM mes.orden_produccion op
     JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id
-    JOIN partida_x_recetas pxr ON pxr.id = op.id  -- op.id = pxr.id (1:1:1 model)
-    WHERE pxr.receta_id IS NOT NULL AND pxr.flg_elm = false
-    ORDER BY op.partida_id, pxr.fecha DESC, pxr.id DESC
+    ORDER BY op.partida_id, op.fyh_fin DESC NULLS LAST
 ),
 dyed_source AS (
     SELECT
@@ -2682,7 +2610,7 @@ dyed_source AS (
     JOIN item_rollo_detalle              ird_dyed ON ird_dyed.articulo_id         = ird_raw.articulo_id
                                                  AND ird_dyed.flg_tenido = true
                                                  AND ird_dyed.flg_rib    = ird_raw.flg_rib
-    JOIN doc.partida p ON p.id = l.documento_id
+    JOIN public.partida p ON p.id = l.documento_id
     WHERE l.documento_tipo = 'PARTIDA'
 ),
 posting AS (

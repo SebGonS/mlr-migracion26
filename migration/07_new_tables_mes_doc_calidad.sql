@@ -162,7 +162,8 @@ INSERT INTO mes.operacion (codigo, nombre, requiere_receta) VALUES
     ('PLANCHADO',    'Planchado',    false),
     ('PERCHADO',     'Perchado',     false),
     ('COMPACTADO',   'Compactado',   false),
-    ('VOLTEADO',     'Volteado',     false)
+    ('VOLTEADO',     'Volteado',     false),
+    ('MATIZADO',     'Matizado',     true)
 ON CONFLICT (codigo) DO NOTHING;
 
 -- ── mes.maquina_tipo ──────────────────────────────────────────
