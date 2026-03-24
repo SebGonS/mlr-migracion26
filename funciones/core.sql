@@ -476,6 +476,8 @@ BEGIN
      SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT, (u->>'unidad_id')::INT
      FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
 
+    -- Auto-file a recipe request if no live recipe exists for this spec
+    PERFORM receta.solicitar_si_ausente(v_partida_id);
 
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
 SELECT ur.user_id,'Nueva Partida Creada', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' creó una nueva partida', 'info',jsonb_build_object('objeto_tipo','partida','partida_id',v_partida_id)

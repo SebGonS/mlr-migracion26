@@ -337,21 +337,25 @@ AND EXISTS (
 ORDER BY a.nombre, u.nombre, i.nombre;
 
 -- ── doc.partida_resumen_tenido ────────────────────────────────
-CREATE OR REPLACE VIEW doc.partida_resumen_tenido AS
+CREATE OR REPLACE VIEW doc.vw_partida_resumen_tenido AS
 SELECT
     pd.partida_id,
-    a.id AS articulo_id,
-    a.nombre AS articulo_nombre,
+    a.id            AS articulo_id,
+    a.nombre        AS articulo_nombre,
+    a.tipo_articulo_id,           -- added
+    at.nombre       AS articulo_tipo_nombre,  -- added
     a.fibra,
-    COUNT(pd.item_id) AS total_rollos,
-    SUM(pd.cantidad) AS cantidad_total,
-    SUM(CASE WHEN ird.flg_rib = false THEN pd.cantidad ELSE 0 END) AS cantidad_regular,
-    SUM(CASE WHEN ird.flg_rib = true  THEN pd.cantidad ELSE 0 END) AS cantidad_rib
+    COUNT(pd.item_id)                                                    AS total_rollos,
+    SUM(pd.cantidad)                                                     AS cantidad_total,
+    SUM(CASE WHEN ird.flg_rib = false THEN pd.cantidad ELSE 0 END)      AS cantidad_regular,
+    SUM(CASE WHEN ird.flg_rib = true  THEN pd.cantidad ELSE 0 END)      AS cantidad_rib
 FROM doc.partida_detalle pd
-JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
-JOIN articulo a ON ird.articulo_id = a.id
-GROUP BY 1, 2, 3, 4
+JOIN item_rollo_detalle ird  ON ird.item_id  = pd.item_id
+JOIN articulo a              ON a.id         = ird.articulo_id
+JOIN articulo_tipo at        ON at.id        = a.tipo_articulo_id   -- added
+GROUP BY pd.partida_id, a.id, a.nombre, a.tipo_articulo_id, at.nombre, a.fibra
 ORDER BY 1, 2;
+
 
 -- ── mes.vw_maquinas ───────────────────────────────────────────
 CREATE OR REPLACE VIEW mes.vw_maquinas AS
