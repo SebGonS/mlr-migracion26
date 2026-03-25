@@ -8,6 +8,7 @@
 --   receta.get_tenido                → full detail as JSONB (header + pasos + insumos)
 --   receta.resolver_tenido_id        → resolve approved recipe ID for a (partida, tipo_receta)
 --   receta.get_tenido_para_partida   → resolve + return full detail for a partida
+--   receta.vw_tenido                 → all recipes enriched with display names (frontend filters by tab)
 --
 -- Machine wash recipes (receta.lavado_maquina):
 --   receta.crear_lavado_maquina      → create new inactive wash recipe, optionally with pasos
@@ -190,15 +191,22 @@ AS $$
     SELECT jsonb_build_object(
         'id',                 t.id,
         'color_x_cliente_id', t.color_x_cliente_id,
+        'color_nombre',       vc.color,
+        'color_hex',          vc.color_x_cliente_hex,
         'articulo_tipo_id',   t.articulo_tipo_id,
+        'articulo_nombre',    at.nombre,
         'fibra',              t.fibra,
         'tenido_id',          t.tenido_id,
+        'tenido_nombre',      td.tenido,
         'flg_antipilling',    t.flg_antipilling,
         'tipo_receta_id',     t.tipo_receta_id,
+        'tipo_receta_nombre', tr.tipo_receta,
         'estado_id',          t.estado_id,
         'estado_codigo',      e.codigo,
+        'estado_nombre',      e.nombre,
         'flg_produccion',     t.flg_produccion,
         'fyh_produccion',     t.fyh_produccion,
+        'fyh_cre',            t.fyh_cre,
         'pasos', COALESCE((
             SELECT jsonb_agg(
                 jsonb_build_object(
@@ -228,7 +236,11 @@ AS $$
         ), '[]'::jsonb)
     )
     FROM receta.tenido t
-    JOIN estado_desarrollo_color e ON e.id = t.estado_id
+    JOIN  estado_desarrollo_color e  ON e.id  = t.estado_id
+    LEFT JOIN vw_colores          vc ON vc.color_x_cliente_id = t.color_x_cliente_id
+    LEFT JOIN articulo_tipo        at ON at.id = t.articulo_tipo_id
+    LEFT JOIN public.tenido        td ON td.id = t.tenido_id
+    LEFT JOIN tipo_receta          tr ON tr.id = t.tipo_receta_id
     WHERE t.id = p_receta_id;
 $$;
 
@@ -314,12 +326,9 @@ END;$$;
 -- Pasos and insumos may be supplied immediately via p_pasos or added later.
 -- ───────────────────────────────────────
 
-CREATE OR REPLACE FUNCTION receta.crear_lavado_maquina(
-    p_tipo_lavado_mq_id SMALLINT,
-    p_valor_origen_id   SMALLINT,
-    p_valor_destino_id  SMALLINT,
-    p_pasos             JSONB DEFAULT NULL
-)
+-- p_data keys: tipo_lavado_mq_id, valor_origen_id, valor_destino_id,
+--              pasos (optional array — same format as actualizar_lavado_maquina)
+CREATE OR REPLACE FUNCTION receta.crear_lavado_maquina(p_data JSONB)
 RETURNS INT
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -333,12 +342,14 @@ BEGIN
         tipo_lavado_mq_id, valor_origen_id, valor_destino_id,
         flg_activo, usr_cre, fyh_cre
     ) VALUES (
-        p_tipo_lavado_mq_id, p_valor_origen_id, p_valor_destino_id,
+        (p_data->>'tipo_lavado_mq_id')::SMALLINT,
+        (p_data->>'valor_origen_id')::SMALLINT,
+        (p_data->>'valor_destino_id')::SMALLINT,
         false, v_usr_id, now()
     )
     RETURNING id INTO v_id;
 
-    IF p_pasos IS NOT NULL THEN
+    IF p_data ? 'pasos' THEN
         WITH paso_ins AS (
             INSERT INTO receta.lavado_maquina_paso (receta_id, operacion_id, orden, ph, temperatura, tiempo_min, nota)
             SELECT
@@ -349,7 +360,7 @@ BEGIN
                 (p->>'temperatura')::NUMERIC,
                 (p->>'tiempo_min')::SMALLINT,
                 p->>'nota'
-            FROM jsonb_array_elements(p_pasos) p
+            FROM jsonb_array_elements(p_data->'pasos') p
             RETURNING id, orden
         )
         INSERT INTO receta.lavado_maquina_paso_insumo (paso_id, item_id, cantidad, orden)
@@ -359,7 +370,7 @@ BEGIN
             (i->>'cantidad')::NUMERIC,
             (i->>'orden')::SMALLINT
         FROM paso_ins pi
-        JOIN jsonb_array_elements(p_pasos) p ON (p->>'orden')::SMALLINT = pi.orden
+        JOIN jsonb_array_elements(p_data->'pasos') p ON (p->>'orden')::SMALLINT = pi.orden
         CROSS JOIN jsonb_array_elements(COALESCE(p->'insumos', '[]')) i;
     END IF;
 
@@ -730,32 +741,40 @@ END;$$;
 
 
 -- ───────────────────────────────────────
--- vw_desarrollo_tenido
--- All live recipes (excludes HISTORICO and CANCELADO — use direct query for archive).
--- RECHAZADO is included so the development team can see rejected iterations.
--- One row per recipe version; group by (color_x_cliente_id, articulo_tipo_id,
--- fibra, tenido_id, flg_antipilling) to see the full family history.
+-- vw_tenido
+-- All recipes, all states — enriched with display names.
+-- Frontend applies tab filters:
+--   Pendientes: estado_codigo IN ('INGRESADO','EN_DESARROLLO','RE_LAB','ENVIADO_CLIENTE')
+--   Historial:  no filter
 -- ───────────────────────────────────────
 
-CREATE OR REPLACE VIEW receta.vw_desarrollo_tenido AS
+CREATE OR REPLACE VIEW receta.vw_tenido AS
 SELECT
     t.id,
     t.color_x_cliente_id,
+    vc.color                  AS color_nombre,
+    vc.color_x_cliente_hex    AS color_hex,
     t.articulo_tipo_id,
+    at.nombre                 AS articulo_nombre,
     t.fibra,
     t.tenido_id,
+    td.tenido                 AS tenido_nombre,
     t.flg_antipilling,
     t.tipo_receta_id,
+    tr.tipo_receta            AS tipo_receta_nombre,
     t.estado_id,
-    e.codigo  AS estado_codigo,
-    e.nombre  AS estado_nombre,
+    e.codigo                  AS estado_codigo,
+    e.nombre                  AS estado_nombre,
     t.flg_produccion,
     t.fyh_produccion,
     t.fyh_cre,
     t.fyh_mod
 FROM receta.tenido t
-JOIN public.estado_desarrollo_color e ON e.id = t.estado_id
-WHERE e.codigo NOT IN ('HISTORICO', 'CANCELADO');
+JOIN  public.estado_desarrollo_color e  ON e.id  = t.estado_id
+LEFT JOIN public.vw_colores          vc ON vc.color_x_cliente_id = t.color_x_cliente_id
+LEFT JOIN public.articulo_tipo        at ON at.id = t.articulo_tipo_id
+LEFT JOIN public.tenido              td ON td.id = t.tenido_id
+LEFT JOIN public.tipo_receta         tr ON tr.id = t.tipo_receta_id;
 
 
 -- ───────────────────────────────────────
@@ -766,13 +785,15 @@ GRANT EXECUTE ON FUNCTION receta.crear_tenido                TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.transicionar_tenido(INT, SMALLINT) TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.actualizar_tenido           TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.get_tenido                  TO authenticated;
-GRANT EXECUTE ON FUNCTION receta.crear_lavado_maquina        TO authenticated;
+GRANT EXECUTE ON FUNCTION receta.crear_lavado_maquina(JSONB)  TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.activar_lavado_maquina      TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.desactivar_lavado_maquina   TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.actualizar_lavado_maquina   TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.get_lavado_maquina          TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.resolver_tenido_id          TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.get_tenido_para_partida     TO authenticated;
-GRANT EXECUTE ON FUNCTION receta.solicitar_si_ausente        TO authenticated;
-GRANT SELECT  ON receta.vw_desarrollo_tenido                 TO authenticated;
+-- solicitar_si_ausente: internal only — called from doc.crear_partida (SECURITY DEFINER).
+-- No grant to authenticated; the owner context propagates through crear_partida.
+GRANT SELECT  ON receta.vw_tenido                            TO authenticated;
 GRANT SELECT  ON estado_desarrollo_color                     TO authenticated;
+

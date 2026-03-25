@@ -571,6 +571,21 @@ LEFT JOIN inventario.lote l ON l.id = i.lote_id
 LEFT JOIN vw_items vi ON vi.item_id = l.item_id
 LEFT JOIN mes.empleado e ON e.id = i.empleado_id;
 
+-- ── mes.vw_empleados_activos ───────────────────────────────────
+CREATE OR REPLACE VIEW mes.vw_empleados_activos AS
+SELECT
+    e.id,
+    e.nombre,
+    e.apellido,
+    e.nombre || ' ' || e.apellido AS nombre_completo,
+    e.rol_id,
+    er.nombre AS rol_nombre,
+    e.turno_id,
+    e.perfil_id
+FROM mes.empleado e
+JOIN mes.empleado_rol er ON er.id = e.rol_id
+WHERE e.activo = true;
+
 -- ── mes.vw_pasos ──────────────────────────────────────────────
 CREATE OR REPLACE VIEW mes.vw_pasos AS
 SELECT
@@ -592,12 +607,16 @@ SELECT
     opp.estado,
     opp.fyh_inicio,
     opp.fyh_fin,
-    opp.flg_genera_produccion
+    opp.flg_genera_produccion,
+    opp.empleado_id,
+    e.nombre || ' ' || e.apellido AS empleado_nombre,
+    opp.observacion_backfill
 FROM mes.orden_produccion_paso opp
 JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
 JOIN doc.partida p ON p.id = op.partida_id
 JOIN mes.operacion o ON o.id = opp.operacion_id
-LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id;
+LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id
+LEFT JOIN mes.empleado e ON e.id = opp.empleado_id;
 
 -- ── inventario.vw_items_movimientos ───────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_items_movimientos AS
@@ -640,6 +659,7 @@ GRANT SELECT ON inventario.vw_lotes_disponibles   TO anon, authenticated;
 GRANT SELECT ON inventario.vw_lotes_rollos_despachados TO anon, authenticated;
 GRANT SELECT ON inventario.vw_items_movimientos   TO anon, authenticated;
 GRANT SELECT ON mes.vw_maquinas                   TO authenticated;
+GRANT SELECT ON mes.vw_empleados_activos          TO authenticated;
 GRANT SELECT ON mes.vw_pasos                      TO anon, authenticated;
 GRANT SELECT ON mes.vw_partida_produccion_rollos  TO anon, authenticated;
 GRANT SELECT ON calidad.vw_lotes_pendientes_inspeccion TO authenticated;

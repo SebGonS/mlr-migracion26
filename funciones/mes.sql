@@ -1396,4 +1396,93 @@ EXCEPTION WHEN OTHERS THEN
     RAISE LOG 'Error in finalizar_lavado - User: %, ID: %, Error: %', v_usr_id, p_lavado_id, v_message;
     RAISE;
 END;
+
+-- ═══════════════════════════════════════════════════════════════
+-- mes.registrar_backfill_orden
+-- Retroactively registers production for an already-created orden.
+-- Iterates pasos in the caller-supplied order, calls iniciar_paso +
+-- finalizar_paso for each (preserving all inventory egress side-effects),
+-- then patches the real timestamps and optional backfill note.
+--
+-- p_data keys:
+--   orden_produccion_id  INT     (required — for validation only)
+--   pasos                ARRAY   (required, must be in secuencia order)
+--     paso_id            BIGINT  (required)
+--     fyh_inicio         TIMESTAMPTZ (required)
+--     fyh_fin            TIMESTAMPTZ (required)
+--     empleado_id        SMALLINT (optional — who performed the step)
+--     maquina_asignada_id INT    (optional — pre-assign machine before iniciar)
+--     consumos           ARRAY   (optional — same shape as finalizar_paso expects)
+--     produccion         ARRAY   (optional — same shape as finalizar_paso expects)
+--     observacion_backfill TEXT  (optional)
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.registrar_backfill_orden(p_data JSONB)
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'notification', 'public', 'mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id           INT := get_user_id();
+    v_orden_id         INT;
+    v_paso             JSONB;
+    v_paso_id          BIGINT;
+    v_paso_count       INT := 0;
+BEGIN
+    v_orden_id := (p_data->>'orden_produccion_id')::INT;
+
+    IF v_orden_id IS NULL THEN
+        RAISE EXCEPTION 'orden_produccion_id es requerido.';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM mes.orden_produccion WHERE id = v_orden_id) THEN
+        RAISE EXCEPTION 'Orden de producción % no encontrada.', v_orden_id;
+    END IF;
+    IF jsonb_array_length(p_data->'pasos') = 0 THEN
+        RAISE EXCEPTION 'Se requiere al menos un paso en p_data.pasos.';
+    END IF;
+
+    FOR v_paso IN SELECT * FROM jsonb_array_elements(p_data->'pasos') LOOP
+        v_paso_id := (v_paso->>'paso_id')::BIGINT;
+
+        IF v_paso_id IS NULL THEN
+            RAISE EXCEPTION 'Cada paso debe incluir paso_id.';
+        END IF;
+        IF (v_paso->>'fyh_inicio') IS NULL OR (v_paso->>'fyh_fin') IS NULL THEN
+            RAISE EXCEPTION 'Cada paso debe incluir fyh_inicio y fyh_fin (paso_id=%).', v_paso_id;
+        END IF;
+
+        -- iniciar_paso enforces prerequisite ordering naturally via secuencia check.
+        -- Passes empleado_id + maquina_asignada_id through p_datos.
+        PERFORM mes.iniciar_paso(v_paso_id, v_paso);
+
+        -- finalizar_paso handles consumos, produccion, machine release, and
+        -- auto-finalizes the orden when all pasos are done.
+        PERFORM mes.finalizar_paso(v_paso_id, v_paso);
+
+        -- Patch real timestamps and backfill note over the NOW() values set above.
+        UPDATE mes.orden_produccion_paso
+        SET fyh_inicio           = (v_paso->>'fyh_inicio')::TIMESTAMPTZ,
+            fyh_fin              = (v_paso->>'fyh_fin')::TIMESTAMPTZ,
+            observacion_backfill = v_paso->>'observacion_backfill',
+            usr_mod              = v_usr_id,
+            fyh_mod              = NOW()
+        WHERE id = v_paso_id;
+
+        v_paso_count := v_paso_count + 1;
+    END LOOP;
+
+    RETURN format('Backfill completado: %s paso(s) registrados para orden %s.',
+                  v_paso_count, v_orden_id);
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_backfill_orden - User: %, Orden: %, Error: %',
+              v_usr_id, v_orden_id, v_message;
+    RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION mes.registrar_backfill_orden(JSONB) TO authenticated;
 $function$;
