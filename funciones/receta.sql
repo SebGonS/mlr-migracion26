@@ -210,28 +210,34 @@ AS $$
         'pasos', COALESCE((
             SELECT jsonb_agg(
                 jsonb_build_object(
-                    'id',          tp.id,
-                    'operacion_id',tp.operacion_id,
-                    'orden',       tp.orden,
-                    'ph',          tp.ph,
-                    'temperatura', tp.temperatura,
-                    'tiempo_min',  tp.tiempo_min,
-                    'nota',        tp.nota,
+                    'id',              tp.id,
+                    'operacion_id',    tp.operacion_id,
+                    'operacion_codigo',op.codigo,
+                    'operacion_nombre',op.nombre,
+                    'orden',           tp.orden,
+                    'ph',              tp.ph,
+                    'temperatura',     tp.temperatura,
+                    'tiempo_min',      tp.tiempo_min,
+                    'nota',            tp.nota,
                     'insumos', COALESCE((
                         SELECT jsonb_agg(
                             jsonb_build_object(
-                                'id',       tpi.id,
-                                'item_id',  tpi.item_id,
-                                'cantidad', tpi.cantidad,
-                                'orden',    tpi.orden
+                                'id',          tpi.id,
+                                'item_id',     tpi.item_id,
+                                'item_codigo', i.codigo,
+                                'item_nombre', i.nombre,
+                                'cantidad',    tpi.cantidad,
+                                'orden',       tpi.orden
                             ) ORDER BY tpi.orden
                         )
                         FROM receta.tenido_paso_insumo tpi
+                        JOIN public.item i ON i.id = tpi.item_id
                         WHERE tpi.paso_id = tp.id
                     ), '[]'::jsonb)
                 ) ORDER BY tp.orden
             )
             FROM receta.tenido_paso tp
+            JOIN receta.operacion op ON op.id = tp.operacion_id
             WHERE tp.receta_id = t.id
         ), '[]'::jsonb)
     )
@@ -527,28 +533,34 @@ AS $$
         'pasos', COALESCE((
             SELECT jsonb_agg(
                 jsonb_build_object(
-                    'id',          p.id,
-                    'operacion_id',p.operacion_id,
-                    'orden',       p.orden,
-                    'ph',          p.ph,
-                    'temperatura', p.temperatura,
-                    'tiempo_min',  p.tiempo_min,
-                    'nota',        p.nota,
+                    'id',              p.id,
+                    'operacion_id',    p.operacion_id,
+                    'operacion_codigo',op.codigo,
+                    'operacion_nombre',op.nombre,
+                    'orden',           p.orden,
+                    'ph',              p.ph,
+                    'temperatura',     p.temperatura,
+                    'tiempo_min',      p.tiempo_min,
+                    'nota',            p.nota,
                     'insumos', COALESCE((
                         SELECT jsonb_agg(
                             jsonb_build_object(
-                                'id',       pi.id,
-                                'item_id',  pi.item_id,
-                                'cantidad', pi.cantidad,
-                                'orden',    pi.orden
+                                'id',          pi.id,
+                                'item_id',     pi.item_id,
+                                'item_codigo', i.codigo,
+                                'item_nombre', i.nombre,
+                                'cantidad',    pi.cantidad,
+                                'orden',       pi.orden
                             ) ORDER BY pi.orden
                         )
                         FROM receta.lavado_maquina_paso_insumo pi
+                        JOIN public.item i ON i.id = pi.item_id
                         WHERE pi.paso_id = p.id
                     ), '[]'::jsonb)
                 ) ORDER BY p.orden
             )
             FROM receta.lavado_maquina_paso p
+            JOIN receta.operacion op ON op.id = p.operacion_id
             WHERE p.receta_id = r.id
         ), '[]'::jsonb)
     )
@@ -796,4 +808,30 @@ GRANT EXECUTE ON FUNCTION receta.get_tenido_para_partida     TO authenticated;
 -- No grant to authenticated; the owner context propagates through crear_partida.
 GRANT SELECT  ON receta.vw_tenido                            TO authenticated;
 GRANT SELECT  ON estado_desarrollo_color                     TO authenticated;
+
+-- ───────────────────────────────────────
+-- vw_lavado_maquina_lista
+-- Machine-wash recipe list — enriched with display names.
+-- ───────────────────────────────────────
+
+CREATE OR REPLACE VIEW receta.vw_lavado_maquina_lista AS
+SELECT
+    lm.id,
+    lm.tipo_lavado_mq_id,
+    tlm.nombre   AS tipo_lavado_nombre,
+    lm.valor_origen_id,
+    vo.valor                  AS valor_origen_nombre,
+    lm.valor_destino_id,
+    vd.valor                  AS valor_destino_nombre,
+    lm.flg_activo,
+    lm.fyh_cre,
+    lm.fyh_mod
+FROM receta.lavado_maquina lm
+LEFT JOIN public.tipo_lavado_maquina tlm ON tlm.id = lm.tipo_lavado_mq_id
+LEFT JOIN public.valor               vo  ON vo.id  = lm.valor_origen_id
+LEFT JOIN public.valor               vd  ON vd.id  = lm.valor_destino_id;
+
+GRANT SELECT  ON receta.vw_lavado_maquina_lista              TO authenticated;
+
+
 

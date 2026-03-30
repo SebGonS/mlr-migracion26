@@ -2,21 +2,22 @@
 -- Step 8: Views
 -- Must come after all tables they reference.
 -- ═══════════════════════════════════════════════════════════════
-
+DROP VIEW IF EXISTS vw_colores CASCADE;
 -- ── vw_colores ────────────────────────────────────────────────
 CREATE OR REPLACE VIEW vw_colores AS
 SELECT
-    a.id AS color_x_cliente_id,
-    b.id AS color_id,
+    a.id          AS color_x_cliente_id,
+    b.id          AS color_id,
     b.color,
-    c.id AS cliente_id,
-    c.cliente AS tono,
-    c.cliente AS cliente,
-    a.hex AS color_x_cliente_hex,
-    b.hex AS color_hex
+    a.cliente_id,                    -- legacy FK kept for backward compat
+    a.tercero_id,
+    t.nombre      AS tono,
+    t.nombre      AS cliente,        -- alias kept for backward compat
+    a.hex         AS color_x_cliente_hex,
+    b.hex         AS color_hex
 FROM color_x_cliente a
-JOIN color b ON a.color_id = b.id
-JOIN cliente c ON a.cliente_id = c.id;
+JOIN color b    ON a.color_id   = b.id
+LEFT JOIN tercero t ON a.tercero_id = t.id;
 
 -- ── vw_items ──────────────────────────────────────────────────
 CREATE OR REPLACE VIEW vw_items AS
@@ -342,7 +343,7 @@ SELECT
     pd.partida_id,
     a.id            AS articulo_id,
     a.nombre        AS articulo_nombre,
-    a.tipo_articulo_id,           -- added
+    a.articulo_tipo_id,           -- added
     at.nombre       AS articulo_tipo_nombre,  -- added
     a.fibra,
     COUNT(pd.item_id)                                                    AS total_rollos,
@@ -352,8 +353,8 @@ SELECT
 FROM doc.partida_detalle pd
 JOIN item_rollo_detalle ird  ON ird.item_id  = pd.item_id
 JOIN articulo a              ON a.id         = ird.articulo_id
-JOIN articulo_tipo at        ON at.id        = a.tipo_articulo_id   -- added
-GROUP BY pd.partida_id, a.id, a.nombre, a.tipo_articulo_id, at.nombre, a.fibra
+JOIN articulo_tipo at        ON at.id        = a.articulo_tipo_id   -- added
+GROUP BY pd.partida_id, a.id, a.nombre, a.articulo_tipo_id, at.nombre, a.fibra
 ORDER BY 1, 2;
 
 
@@ -651,6 +652,166 @@ LEFT JOIN inventario.lote l ON l.id = im.lote_id
 LEFT JOIN inventario.ubicacion uo ON uo.id = im.origen_ubicacion_id
 LEFT JOIN inventario.ubicacion ud ON ud.id = im.destino_ubicacion_id;
 
+-- ── public.vw_dashboard_kpis ──────────────────────────────────
+-- Single-row view for stat cards. Frontend calls .from('vw_dashboard_kpis').single().
+-- Month-over-month creation counts let the frontend compute the diff %.
+CREATE OR REPLACE VIEW public.vw_dashboard_kpis AS
+WITH
+  ini_mes AS (SELECT date_trunc('month', now()) AS d),
+  ini_ant AS (SELECT date_trunc('month', now()) - interval '1 month' AS d),
+
+  partidas_kpi AS (
+    SELECT
+      COUNT(*) FILTER (WHERE estado IN ('CONFIRMADA','EN_PRODUCCION','ENTREGA_PARCIAL')) AS activas,
+      COUNT(*) FILTER (WHERE fyh_cre >= (SELECT d FROM ini_mes))                        AS creadas_mes_actual,
+      COUNT(*) FILTER (WHERE fyh_cre >= (SELECT d FROM ini_ant)
+                         AND fyh_cre <  (SELECT d FROM ini_mes))                        AS creadas_mes_anterior
+    FROM doc.partida
+  ),
+
+  ordenes_kpi AS (
+    SELECT
+      COUNT(*) FILTER (WHERE estado NOT IN ('FINALIZADA','CANCELADA')) AS activas,
+      COUNT(*) FILTER (WHERE fyh_cre >= (SELECT d FROM ini_mes))       AS creadas_mes_actual,
+      COUNT(*) FILTER (WHERE fyh_cre >= (SELECT d FROM ini_ant)
+                         AND fyh_cre <  (SELECT d FROM ini_mes))       AS creadas_mes_anterior
+    FROM mes.orden_produccion
+  ),
+
+  pasos_kpi AS (
+    SELECT
+      COUNT(*) FILTER (WHERE opp.estado = 'PENDIENTE')  AS pendientes,
+      COUNT(*) FILTER (WHERE opp.estado = 'EN_PROCESO') AS en_proceso
+    FROM mes.orden_produccion_paso opp
+    JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+    WHERE op.estado NOT IN ('FINALIZADA','CANCELADA')
+  ),
+
+  rollos_kpi AS (
+    SELECT
+      COUNT(DISTINCT sa.lote_id)                                       AS rollos_en_planta,
+      SUM(sa.cantidad_disponible)                                      AS kg_en_planta,
+      COUNT(DISTINCT sa.lote_id) FILTER (
+          WHERE l.fyh_cre >= (SELECT d FROM ini_mes))                  AS recibidos_mes_actual,
+      COUNT(DISTINCT sa.lote_id) FILTER (
+          WHERE l.fyh_cre >= (SELECT d FROM ini_ant)
+            AND l.fyh_cre <  (SELECT d FROM ini_mes))                  AS recibidos_mes_anterior
+    FROM inventario.vw_stock_actual sa
+    JOIN inventario.lote l ON l.id = sa.lote_id
+    JOIN item i             ON i.id  = sa.item_id
+    JOIN item_tipo it       ON it.id = i.item_tipo_id
+    WHERE it.codigo = 'ROLLO'
+  )
+
+SELECT
+  p.activas                  AS partidas_activas,
+  p.creadas_mes_actual       AS partidas_creadas_mes_actual,
+  p.creadas_mes_anterior     AS partidas_creadas_mes_anterior,
+  o.activas                  AS ordenes_activas,
+  o.creadas_mes_actual       AS ordenes_creadas_mes_actual,
+  o.creadas_mes_anterior     AS ordenes_creadas_mes_anterior,
+  ps.pendientes              AS pasos_pendientes,
+  ps.en_proceso              AS pasos_en_proceso,
+  r.rollos_en_planta,
+  r.kg_en_planta,
+  r.recibidos_mes_actual     AS rollos_recibidos_mes_actual,
+  r.recibidos_mes_anterior   AS rollos_recibidos_mes_anterior
+FROM partidas_kpi p, ordenes_kpi o, pasos_kpi ps, rollos_kpi r;
+
+-- ── public.vw_dashboard_actividad_reciente ────────────────────
+-- Recent business events feed (last 20, up to 30-day window).
+-- Sources: partidas created, ordenes finalized, pasos completed.
+CREATE OR REPLACE VIEW public.vw_dashboard_actividad_reciente AS
+SELECT tipo, descripcion, fyh, referencia_id, referencia_codigo
+FROM (
+  SELECT
+    'PARTIDA_CREADA'   AS tipo,
+    'Partida creada' || COALESCE(' — ' || te.nombre, '') AS descripcion,
+    p.fyh_cre          AS fyh,
+    p.id               AS referencia_id,
+    EXTRACT(YEAR FROM p.fyh_cre) || '-' || LPAD(p.numero::TEXT, 4, '0') AS referencia_codigo
+  FROM doc.partida p
+  LEFT JOIN tercero te ON te.id = p.tercero_id
+  WHERE p.fyh_cre >= now() - interval '30 days'
+
+  UNION ALL
+
+  SELECT
+    'ORDEN_FINALIZADA',
+    'Orden #' || op.id::TEXT || ' finalizada',
+    op.fyh_fin,
+    op.id,
+    op.id::TEXT
+  FROM mes.orden_produccion op
+  WHERE op.fyh_fin >= now() - interval '30 days'
+    AND op.estado = 'FINALIZADA'
+
+  UNION ALL
+
+  SELECT
+    'PASO_COMPLETADO',
+    'Paso completado: ' || o.nombre,
+    opp.fyh_fin,
+    opp.id,
+    opp.id::TEXT
+  FROM mes.orden_produccion_paso opp
+  JOIN mes.operacion o ON o.id = opp.operacion_id
+  WHERE opp.fyh_fin >= now() - interval '7 days'
+    AND opp.estado = 'COMPLETADO'
+) feed
+ORDER BY fyh DESC
+LIMIT 20;
+
+-- ── public.vw_dashboard_tareas ────────────────────────────────
+-- Actionable task counts for the "Tareas Pendientes" card.
+-- Zero-count rows are filtered out — empty on a clean day.
+CREATE OR REPLACE VIEW public.vw_dashboard_tareas AS
+SELECT tipo, descripcion, count, urgencia
+FROM (
+  SELECT
+    'SIN_ORDEN'   AS tipo,
+    'Partidas confirmadas sin orden de producción' AS descripcion,
+    COUNT(*)::INT AS count,
+    'alta'        AS urgencia
+  FROM doc.partida p
+  WHERE p.estado = 'CONFIRMADA'
+    AND NOT EXISTS (SELECT 1 FROM mes.orden_produccion op WHERE op.partida_id = p.id)
+
+  UNION ALL
+
+  SELECT
+    'PASO_VENCIDO',
+    'Pasos con más de 24h en proceso',
+    COUNT(*)::INT,
+    'alta'
+  FROM mes.orden_produccion_paso
+  WHERE estado = 'EN_PROCESO'
+    AND fyh_inicio < now() - interval '24 hours'
+
+  UNION ALL
+
+  SELECT
+    'FECHA_PROXIMA',
+    'Partidas con entrega en ≤ 3 días',
+    COUNT(*)::INT,
+    'alta'
+  FROM doc.partida
+  WHERE estado IN ('CREADA','CONFIRMADA','EN_PRODUCCION','ENTREGA_PARCIAL','DEVUELTA_PARCIAL')
+    AND fecha_acordada BETWEEN CURRENT_DATE AND CURRENT_DATE + 3
+
+  UNION ALL
+
+  SELECT
+    'SIN_MAQUINA',
+    'Pasos en proceso sin máquina asignada',
+    COUNT(*)::INT,
+    'media'
+  FROM mes.orden_produccion_paso
+  WHERE estado = 'EN_PROCESO' AND maquina_asignada_id IS NULL
+) t
+WHERE count > 0
+ORDER BY CASE urgencia WHEN 'alta' THEN 1 ELSE 2 END;
+
 -- ── Grants ────────────────────────────────────────────────────
 GRANT SELECT ON inventario.vw_stock_rollos        TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_general       TO anon, authenticated;
@@ -664,7 +825,10 @@ GRANT SELECT ON mes.vw_pasos                      TO anon, authenticated;
 GRANT SELECT ON mes.vw_partida_produccion_rollos  TO anon, authenticated;
 GRANT SELECT ON calidad.vw_lotes_pendientes_inspeccion TO authenticated;
 GRANT SELECT ON calidad.vw_inspecciones           TO authenticated;
-GRANT SELECT ON doc.partida_resumen_tenido        TO authenticated;
+GRANT SELECT ON doc.vw_partida_resumen_tenido              TO authenticated;
+GRANT SELECT ON public.vw_dashboard_kpis                   TO authenticated;
+GRANT SELECT ON public.vw_dashboard_actividad_reciente     TO authenticated;
+GRANT SELECT ON public.vw_dashboard_tareas                 TO authenticated;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA doc        TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA mes        TO authenticated;

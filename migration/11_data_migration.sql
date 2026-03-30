@@ -366,6 +366,12 @@ SET hex=c.hex
 FROM color c
 WHERE color_x_cliente.color_id = c.id;
 
+UPDATE color_x_cliente cxc
+SET tercero_id = t.id
+FROM tercero t
+WHERE t.cliente_id = cxc.cliente_id
+   OR t.cliente_id2 = cxc.cliente_id;
+
 
 -- ============================================================================
 -- 1. MASTER DATA MIGRATION - Public Schema

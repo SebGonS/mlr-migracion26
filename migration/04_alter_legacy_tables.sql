@@ -37,6 +37,7 @@ FOR EACH ROW EXECUTE FUNCTION public.fn_trg_gen_codigo_color();
 
 -- ── color_x_cliente ────────────────────────────────────────────
 ALTER TABLE color_x_cliente ADD COLUMN IF NOT EXISTS hex text;
+ALTER TABLE color_x_cliente ADD COLUMN IF NOT EXISTS tercero_id INT REFERENCES tercero(id);
 
 -- ── estado ─────────────────────────────────────────────────────
 ALTER TABLE estado
