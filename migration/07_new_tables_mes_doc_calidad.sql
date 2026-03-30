@@ -582,5 +582,44 @@ CREATE TABLE doc.factura_detalle (
 GRANT SELECT ON doc.factura         TO authenticated;
 GRANT SELECT ON doc.factura_detalle TO authenticated;
 
+-- ── mes.tiempos_estandar_tenido ───────────────────────────────
+-- Planning reference: expected duration for a dyeing step given
+-- the color depth (valor), dyeing chemistry (tenido), and whether
+-- antipilling treatment is included. Computed live at projection
+-- time — NOT stored on orden_produccion_paso (which keeps
+-- tiempo_estandar only for non-recipe steps copied from template).
+CREATE TABLE mes.tiempos_estandar_tenido (
+    id              SMALLINT    GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    valor_id        SMALLINT    NOT NULL REFERENCES valor(id),
+    tenido_id       INT         NOT NULL REFERENCES tenido(id),
+    flg_antipilling BOOLEAN     NOT NULL DEFAULT false,
+    duracion        INTERVAL    NOT NULL,
+    flg_activo      BOOLEAN     NOT NULL DEFAULT true,
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT, fyh_mod TIMESTAMPTZ
+);
+
+-- Only one active duration per (color depth, chemistry, antipilling).
+CREATE UNIQUE INDEX uq_tiempos_estandar_tenido_activo
+    ON mes.tiempos_estandar_tenido(valor_id, tenido_id, flg_antipilling)
+    WHERE flg_activo = true;
+
+-- ── mes.tiempos_estandar_lavado ───────────────────────────────
+-- Planning reference: expected duration for a wash cycle given the
+-- machine wash type. Looked up via receta.lavado_maquina.tipo_lavado_mq_id.
+CREATE TABLE mes.tiempos_estandar_lavado (
+    id                  SMALLINT    GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tipo_lavado_mq_id   SMALLINT    NOT NULL REFERENCES tipo_lavado_maquina(id),
+    duracion            INTERVAL    NOT NULL,
+    flg_activo          BOOLEAN     NOT NULL DEFAULT true,
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT, fyh_mod TIMESTAMPTZ
+);
+
+-- Only one active duration per wash type.
+CREATE UNIQUE INDEX uq_tiempos_estandar_lavado_activo
+    ON mes.tiempos_estandar_lavado(tipo_lavado_mq_id)
+    WHERE flg_activo = true;
+
 -- ── Grants ────────────────────────────────────────────────────
 GRANT USAGE ON SCHEMA doc TO authenticated;

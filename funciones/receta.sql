@@ -40,6 +40,11 @@ DECLARE
     v_estado_id SMALLINT;
     v_usr_id    INT := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT id INTO v_estado_id FROM estado_desarrollo_color WHERE codigo = 'EN_DESARROLLO';
 
     INSERT INTO receta.tenido (
@@ -97,6 +102,11 @@ DECLARE
     v_historico_id SMALLINT;
     v_usr_id       INT := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- Lock and fetch current recipe
     SELECT * INTO v_receta FROM receta.tenido WHERE id = p_receta_id FOR UPDATE;
     IF NOT FOUND THEN
@@ -267,6 +277,11 @@ DECLARE
     v_receta receta.tenido%ROWTYPE;
     v_usr_id INT := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT * INTO v_receta FROM receta.tenido WHERE id = p_receta_id FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Receta ID % no encontrada.', p_receta_id;
@@ -338,6 +353,11 @@ DECLARE
     v_id     INT;
     v_usr_id INT := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     INSERT INTO receta.lavado_maquina (
         tipo_lavado_mq_id, valor_origen_id, valor_destino_id,
         flg_activo, usr_cre, fyh_cre
@@ -396,6 +416,11 @@ DECLARE
     v_receta receta.lavado_maquina%ROWTYPE;
     v_usr_id INT := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT * INTO v_receta FROM receta.lavado_maquina WHERE id = p_receta_id FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'receta.lavado_maquina id=% no encontrada.', p_receta_id;
@@ -432,6 +457,11 @@ AS $$
 DECLARE
     v_usr_id INT := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     IF NOT EXISTS (SELECT 1 FROM receta.lavado_maquina WHERE id = p_receta_id) THEN
         RAISE EXCEPTION 'receta.lavado_maquina id=% no encontrada.', p_receta_id;
     END IF;
@@ -463,6 +493,11 @@ AS $$
 DECLARE
     v_usr_id INT := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     IF NOT EXISTS (SELECT 1 FROM receta.lavado_maquina WHERE id = p_receta_id) THEN
         RAISE EXCEPTION 'receta.lavado_maquina id=% no encontrada.', p_receta_id;
     END IF;

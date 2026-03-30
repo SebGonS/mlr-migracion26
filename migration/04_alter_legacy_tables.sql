@@ -4,6 +4,16 @@
 -- so the script is idempotent and safe to re-run.
 -- ═══════════════════════════════════════════════════════════════
 
+-- ── tipo_lavado_maquina ────────────────────────────────────────
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'tipo_lavado_maquina' AND column_name = 'tipo_lavado_mq'
+    ) THEN
+        ALTER TABLE tipo_lavado_maquina RENAME COLUMN tipo_lavado_mq TO nombre;
+    END IF;
+END $$;
+
 -- ── color ──────────────────────────────────────────────────────
 ALTER TABLE color ADD COLUMN IF NOT EXISTS codigo text;
 ALTER TABLE color ADD COLUMN IF NOT EXISTS hex    text;

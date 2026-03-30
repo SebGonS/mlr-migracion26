@@ -89,7 +89,7 @@ JOIN articulo art ON art.id = ird.articulo_id
 JOIN unidad un ON un.id = i.unidad_id
 JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
 JOIN inventario.almacen a ON a.id = u.almacen_id
-LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::int
 LEFT JOIN tercero c ON c.id = l.propietario_id
 WHERE it.codigo = 'ROLLO'
 ORDER BY a.nombre, u.nombre, i.nombre;
@@ -125,9 +125,9 @@ SELECT
     p.fyh_fin AS fecha_finalizacion,
     EXTRACT(EPOCH FROM (NOW() - p.fyh_cre)) / 86400 AS dias_desde_creacion,
     COALESCE(pd_agg.total_items, 0) AS total_items,
-    COALESCE(pd_agg.cantidad_total, '0') AS cantidad_total,
-    COALESCE(pd_agg.cantidad_principales, '0') AS cantidad_principales,
-    COALESCE(pd_agg.cantidad_rib, '0') AS cantidad_rib,
+    COALESCE(pd_agg.cantidad_total, 0) AS cantidad_total,
+    COALESCE(pd_agg.cantidad_principales, 0) AS cantidad_principales,
+    COALESCE(pd_agg.cantidad_rib, 0) AS cantidad_rib,
     CASE
         WHEN EXISTS (SELECT 1 FROM mes.orden_produccion op WHERE op.partida_id = p.id)
         THEN true ELSE false
@@ -325,7 +325,7 @@ JOIN articulo art ON art.id = ird.articulo_id
 JOIN unidad un ON un.id = i.unidad_id
 LEFT JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
 LEFT JOIN inventario.almacen a ON a.id = u.almacen_id
-LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::int
 LEFT JOIN tercero c ON c.id = l.propietario_id
 WHERE it.codigo = 'ROLLO' AND sa.cantidad_disponible IS NULL
 AND EXISTS (
@@ -342,7 +342,7 @@ SELECT
     pd.partida_id,
     a.id            AS articulo_id,
     a.nombre        AS articulo_nombre,
-    a.tipo_articulo_id,           -- added
+    a.articulo_tipo_id,           -- added
     at.nombre       AS articulo_tipo_nombre,  -- added
     a.fibra,
     COUNT(pd.item_id)                                                    AS total_rollos,
@@ -352,8 +352,8 @@ SELECT
 FROM doc.partida_detalle pd
 JOIN item_rollo_detalle ird  ON ird.item_id  = pd.item_id
 JOIN articulo a              ON a.id         = ird.articulo_id
-JOIN articulo_tipo at        ON at.id        = a.tipo_articulo_id   -- added
-GROUP BY pd.partida_id, a.id, a.nombre, a.tipo_articulo_id, at.nombre, a.fibra
+JOIN articulo_tipo at        ON at.id        = a.articulo_tipo_id   -- added
+GROUP BY pd.partida_id, a.id, a.nombre, a.articulo_tipo_id, at.nombre, a.fibra
 ORDER BY 1, 2;
 
 
@@ -417,7 +417,7 @@ WITH rollos AS (
     FROM inventario.vw_stock_actual sa
     JOIN inventario.lote l ON l.id = sa.lote_id
     LEFT JOIN mes.orden_produccion_paso opp
-        ON documento_tipo = 'ORDEN_PRODUCCION_PASO' AND opp.id = l.documento_id
+        ON l.documento_tipo = 'ORDEN_PRODUCCION_PASO' AND opp.id = l.documento_id
     LEFT JOIN mes.orden_produccion op ON opp.orden_produccion_id = op.id
     JOIN item i ON i.id = sa.item_id
     JOIN item_tipo it ON it.id = i.item_tipo_id
@@ -664,16 +664,33 @@ GRANT SELECT ON mes.vw_pasos                      TO anon, authenticated;
 GRANT SELECT ON mes.vw_partida_produccion_rollos  TO anon, authenticated;
 GRANT SELECT ON calidad.vw_lotes_pendientes_inspeccion TO authenticated;
 GRANT SELECT ON calidad.vw_inspecciones           TO authenticated;
-GRANT SELECT ON doc.partida_resumen_tenido        TO authenticated;
+GRANT SELECT ON doc.vw_partida_resumen_tenido     TO authenticated;
+GRANT USAGE ON SCHEMA inventario TO authenticated;
+GRANT USAGE ON SCHEMA mes TO authenticated;
+GRANT USAGE ON SCHEMA doc TO authenticated;
+GRANT USAGE ON SCHEMA calidad TO authenticated;
+GRANT USAGE ON SCHEMA iam TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA mes TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA doc TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA calidad TO authenticated;
 
+-- Custom schemas
 GRANT SELECT ON ALL TABLES IN SCHEMA doc        TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA mes        TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA inventario TO authenticated;
 GRANT SELECT ON ALL TABLES IN SCHEMA calidad    TO authenticated;
-GRANT USAGE ON SCHEMA mes        TO authenticated;
-GRANT USAGE ON SCHEMA doc        TO authenticated;
-GRANT USAGE ON SCHEMA inventario TO authenticated;
-GRANT USAGE ON SCHEMA calidad    TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA receta     TO authenticated;
+GRANT USAGE  ON SCHEMA mes        TO authenticated;
+GRANT USAGE  ON SCHEMA doc        TO authenticated;
+GRANT USAGE  ON SCHEMA inventario TO authenticated;
+GRANT USAGE  ON SCHEMA calidad    TO authenticated;
+GRANT USAGE  ON SCHEMA receta     TO authenticated;
+
+-- Legacy public-schema catalog tables (tenido, valor, color, articulo, etc.)
+GRANT USAGE  ON SCHEMA public               TO authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO authenticated;
 GRANT INSERT ON calidad.inspeccion      TO authenticated;
 GRANT INSERT ON calidad.inspeccion_foto TO authenticated;
 GRANT UPDATE ON mes.operacion           TO authenticated;

@@ -13,7 +13,6 @@
 -- After deploying: Supabase Dashboard → Authentication → Hooks
 --   → Custom Access Token → schema: public, function: custom_access_token_hook
 -- =============================================================================
-
 CREATE OR REPLACE FUNCTION public.custom_access_token_hook(event jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
