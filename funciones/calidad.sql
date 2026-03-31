@@ -13,6 +13,11 @@ DECLARE
     v_inspeccion_id BIGINT;
     v_usr_id int := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('calidad.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere calidad.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('crear_inspeccion', v_usr_id, p_inspeccion);
 
@@ -25,7 +30,7 @@ BEGIN
         p_inspeccion->>'observacion',
         (p_inspeccion->>'empleado_id')::INT
     )
-    RETURNING id INTO v_inspeccion_id;
+    RETURNING id INTO v_inspeccion_id;  
 
     -- Children: defectos + fotos (fotos nested inside each defecto in the JSON)
     WITH defectos_inserted AS (

@@ -2,7 +2,7 @@
 -- Step 8: Views
 -- Must come after all tables they reference.
 -- ═══════════════════════════════════════════════════════════════
-DROP VIEW IF EXISTS vw_colores CASCADE;
+-- DROP VIEW IF EXISTS vw_colores CASCADE;
 -- ── vw_colores ────────────────────────────────────────────────
 CREATE OR REPLACE VIEW vw_colores AS
 SELECT

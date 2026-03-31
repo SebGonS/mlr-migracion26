@@ -18,6 +18,11 @@ DECLARE
     v_usr_id    int := get_user_id();
     v_compra_id bigint;
 BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('crear_compra', v_usr_id, p_datos);
 
@@ -86,6 +91,11 @@ DECLARE
     v_factura_id bigint;
     v_compra_id  bigint := (p_datos->>'compra_id')::BIGINT;
 BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('registrar_factura_proveedor', v_usr_id, p_datos);
 
@@ -173,6 +183,11 @@ DECLARE
     v_total        numeric;
     v_total_letras numeric;
 BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT total INTO v_total
     FROM doc.factura_proveedor
     WHERE id = p_factura_proveedor_id
@@ -245,6 +260,11 @@ DECLARE
     v_estado_actual letra_estado_enum;
     v_todas_pagadas boolean;
 BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT factura_proveedor_id, estado
     INTO v_factura_id, v_estado_actual
     FROM doc.letra WHERE id = p_letra_id FOR UPDATE;
@@ -313,6 +333,11 @@ DECLARE
     v_proveedor  int;
     v_linked     int;
 BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT tercero_id INTO v_proveedor
     FROM doc.compra WHERE id = p_compra_id;
 
@@ -364,6 +389,11 @@ DECLARE
     v_compra_prov     int;
     v_factura_prov    int;
 BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT tercero_id INTO v_compra_prov
     FROM doc.compra WHERE id = p_compra_id;
     IF NOT FOUND THEN

@@ -2658,7 +2658,10 @@ SELECT
     po.doc_movimiento_id,
     dl.item_id,
     dl.lote_id,
-    (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_EGR'),
+    -- propietario_id = 1 means MLR owns the roll (MLR/* or OSWALDO/* client) → sale dispatch
+    -- propietario_id != 1 means client owns the roll → service return dispatch
+    (SELECT id FROM inventario.item_movimiento_tipo
+     WHERE codigo = CASE WHEN dl.propietario_id = 1 THEN 'VENTA_EGR' ELSE 'SERV_EGR' END),
     (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_CRU'),
     dl.cantidad,
     'ORDEN_PRODUCCION_PASO',
@@ -2721,6 +2724,35 @@ ON CONFLICT (item_id) DO UPDATE
         fyh_mod         = EXCLUDED.fyh_mod;
 
 -- ============================================================================
+-- mes.tiempos_estandar_tenido  ←  public.tiempos_estandar_tenido
+-- tipo_receta_id dropped (was used inconsistently across legacy functions).
+-- adicional_id replaced by flg_antipilling boolean.
+-- DISTINCT ON new key resolves any duplicates that tipo_receta_id created.
+-- ============================================================================
+INSERT INTO mes.tiempos_estandar_tenido (valor_id, tenido_id, flg_antipilling, duracion, flg_activo)
+SELECT DISTINCT ON (valor_id, tenido_id, adicional_id IS NOT NULL)
+    valor_id,
+    tenido_id,
+    adicional_id IS NOT NULL,
+    duracion,
+    COALESCE(flg_activo, true)
+FROM public.tiempos_estandar_tenido
+WHERE duracion IS NOT NULL
+  AND valor_id IS NOT NULL
+  AND tenido_id IS NOT NULL
+ORDER BY valor_id, tenido_id, (adicional_id IS NOT NULL),
+         flg_activo DESC NULLS LAST, id DESC;
+
+-- ============================================================================
+-- mes.tiempos_estandar_lavado  ←  public.tiempos_estandar_lavado
+-- ============================================================================
+INSERT INTO mes.tiempos_estandar_lavado (tipo_lavado_mq_id, duracion, flg_activo)
+SELECT tipo_lavado_mq_id, duracion, COALESCE(flg_activo, true)
+FROM public.tiempos_estandar_lavado
+WHERE duracion IS NOT NULL
+  AND tipo_lavado_mq_id IS NOT NULL;
+
+-- ============================================================================
 -- DROP BRIDGE COLUMNS  →  tercero  (run manually after go-live stabilizes)
 -- ============================================================================
 -- cliente_id, cliente_id2, proveedor_id were temporary join bridges used only
@@ -2730,5 +2762,108 @@ ON CONFLICT (item_id) DO UPDATE
 --     DROP COLUMN IF EXISTS cliente_id,
 --     DROP COLUMN IF EXISTS cliente_id2,
 --     DROP COLUMN IF EXISTS proveedor_id;
+
+-- ============================================================================
+-- IAM: permisos and rol_permiso seed
+-- Idempotent — ON CONFLICT DO NOTHING on both tables.
+-- Covers every permission code referenced in RLS policies and function guards.
+-- ============================================================================
+
+INSERT INTO iam.permiso (code, descripcion) VALUES
+    ('comercial.ver',        'Ver partidas, guías, compras y documentos comerciales'),
+    ('comercial.crear',      'Crear partidas, guías de remisión y compras'),
+    ('comercial.editar',     'Editar documentos comerciales, registrar facturas y letras'),
+    ('inventario.ver',       'Ver stock, lotes, movimientos e ítems'),
+    ('inventario.crear',     'Crear ítems e ingresar stock'),
+    ('inventario.editar',    'Ajustar stock, actualizar pesos y valoraciones'),
+    ('produccion.ver',       'Ver órdenes, pasos, programación y lavados'),
+    ('produccion.crear',     'Crear órdenes de producción'),
+    ('produccion.editar',    'Editar pasos y estructura de órdenes'),
+    ('produccion.ejecutar',  'Iniciar y finalizar pasos y lavados, registrar consumos'),
+    ('produccion.programar', 'Guardar y modificar la programación de máquinas'),
+    ('calidad.ver',          'Ver inspecciones y resultados de calidad'),
+    ('calidad.crear',        'Registrar inspecciones de calidad'),
+    ('calidad.editar',       'Editar inspecciones existentes'),
+    ('configuracion.ver',    'Ver usuarios, roles y configuración del sistema'),
+    ('configuracion.admin',  'Gestionar usuarios, roles, máquinas, operaciones y plantillas')
+ON CONFLICT (code) DO NOTHING;
+
+-- rol_permiso: resolved by code so IDs don't need to be hardcoded
+INSERT INTO iam.rol_permiso (rol_id, permiso_id)
+SELECT r.id, p.id
+FROM (VALUES
+    -- ── admin: todo ──────────────────────────────────────────
+    ('admin', 'comercial.ver'),
+    ('admin', 'comercial.crear'),
+    ('admin', 'comercial.editar'),
+    ('admin', 'inventario.ver'),
+    ('admin', 'inventario.crear'),
+    ('admin', 'inventario.editar'),
+    ('admin', 'produccion.ver'),
+    ('admin', 'produccion.crear'),
+    ('admin', 'produccion.editar'),
+    ('admin', 'produccion.ejecutar'),
+    ('admin', 'produccion.programar'),
+    ('admin', 'calidad.ver'),
+    ('admin', 'calidad.crear'),
+    ('admin', 'calidad.editar'),
+    ('admin', 'configuracion.ver'),
+    ('admin', 'configuracion.admin'),
+    -- ── jefe_planta: full operations, no user/config mgmt ────
+    ('jefe_planta', 'comercial.ver'),
+    ('jefe_planta', 'inventario.ver'),
+    ('jefe_planta', 'inventario.crear'),
+    ('jefe_planta', 'inventario.editar'),
+    ('jefe_planta', 'produccion.ver'),
+    ('jefe_planta', 'produccion.crear'),
+    ('jefe_planta', 'produccion.editar'),
+    ('jefe_planta', 'produccion.ejecutar'),
+    ('jefe_planta', 'produccion.programar'),
+    ('jefe_planta', 'calidad.ver'),
+    ('jefe_planta', 'calidad.crear'),
+    ('jefe_planta', 'calidad.editar'),
+    ('jefe_planta', 'configuracion.ver'),
+    -- ── supervisor_produccion: plan + execute, read-only elsewhere
+    ('supervisor_produccion', 'comercial.ver'),
+    ('supervisor_produccion', 'inventario.ver'),
+    ('supervisor_produccion', 'produccion.ver'),
+    ('supervisor_produccion', 'produccion.crear'),
+    ('supervisor_produccion', 'produccion.editar'),
+    ('supervisor_produccion', 'produccion.ejecutar'),
+    ('supervisor_produccion', 'produccion.programar'),
+    ('supervisor_produccion', 'calidad.ver'),
+    -- ── operador_produccion: execute only ────────────────────
+    ('operador_produccion', 'produccion.ver'),
+    ('operador_produccion', 'produccion.ejecutar'),
+    ('operador_produccion', 'inventario.ver'),
+    ('operador_produccion', 'calidad.ver'),
+    -- ── calidad ──────────────────────────────────────────────
+    ('calidad', 'calidad.ver'),
+    ('calidad', 'calidad.crear'),
+    ('calidad', 'calidad.editar'),
+    ('calidad', 'produccion.ver'),
+    ('calidad', 'inventario.ver'),
+    -- ── inventario ───────────────────────────────────────────
+    ('inventario', 'inventario.ver'),
+    ('inventario', 'inventario.crear'),
+    ('inventario', 'inventario.editar'),
+    ('inventario', 'produccion.ver'),
+    ('inventario', 'comercial.ver'),
+    -- ── compras ──────────────────────────────────────────────
+    ('compras', 'comercial.ver'),
+    ('compras', 'comercial.crear'),
+    ('compras', 'comercial.editar'),
+    ('compras', 'inventario.ver'),
+    ('compras', 'inventario.crear'),
+    -- ── sistema: automated processes, broad read + execute ───
+    ('sistema', 'produccion.ver'),
+    ('sistema', 'produccion.ejecutar'),
+    ('sistema', 'inventario.ver'),
+    ('sistema', 'inventario.editar'),
+    ('sistema', 'calidad.ver')
+) AS mapping(rol_code, permiso_code)
+JOIN iam.rol     r ON r.code = mapping.rol_code
+JOIN iam.permiso p ON p.code = mapping.permiso_code
+ON CONFLICT (rol_id, permiso_id) DO NOTHING;
 
 COMMIT;

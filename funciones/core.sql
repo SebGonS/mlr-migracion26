@@ -167,6 +167,11 @@ DECLARE
     v_tipo_codigo text;
     v_usr_id int := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('inventario.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
  INSERT INTO logs_api(function_name, user_id, params)
         VALUES ('crear_item', v_usr_id, p_item::TEXT);
     INSERT INTO item (codigo, nombre, item_tipo_id, unidad_id)
@@ -249,6 +254,11 @@ DECLARE
     v_lote_id int;
     v_error_payload jsonb;
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
 INSERT INTO inventario.almacen(codigo,nombre,usr_cre)
 VALUES ((p_almacen->>'codigo')::TEXT,(p_almacen->>'nombre')::TEXT,v_usr_id)
 RETURNING id INTO v_almacen_id;
@@ -297,6 +307,11 @@ DECLARE
     v_lote_id int;
     v_error_payload jsonb;
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
 v_almacen_id := (p_almacen->>'id')::INT;
 
 UPDATE inventario.almacen
@@ -356,6 +371,10 @@ DECLARE
     v_almacen_nombre text;
     v_error_payload jsonb;
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
 
 DELETE FROM inventario.ubicacion WHERE almacen_id = p_almacen_id;
 DELETE FROM inventario.almacen WHERE id = p_almacen_id
@@ -455,6 +474,11 @@ DECLARE
     v_usr_id int := get_user_id();
 
 BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
  INSERT INTO logs_api(function_name, user_id, params)
         VALUES ('crear_partida', v_usr_id, p_partida);
 
@@ -515,6 +539,11 @@ DECLARE
     v_estado    text;
     v_usr_id    int := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('actualizar_partida', v_usr_id, jsonb_build_object('partida_id', p_partida_id, 'partida', p_partida));
 
@@ -948,6 +977,11 @@ DECLARE
     v_usr_id    int := get_user_id();
     v_error_payload jsonb;
 BEGIN
+    IF NOT jwt_has_permission('produccion.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- --------------------------------------------------
 -- ---VALIDAR DISPONIBILIDAD DE ROLLOS RESERVADOS
 -- --------------------------------------------------
@@ -1095,6 +1129,11 @@ DECLARE
     v_estado    orden_produccion_estado_enum;
     v_count     int;
 BEGIN
+    IF NOT jwt_has_permission('produccion.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- Validar que la orden existe y no está en estado terminal
     SELECT estado INTO v_estado
     FROM mes.orden_produccion
@@ -1433,6 +1472,11 @@ DECLARE
     v_tipo_codigo text;
     v_usr_id int := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
  INSERT INTO logs_api(function_name, user_id, params)
         VALUES ('crear_plantilla', v_usr_id, p_plantilla);
 
@@ -1480,6 +1524,11 @@ AS $function$
 DECLARE
     v_usr_id int := get_user_id();
 BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('actualizar_plantilla', v_usr_id, p_plantilla);
 
@@ -1524,6 +1573,11 @@ DECLARE
     v_error_payload     jsonb;
     v_fecha_mov         TIMESTAMPTZ;
 BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
  -- guard condition
  SELECT * INTO v_guia_tipo FROM guia_remision_tipo WHERE id = (p_guia->>'guia_remision_tipo_id')::SMALLINT;
 --  SELECT * INTO v_item_movimiento_tipo FROM inventario.item_movimiento_tipo WHERE id = v_guia_tipo.item_movimiento_tipo_id;
@@ -1653,7 +1707,7 @@ IF v_guia_tipo.flg_emitida THEN
         (item->>'item_id')::INT,
         (item->>'lote_id')::INT,
         v_guia_tipo.item_movimiento_tipo_id,
-        (p_guia->>'origen_ubicacion_id')::INT,
+        (item->>'ubicacion_id')::INT,  -- per-item origin location
         NULL, -- destination is external
         (item->>'cantidad')::NUMERIC(12,2),
         v_fecha_mov,

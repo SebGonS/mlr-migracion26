@@ -50,7 +50,7 @@ FROM (
     LEFT JOIN tenido t                       ON t.id = p.tenido_id
     LEFT JOIN tercero c                      ON c.id = p.tercero_id
     LEFT JOIN vw_colores vc                  ON vc.color_x_cliente_id = p.color_x_cliente_id
-    LEFT JOIN partida_resumen_tenido vpa     ON vpa.partida_id = p.id
+    LEFT JOIN vw_partida_resumen_tenido vpa     ON vpa.partida_id = p.id
     LEFT JOIN mes.lavado_maquina lm          ON prog.actividad_tipo = 'LAVADO_MAQUINA' AND lm.id = prog.actividad_id
     WHERE prog.fecha = p_fecha
     ORDER BY prog.maquina_id, prog.secuencia
@@ -177,6 +177,11 @@ DECLARE
     v_invalid_pasos  JSONB;
     v_invalid_lavados JSONB;
 BEGIN
+    IF NOT jwt_has_permission('produccion.programar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.programar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- 1. Validate production pasos: must not be COMPLETADO or OMITIDO
     SELECT jsonb_agg(jsonb_build_object('actividad_id', opp.id, 'estado', opp.estado))
     INTO v_invalid_pasos
@@ -294,6 +299,11 @@ DECLARE
     v_context          text;
     v_sqlstate         text;
 BEGIN
+    IF NOT jwt_has_permission('produccion.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- 1. Validate paso, get receta + machine + relacion_bano
     SELECT opp.receta_id, opp.maquina_asignada_id, COALESCE(opp.relacion_bano, m.relacion_bano),
            opp.orden_produccion_id, o.nombre
@@ -441,6 +451,11 @@ DECLARE
     v_requiere_receta       boolean;
     v_check boolean;
 BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT opp.estado, opp.orden_produccion_id, o.nombre, opp.secuencia,o.requiere_receta,CASE WHEN (o.requiere_receta AND opp.receta_id IS NULL)or (o.requiere_maquina AND opp.maquina_asignada_id IS NULL) THEN false ELSE true END
     INTO v_estado, v_orden_id, v_op_nombre, v_secuencia, v_requiere_receta, v_check
     FROM mes.orden_produccion_paso opp
@@ -533,6 +548,11 @@ DECLARE
     v_error_payload     jsonb;
     v_doc_movimiento_id BIGINT;
 BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('registrar_consumo_paso', v_usr_id, jsonb_build_object('paso_id', p_paso_id, 'consumos', p_consumos));
 
@@ -689,6 +709,11 @@ DECLARE
     v_pesaje_neg_id     smallint;
     v_doc_movimiento_id BIGINT;
 BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT estado INTO v_estado
     FROM mes.orden_produccion WHERE id = p_orden_id;
 
@@ -780,6 +805,11 @@ DECLARE
     v_pesaje_neg_id     smallint;
     v_doc_movimiento_id BIGINT;
 BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT estado INTO v_estado
     FROM mes.orden_produccion WHERE id = p_orden_id;
 
@@ -892,6 +922,11 @@ DECLARE
     v_error_payload jsonb;
     v_deleted int;
 BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1 FROM mes.orden_produccion_paso
         WHERE id = p_paso_id AND estado IN ('PENDIENTE', 'EN_PROCESO', 'COMPLETADO')
@@ -968,6 +1003,11 @@ DECLARE
     v_error_payload     jsonb;
     v_doc_movimiento_id BIGINT;
 BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('registrar_produccion', v_usr_id, jsonb_build_object(
         'orden_paso_id', p_orden_paso_id, 'output', p_output, 'ubicacion_id', p_ubicacion_id
@@ -1155,6 +1195,11 @@ DECLARE
     v_todos_completos boolean;
     v_prod_result  text;
 BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT opp.estado, opp.orden_produccion_id, opp.maquina_asignada_id, o.nombre, opp.flg_genera_produccion
     INTO v_estado, v_orden_id, v_maquina_id, v_op_nombre, v_flg_genera_produccion
     FROM mes.orden_produccion_paso opp
@@ -1242,6 +1287,11 @@ DECLARE
     v_estado      orden_produccion_paso_estado_enum;
     v_maquina_id  INT;
 BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT estado, maquina_id
     INTO v_estado, v_maquina_id
     FROM mes.lavado_maquina
@@ -1304,6 +1354,11 @@ DECLARE
     v_error_payload     jsonb;
     v_doc_movimiento_id BIGINT;
 BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     SELECT estado, maquina_id
     INTO v_estado, v_maquina_id
     FROM mes.lavado_maquina
@@ -1396,6 +1451,7 @@ EXCEPTION WHEN OTHERS THEN
     RAISE LOG 'Error in finalizar_lavado - User: %, ID: %, Error: %', v_usr_id, p_lavado_id, v_message;
     RAISE;
 END;
+$function$;
 
 -- ═══════════════════════════════════════════════════════════════
 -- mes.registrar_backfill_orden
@@ -1430,6 +1486,11 @@ DECLARE
     v_paso_id          BIGINT;
     v_paso_count       INT := 0;
 BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     v_orden_id := (p_data->>'orden_produccion_id')::INT;
 
     IF v_orden_id IS NULL THEN
@@ -1485,4 +1546,392 @@ END;
 $function$;
 
 GRANT EXECUTE ON FUNCTION mes.registrar_backfill_orden(JSONB) TO authenticated;
-$function$;
+
+-- ── mes.vw_proyeccion_tenido ──────────────────────────────────
+-- Machine schedule projection for any date (filter by fecha as needed).
+--
+-- Outputs offsets from each machine's shift start, NOT absolute wall-clock
+-- times. The frontend adds its own hora_inicio per machine to get actual times:
+--   wall_clock_start = hora_inicio_maquina + offset_inicio
+--   wall_clock_end   = hora_inicio_maquina + offset_fin
+--
+-- A 20-minute break between consecutive batches is included in the offsets.
+-- peso_produccion is computed relative to a 24-h window from shift start,
+-- so it is also independent of hora_inicio.
+--
+-- EN_PROCESO items use now() for remaining time — only meaningful for today.
+--
+-- Duration source : mes.tiempos_estandar_tenido via assigned recipe
+--                   (lookup key: valor × tenido × flg_antipilling)
+-- Wash duration   : mes.tiempos_estandar_lavado via receta.lavado_maquina.tipo_lavado_mq_id
+CREATE OR REPLACE VIEW mes.vw_proyeccion_tenido AS
+WITH pasos AS (
+    SELECT
+        p.fecha,
+        p.maquina_id,
+        p.secuencia,
+        'TENIDO'::text                                      AS tipo_registro,
+        p.actividad_id,
+        co.color,
+        te.tenido,
+        val.valor,
+        rt.flg_antipilling,
+        COALESCE((
+            SELECT SUM(l.cantidad)
+            FROM mes.orden_produccion_paso_item  oppi
+            JOIN mes.orden_produccion_item       opi  ON opi.id = oppi.orden_produccion_item_id
+            JOIN inventario.lote                 l    ON l.id   = opi.lote_id
+            WHERE oppi.orden_produccion_paso_id = opp.id
+        ), 0)::numeric                                      AS kilos,
+        CASE
+            WHEN opp.estado = 'EN_PROCESO' THEN
+                GREATEST(interval '0',
+                    te_std.duracion - (now() - opp.fyh_inicio))
+            ELSE
+                te_std.duracion
+        END                                                 AS duracion,
+        opp.fyh_inicio
+    FROM mes.programacion                 p
+    JOIN mes.orden_produccion_paso        opp    ON opp.id  = p.actividad_id
+    JOIN receta.tenido                    rt     ON rt.id   = opp.receta_id
+    JOIN color_x_cliente                  cxc    ON cxc.id  = rt.color_x_cliente_id
+    LEFT JOIN color                       co     ON co.id   = cxc.color_id
+    LEFT JOIN tenido                      te     ON te.id   = rt.tenido_id
+    LEFT JOIN valor                       val    ON val.id  = cxc.valor_id
+    LEFT JOIN mes.tiempos_estandar_tenido te_std
+           ON te_std.valor_id        = cxc.valor_id
+          AND te_std.tenido_id       = rt.tenido_id
+          AND te_std.flg_antipilling = rt.flg_antipilling
+          AND te_std.flg_activo      = true
+    WHERE p.actividad_tipo  = 'ORDEN_PRODUCCION_PASO'
+      AND opp.estado       IN ('PENDIENTE', 'EN_PROCESO')
+      AND opp.receta_id     IS NOT NULL
+),
+lavados AS (
+    SELECT
+        p.fecha,
+        p.maquina_id,
+        p.secuencia,
+        'LAVADO'::text  AS tipo_registro,
+        p.actividad_id,
+        NULL::text      AS color,
+        NULL::text      AS tenido,
+        NULL::text      AS valor,
+        NULL::boolean   AS flg_antipilling,
+        NULL::numeric   AS kilos,
+        CASE
+            WHEN lm.estado = 'EN_PROCESO' THEN
+                GREATEST(interval '0', tel.duracion - (now() - lm.fyh_inicio))
+            ELSE
+                tel.duracion
+        END             AS duracion,
+        lm.fyh_inicio
+    FROM mes.programacion             p
+    JOIN mes.lavado_maquina           lm  ON lm.id                 = p.actividad_id
+    JOIN receta.lavado_maquina        rlm ON rlm.id                = lm.receta_id
+    LEFT JOIN mes.tiempos_estandar_lavado tel ON tel.tipo_lavado_mq_id = rlm.tipo_lavado_mq_id
+                                            AND tel.flg_activo        = true
+    WHERE p.actividad_tipo = 'LAVADO_MAQUINA'
+      AND lm.estado IN ('PENDIENTE', 'EN_PROCESO')
+),
+union_total AS (
+    SELECT * FROM pasos
+    UNION ALL
+    SELECT * FROM lavados
+),
+con_offsets AS (
+    SELECT *,
+        cumsum - COALESCE(duracion, interval '0') + break   AS offset_inicio,
+        cumsum + break                                       AS offset_fin
+    FROM (
+        SELECT *,
+            SUM(COALESCE(duracion, interval '0')) OVER (
+                PARTITION BY maquina_id, fecha ORDER BY secuencia
+            ) AS cumsum,
+            -- 20-min break after each preceding item (none before the first)
+            (ROW_NUMBER() OVER (
+                PARTITION BY maquina_id, fecha ORDER BY secuencia
+            ) - 1) * interval '20 minutes' AS break
+        FROM union_total
+    ) s
+)
+SELECT *,
+    CASE
+        WHEN tipo_registro = 'LAVADO'               THEN NULL
+        WHEN offset_inicio >= interval '12 hours'   THEN 0
+        WHEN offset_fin    <= interval '12 hours'   THEN kilos
+        ELSE ROUND((
+            EXTRACT(EPOCH FROM (interval '12 hours' - offset_inicio))
+            / NULLIF(EXTRACT(EPOCH FROM duracion), 0)
+            * kilos
+        )::numeric, 2)
+    END AS produccion_dia,
+    CASE
+        WHEN tipo_registro = 'LAVADO'               THEN NULL
+        WHEN offset_inicio >= interval '24 hours'   THEN 0
+        WHEN offset_fin    <= interval '24 hours'   THEN kilos
+        ELSE ROUND((
+            EXTRACT(EPOCH FROM (interval '24 hours' - offset_inicio))
+            / NULLIF(EXTRACT(EPOCH FROM duracion), 0)
+            * kilos
+        )::numeric, 2)
+    END AS produccion_total
+FROM con_offsets
+ORDER BY fecha, maquina_id, secuencia;
+
+GRANT SELECT ON mes.vw_proyeccion_tenido TO authenticated;
+
+-- ── mes.get_proyeccion_tenido ─────────────────────────────────
+-- Returns the schedule projection for a given date with absolute
+-- hora_inicio / hora_fin intervals from midnight, ready for display.
+--
+-- p_horas: per-machine shift start times as JSON object keyed by
+--   maquina_id (text). Machines absent from the object default to 07:00.
+--   Example: '{"1": "07:00", "2": "07:30", "5": "07:15"}'
+--
+-- hora_inicio / hora_fin are intervals from midnight so the frontend
+-- can display them directly as wall-clock times without any math.
+-- They may exceed 24h for items running into the next day.
+--
+-- produccion_dia / produccion_total come unchanged from the view.
+CREATE OR REPLACE FUNCTION mes.get_proyeccion_tenido(
+    p_fecha date,
+    p_horas jsonb DEFAULT '{}'
+)
+RETURNS TABLE(
+    fecha            date,
+    maquina_id       int,
+    secuencia        smallint,
+    tipo_registro    text,
+    actividad_id     bigint,
+    color            text,
+    tenido           text,
+    valor            text,
+    flg_antipilling  boolean,
+    kilos            numeric,
+    duracion         interval,
+    fyh_inicio       timestamptz,
+    hora_inicio      interval,
+    hora_fin         interval,
+    produccion_dia   numeric,
+    produccion_total numeric
+)
+LANGUAGE sql STABLE AS
+$$
+    SELECT
+        v.fecha,
+        v.maquina_id,
+        v.secuencia,
+        v.tipo_registro,
+        v.actividad_id,
+        v.color,
+        v.tenido,
+        v.valor,
+        v.flg_antipilling,
+        v.kilos,
+        v.duracion,
+        v.fyh_inicio,
+        -- Shift start for this machine (default 07:00 if not supplied)
+        make_interval(
+            hours => EXTRACT(hour   FROM COALESCE(
+                (p_horas->>(v.maquina_id::text))::time, '07:00'::time
+            ))::int,
+            mins  => EXTRACT(minute FROM COALESCE(
+                (p_horas->>(v.maquina_id::text))::time, '07:00'::time
+            ))::int
+        ) + v.offset_inicio                                 AS hora_inicio,
+        make_interval(
+            hours => EXTRACT(hour   FROM COALESCE(
+                (p_horas->>(v.maquina_id::text))::time, '07:00'::time
+            ))::int,
+            mins  => EXTRACT(minute FROM COALESCE(
+                (p_horas->>(v.maquina_id::text))::time, '07:00'::time
+            ))::int
+        ) + v.offset_fin                                    AS hora_fin,
+        v.produccion_dia,
+        v.produccion_total
+    FROM mes.vw_proyeccion_tenido v
+    WHERE v.fecha = p_fecha
+    ORDER BY v.maquina_id, v.secuencia;
+$$;
+
+-- get_proyeccion_tenido is an internal helper; frontend calls mes.get_proyeccion.
+
+-- ── mes.get_proyeccion ────────────────────────────────────────
+-- Single entry point for the projection dashboard.
+-- Returns { detail: [...], resumen: [...] } in one RPC call.
+-- The MATERIALIZED CTE ensures get_proyeccion_tenido executes once;
+-- both the detail array and the resumen aggregation read from the
+-- same in-memory result set (PG12+ materializes CTEs referenced >1 time
+-- automatically — the keyword makes that intent explicit).
+CREATE OR REPLACE FUNCTION mes.get_proyeccion(
+    p_fecha date,
+    p_horas jsonb DEFAULT '{}'
+)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path TO 'public', 'mes'
+AS $$
+    WITH base AS MATERIALIZED (
+        SELECT * FROM mes.get_proyeccion_tenido(p_fecha, p_horas)
+    ),
+    resumen AS (
+        SELECT
+            m.id                                                AS maquina_id,
+            m.codigo                                            AS maquina_codigo,
+            m.nombre,
+            COALESCE(ROUND(SUM(b.produccion_dia),   2), 0)     AS produccion_dia,
+            COALESCE(ROUND(SUM(b.produccion_total), 2), 0)     AS produccion_total
+        FROM base b
+        JOIN mes.maquina m ON m.id = b.maquina_id
+        GROUP BY ROLLUP((m.id, m.codigo, m.nombre))
+        ORDER BY m.id NULLS LAST
+    )
+    SELECT jsonb_build_object(
+        'detail',  COALESCE((SELECT jsonb_agg(row_to_json(b)) FROM base    b), '[]'),
+        'resumen', COALESCE((SELECT jsonb_agg(row_to_json(r)) FROM resumen r), '[]')
+    );
+$$;
+
+GRANT EXECUTE ON FUNCTION mes.get_proyeccion(date, jsonb) TO authenticated;
+
+-- ── mes.set_tiempo_estandar_tenido ────────────────────────────
+-- Upserts a dyeing standard time by deactivating the current active
+-- entry (preserving history) and inserting a new one.
+CREATE OR REPLACE FUNCTION mes.set_tiempo_estandar_tenido(
+    p_valor_id        smallint,
+    p_tenido_id       int,
+    p_flg_antipilling boolean,
+    p_duracion        interval
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'notification', 'public', 'mes'
+AS $$
+DECLARE
+    v_usr_id  int := get_user_id();
+    v_old_id  smallint;
+    v_new_id  smallint;
+BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    UPDATE mes.tiempos_estandar_tenido
+    SET    flg_activo = false,
+           usr_mod    = v_usr_id,
+           fyh_mod    = NOW()
+    WHERE  valor_id        = p_valor_id
+      AND  tenido_id       = p_tenido_id
+      AND  flg_antipilling = p_flg_antipilling
+      AND  flg_activo      = true
+    RETURNING id INTO v_old_id;
+
+    INSERT INTO mes.tiempos_estandar_tenido
+        (valor_id, tenido_id, flg_antipilling, duracion, flg_activo, usr_cre)
+    VALUES
+        (p_valor_id, p_tenido_id, p_flg_antipilling, p_duracion, true, v_usr_id)
+    RETURNING id INTO v_new_id;
+
+    RETURN jsonb_build_object(
+        'id',          v_new_id,
+        'anterior_id', v_old_id,
+        'duracion',    p_duracion::text
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION mes.set_tiempo_estandar_tenido(smallint, int, boolean, interval) TO authenticated;
+
+-- ── mes.set_tiempo_estandar_lavado ────────────────────────────
+-- Upserts a wash cycle standard time by deactivating the current
+-- active entry (preserving history) and inserting a new one.
+CREATE OR REPLACE FUNCTION mes.set_tiempo_estandar_lavado(
+    p_tipo_lavado_mq_id smallint,
+    p_duracion          interval
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'notification', 'public', 'mes'
+AS $$
+DECLARE
+    v_usr_id  int := get_user_id();
+    v_old_id  smallint;
+    v_new_id  smallint;
+BEGIN
+    IF NOT jwt_has_permission('configuracion.admin') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    UPDATE mes.tiempos_estandar_lavado
+    SET    flg_activo = false,
+           usr_mod    = v_usr_id,
+           fyh_mod    = NOW()
+    WHERE  tipo_lavado_mq_id = p_tipo_lavado_mq_id
+      AND  flg_activo        = true
+    RETURNING id INTO v_old_id;
+
+    INSERT INTO mes.tiempos_estandar_lavado
+        (tipo_lavado_mq_id, duracion, flg_activo, usr_cre)
+    VALUES
+        (p_tipo_lavado_mq_id, p_duracion, true, v_usr_id)
+    RETURNING id INTO v_new_id;
+
+    RETURN jsonb_build_object(
+        'id',          v_new_id,
+        'anterior_id', v_old_id,
+        'duracion',    p_duracion::text
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION mes.set_tiempo_estandar_lavado(smallint, interval) TO authenticated;
+
+-- ═══════════════════════════════════════════════════════════════
+-- 35. VIEWS: tiempos estándar con etiquetas
+-- ═══════════════════════════════════════════════════════════════
+
+-- ── mes.vw_tiempos_estandar_tenido ────────────────────────────
+-- Active and historical standard dyeing times with human-readable labels.
+-- flg_activo = true → currently in use; false → historical (superseded).
+CREATE OR REPLACE VIEW mes.vw_tiempos_estandar_tenido AS
+SELECT
+    te.id,
+    te.valor_id,
+    val.valor           AS valor,
+    te.tenido_id,
+    t.tenido            AS tenido,
+    te.flg_antipilling,
+    te.duracion,
+    te.flg_activo,
+    te.fyh_cre,
+    te.fyh_mod
+FROM mes.tiempos_estandar_tenido te
+JOIN valor  val ON val.id = te.valor_id
+JOIN tenido t   ON t.id  = te.tenido_id
+ORDER BY val.valor, t.tenido, te.flg_antipilling, te.flg_activo DESC, te.id DESC;
+
+GRANT SELECT ON mes.vw_tiempos_estandar_tenido TO authenticated;
+
+-- ── mes.vw_tiempos_estandar_lavado ────────────────────────────
+-- Active and historical standard wash-cycle times with human-readable labels.
+CREATE OR REPLACE VIEW mes.vw_tiempos_estandar_lavado AS
+SELECT
+    te.id,
+    te.tipo_lavado_mq_id,
+    tlm.nombre          AS tipo_lavado_maquina,
+    te.duracion,
+    te.flg_activo,
+    te.fyh_cre,
+    te.fyh_mod
+FROM mes.tiempos_estandar_lavado te
+JOIN tipo_lavado_maquina tlm ON tlm.id = te.tipo_lavado_mq_id
+ORDER BY tlm.nombre, te.flg_activo DESC, te.id DESC;
+
+GRANT SELECT ON mes.vw_tiempos_estandar_lavado TO authenticated;
+GRANT SELECT ON mes.maquina TO authenticated;
+GRANT USAGE on SCHEMA mes TO authenticated;

@@ -29,6 +29,11 @@ AS $$
 DECLARE
     v_cuadre_id BIGINT;
 BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     INSERT INTO inventario.cuadre (usr_cre)
     VALUES (get_user_id())
     RETURNING id INTO v_cuadre_id;
@@ -137,6 +142,11 @@ SECURITY DEFINER
 SET search_path TO 'public','inventario','mes'
 AS $$
 BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     UPDATE inventario.cuadre_detalle d
     SET cantidad_contada = u.cantidad_contada,
         fyh_mod          = now(),
@@ -175,6 +185,11 @@ DECLARE
     v_fifo_result       JSONB;
     v_rec               RECORD;
 BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- Guard: all items must have been counted
     SELECT jsonb_agg(jsonb_build_object('id', id, 'item_id', item_id))
     INTO v_faltantes
