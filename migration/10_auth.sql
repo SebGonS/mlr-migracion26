@@ -275,3 +275,31 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- │  gestión de usuarios/roles                   │ configuracion.admin        │
 -- │  crear maquina, operacion, ruta_plantilla    │ configuracion.admin        │
 -- └─────────────────────────────────────────────┴────────────────────────────┘
+
+-- =============================================================================
+-- SECTION N: Auth user creation hook
+-- Fires on INSERT into auth.users (new signup / admin-created user).
+-- Maps auth.users → public.usuario using current column names.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.fn_trg_bi_usuario_from_auth()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+BEGIN
+  INSERT INTO public.usuario (auth_id, nombre, apellido)
+  VALUES (
+    NEW.id,
+    NEW.raw_user_meta_data ->> 'first_name',
+    NEW.raw_user_meta_data ->> 'last_name'
+  );
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+DROP TRIGGER IF EXISTS trg_bi_auth_users_usuario ON auth.users;
+CREATE TRIGGER trg_bi_auth_users_usuario
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.fn_trg_bi_usuario_from_auth();
