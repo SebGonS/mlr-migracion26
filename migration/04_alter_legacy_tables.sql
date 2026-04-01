@@ -219,3 +219,7 @@ DO $$ BEGIN
         ALTER TABLE public.usuario RENAME COLUMN last_name TO apellido;
     END IF;
 END $$;
+
+
+GRANT USAGE ON SCHEMA iam TO service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA iam TO service_role;

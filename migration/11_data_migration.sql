@@ -905,7 +905,7 @@ SELECT
     p.malla,
     p.rendimiento,
     p.ancho,
-    p.estado_comercial,
+    COALESCE(p.estado_comercial, 'CREADA'::partida_estado_enum),
     p.fecha_entrega,
     p.fecha_registro::TIMESTAMP + INTERVAL '5 hours',
     p.fecha_registro::TIMESTAMP + INTERVAL '5 hours',
