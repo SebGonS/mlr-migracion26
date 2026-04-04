@@ -69,7 +69,7 @@ SELECT
     (l.detalles->>'ancho')::numeric AS ancho,
     l.cantidad AS peso,
     ird.articulo_id,
-    art.nombre AS articulo,  -- FIX: was art.articulo (old column name)
+    art.nombre AS articulo_nombre,
     ird.flg_tenido,
     ird.flg_rib,
     art.fibra,
@@ -288,24 +288,30 @@ WHERE grt.flg_emitida = false AND t.flg_proveedor = true;
 
 GRANT SELECT ON inventario.vw_item_proveedor_guia TO anon, authenticated;
 
+
 -- ── inventario.vw_lotes_rollos_despachados ────────────────────
 CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_despachados AS
+WITH mov AS (
+    SELECT
+        im.lote_id,
+        SUM(im.cantidad * imt.factor)                                   AS saldo,
+        BOOL_OR(imt.factor = -1 AND imt.categoria != 'PRODUCCION')     AS has_egreso
+    FROM inventario.item_movimientos im
+    JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+    GROUP BY im.lote_id
+)
 SELECT
     l.id AS lote_id,
     EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0') AS lote_codigo,
     l.item_id,
     i.codigo AS item_codigo,
     i.nombre AS item_nombre,
-    sa.ubicacion_id,
-    u.nombre AS ubicacion,
-    a.nombre AS almacen,
-    sa.cantidad_disponible,
     un.codigo AS unidad,
     l.estado_calidad::text,
     (l.detalles->>'ancho')::numeric AS ancho,
     l.cantidad AS peso,
     ird.articulo_id,
-    art.nombre AS articulo,  -- FIX: art.articulo → art.nombre
+    art.nombre AS articulo_nombre,
     ird.flg_tenido,
     ird.flg_rib,
     art.fibra,
@@ -318,24 +324,15 @@ SELECT
     c.id AS propietario_id,
     c.nombre AS propietario
 FROM inventario.lote l
-LEFT JOIN inventario.vw_stock_actual sa ON l.id = sa.lote_id
+JOIN mov m ON m.lote_id = l.id AND m.saldo <= 0 AND m.has_egreso
 JOIN item i ON i.id = l.item_id
-JOIN item_tipo it ON it.id = i.item_tipo_id
+JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
 JOIN item_rollo_detalle ird ON ird.item_id = i.id
 JOIN articulo art ON art.id = ird.articulo_id
 JOIN unidad un ON un.id = i.unidad_id
-LEFT JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
-LEFT JOIN inventario.almacen a ON a.id = u.almacen_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
-LEFT JOIN tercero c ON c.id = l.propietario_id
-WHERE it.codigo = 'ROLLO' AND sa.cantidad_disponible IS NULL
-AND EXISTS (
-    SELECT 1 FROM inventario.item_movimientos im
-    JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-    WHERE im.lote_id = l.id
-      AND imt.codigo IN ('SERV_EGR')
-)
-ORDER BY a.nombre, u.nombre, i.nombre;
+LEFT JOIN tercero c ON c.id = l.propietario_id;
+
 
 -- ── doc.partida_resumen_tenido ────────────────────────────────
 CREATE OR REPLACE VIEW doc.vw_partida_resumen_tenido AS
@@ -436,7 +433,7 @@ SELECT
     r.unidad_codigo,
     r.estado_calidad,
     ird.articulo_id,
-    art.nombre AS articulo,  -- FIX: art.articulo → art.nombre
+    art.nombre AS articulo_nombre,
     ird.flg_tenido,
     ird.flg_rib,
     art.fibra,

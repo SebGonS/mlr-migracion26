@@ -291,3 +291,9 @@ REVOKE UPDATE (usr_cre, fyh_cre)                                      ON doc.fac
 
 -----FACTURA DETALLE
 REVOKE INSERT (usr_cre, fyh_cre) ON doc.factura_detalle FROM anon, authenticated;
+
+-- ── Performance indexes ───────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_opp_orden_id ON mes.orden_produccion_paso(orden_produccion_id);
+CREATE INDEX IF NOT EXISTS idx_opi_orden_id ON mes.orden_produccion_item(orden_produccion_id);
+CREATE INDEX IF NOT EXISTS idx_lote_doc     ON inventario.lote(documento_tipo, documento_id);
+CREATE INDEX IF NOT EXISTS idx_im_lote_id   ON inventario.item_movimientos(lote_id);
