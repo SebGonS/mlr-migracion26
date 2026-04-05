@@ -322,7 +322,9 @@ SELECT
     vc.color_hex,
     vc.color_x_cliente_hex,
     c.id AS propietario_id,
-    c.nombre AS propietario
+    c.nombre AS propietario,
+    op.partida_id,
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo
 FROM inventario.lote l
 JOIN mov m ON m.lote_id = l.id AND m.saldo <= 0 AND m.has_egreso
 JOIN item i ON i.id = l.item_id
@@ -331,7 +333,10 @@ JOIN item_rollo_detalle ird ON ird.item_id = i.id
 JOIN articulo art ON art.id = ird.articulo_id
 JOIN unidad un ON un.id = i.unidad_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
-LEFT JOIN tercero c ON c.id = l.propietario_id;
+LEFT JOIN tercero c ON c.id = l.propietario_id
+LEFT JOIN mes.orden_produccion_paso opp ON opp.id = l.documento_id AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+LEFT JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+LEFT JOIN doc.partida p ON p.id = op.partida_id;
 
 
 -- ── doc.partida_resumen_tenido ────────────────────────────────
