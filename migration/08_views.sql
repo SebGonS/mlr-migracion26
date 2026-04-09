@@ -496,6 +496,55 @@ LEFT JOIN item_insumo_detalle iid ON iid.item_id = i.item_id
 LEFT JOIN insumo_tipo it ON it.id = iid.insumo_tipo_id
 LEFT JOIN colorante_tipo ct ON ct.id = iid.colorante_tipo_id;
 
+-- ── inventario.vw_precio_promedio_insumos ────────────────────
+-- Weighted average cost per insumo item.
+-- Primary source: factura_proveedor_detalle (what was actually invoiced).
+-- Fallback: compra_detalle (estimated purchase price, used when no
+-- invoice detail lines exist yet for that item).
+-- Used for recipe cost reference and margin display — not balance sheet
+-- inventory valuation.
+CREATE OR REPLACE VIEW inventario.vw_precio_promedio_insumos AS
+WITH fpd AS (
+    -- Authoritative: invoiced prices
+    SELECT
+        fpd.item_id,
+        SUM(fpd.cantidad * fpd.precio_unitario) AS valor_total,
+        SUM(fpd.cantidad)                        AS cantidad_total
+    FROM doc.factura_proveedor_detalle fpd
+    GROUP BY fpd.item_id
+),
+cd AS (
+    -- Fallback: purchase order prices
+    SELECT
+        cd.item_id,
+        SUM(cd.cantidad * cd.precio_unitario) AS valor_total,
+        SUM(cd.cantidad)                       AS cantidad_total
+    FROM doc.compra_detalle cd
+    -- Only use compra rows for items with no invoice detail yet
+    WHERE NOT EXISTS (
+        SELECT 1 FROM doc.factura_proveedor_detalle fpd
+        WHERE fpd.item_id = cd.item_id
+    )
+    GROUP BY cd.item_id
+),
+combinado AS (
+    SELECT item_id, valor_total, cantidad_total FROM fpd
+    UNION ALL
+    SELECT item_id, valor_total, cantidad_total FROM cd
+)
+SELECT
+    c.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+    vi.unidad_codigo,
+    ROUND(SUM(c.valor_total) / NULLIF(SUM(c.cantidad_total), 0), 4) AS precio_promedio_usd,
+    SUM(c.cantidad_total)                                            AS cantidad_comprada
+FROM combinado c
+JOIN vw_items vi ON vi.item_id = c.item_id
+GROUP BY c.item_id, vi.item_codigo, vi.item_nombre, vi.unidad_codigo;
+
+GRANT SELECT ON inventario.vw_precio_promedio_insumos TO authenticated;
+
 -- ── inventario.vw_lotes_disponibles ──────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_lotes_disponibles AS
 SELECT

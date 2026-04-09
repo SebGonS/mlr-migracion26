@@ -141,6 +141,22 @@ BEGIN
     )
     RETURNING id INTO v_factura_id;
 
+    -- Insert detail lines if provided
+    -- p_datos->'lineas': [{item_id, cantidad, precio_unitario, igv_porcentaje?}]
+    IF p_datos ? 'lineas' AND jsonb_array_length(p_datos->'lineas') > 0 THEN
+        INSERT INTO doc.factura_proveedor_detalle (
+            factura_proveedor_id, item_id, cantidad, precio_unitario, igv_porcentaje, usr_cre
+        )
+        SELECT
+            v_factura_id,
+            (l->>'item_id')::INT,
+            (l->>'cantidad')::NUMERIC,
+            (l->>'precio_unitario')::NUMERIC,
+            COALESCE((l->>'igv_porcentaje')::NUMERIC, 18),
+            v_usr_id
+        FROM jsonb_array_elements(p_datos->'lineas') l;
+    END IF;
+
     -- Link to compra if provided
     IF v_compra_id IS NOT NULL THEN
         UPDATE doc.compra
