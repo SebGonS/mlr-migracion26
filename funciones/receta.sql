@@ -848,11 +848,9 @@ SECURITY DEFINER
 SET search_path TO 'iam', 'public', 'receta'
 AS $$
 DECLARE
-    v_a              JSONB;
-    v_b              JSONB;
-    v_header_cambios JSONB := '[]'::JSONB;
-    v_campo          TEXT;
-    v_result         JSONB;
+    v_a      JSONB;
+    v_b      JSONB;
+    v_result JSONB;
 BEGIN
     v_a := receta.get_tenido(p_id_a);
     v_b := receta.get_tenido(p_id_b);
@@ -863,34 +861,6 @@ BEGIN
     IF v_b IS NULL THEN
         RAISE EXCEPTION 'Receta ID % no encontrada.', p_id_b;
     END IF;
-
-    -- Header diff: compare each named field, include display names for FK fields
-    FOREACH v_campo IN ARRAY ARRAY[
-        'color_x_cliente_id', 'articulo_tipo_id', 'fibra',
-        'tenido_id', 'flg_antipilling', 'tipo_receta_id'
-    ] LOOP
-        IF (v_a->v_campo) IS DISTINCT FROM (v_b->v_campo) THEN
-            v_header_cambios := v_header_cambios || jsonb_build_array(
-                jsonb_build_object(
-                    'campo',   v_campo,
-                    'a',       v_a->v_campo,
-                    'b',       v_b->v_campo,
-                    'nombre_a', CASE v_campo
-                                    WHEN 'color_x_cliente_id' THEN v_a->>'color_nombre'
-                                    WHEN 'articulo_tipo_id'   THEN v_a->>'articulo_nombre'
-                                    WHEN 'tenido_id'          THEN v_a->>'tenido_nombre'
-                                    WHEN 'tipo_receta_id'     THEN v_a->>'tipo_receta_nombre'
-                                END,
-                    'nombre_b', CASE v_campo
-                                    WHEN 'color_x_cliente_id' THEN v_b->>'color_nombre'
-                                    WHEN 'articulo_tipo_id'   THEN v_b->>'articulo_nombre'
-                                    WHEN 'tenido_id'          THEN v_b->>'tenido_nombre'
-                                    WHEN 'tipo_receta_id'     THEN v_b->>'tipo_receta_nombre'
-                                END
-                )
-            );
-        END IF;
-    END LOOP;
 
     -- Pasos + insumos diff via a single CTE chain
     SELECT sub.result INTO v_result FROM (
@@ -1025,7 +995,24 @@ BEGIN
                 AND (v_a->>'tenido_id')        IS NOT DISTINCT FROM (v_b->>'tenido_id')
                 AND (v_a->>'flg_antipilling')  IS NOT DISTINCT FROM (v_b->>'flg_antipilling')
             ),
-            'header_cambios', v_header_cambios,
+            'header_cambios', COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                    'campo',    f.campo,
+                    'a',        f.val_a,
+                    'b',        f.val_b,
+                    'nombre_a', f.nombre_a,
+                    'nombre_b', f.nombre_b
+                ))
+                FROM (VALUES
+                    ('color_x_cliente_id', v_a->'color_x_cliente_id', v_b->'color_x_cliente_id', v_a->>'color_nombre',        v_b->>'color_nombre'),
+                    ('articulo_tipo_id',   v_a->'articulo_tipo_id',   v_b->'articulo_tipo_id',   v_a->>'articulo_nombre',     v_b->>'articulo_nombre'),
+                    ('fibra',              v_a->'fibra',               v_b->'fibra',               NULL::TEXT,                  NULL::TEXT),
+                    ('tenido_id',          v_a->'tenido_id',           v_b->'tenido_id',           v_a->>'tenido_nombre',       v_b->>'tenido_nombre'),
+                    ('flg_antipilling',    v_a->'flg_antipilling',     v_b->'flg_antipilling',     NULL::TEXT,                  NULL::TEXT),
+                    ('tipo_receta_id',     v_a->'tipo_receta_id',      v_b->'tipo_receta_id',      v_a->>'tipo_receta_nombre',  v_b->>'tipo_receta_nombre')
+                ) AS f(campo, val_a, val_b, nombre_a, nombre_b)
+                WHERE f.val_a IS DISTINCT FROM f.val_b
+            ), '[]'::jsonb),
             'pasos_diff', COALESCE((
                 SELECT jsonb_agg(
                     jsonb_build_object(
