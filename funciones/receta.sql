@@ -788,6 +788,286 @@ END;$$;
 
 
 -- ───────────────────────────────────────
+-- get_tenido_versiones
+-- Returns all recipes that share the same spec
+-- (color_x_cliente_id, articulo_tipo_id, fibra, tenido_id, flg_antipilling)
+-- as the given recipe, ordered newest first.
+-- Used to browse the version history and to populate a version picker for diff.
+-- ───────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION receta.get_tenido_versiones(p_receta_id INT)
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'receta'
+AS $$
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'id',             v.id,
+            'estado_codigo',  v.estado_codigo,
+            'estado_nombre',  v.estado_nombre,
+            'flg_produccion', v.flg_produccion,
+            'fyh_cre',        v.fyh_cre,
+            'fyh_produccion', v.fyh_produccion,
+            'fyh_mod',        v.fyh_mod
+        ) ORDER BY v.fyh_cre DESC
+    ), '[]'::jsonb)
+    FROM receta.vw_tenido v
+    WHERE (v.color_x_cliente_id, v.articulo_tipo_id, v.fibra, v.tenido_id, v.flg_antipilling) = (
+        SELECT t.color_x_cliente_id, t.articulo_tipo_id, t.fibra, t.tenido_id, t.flg_antipilling
+        FROM receta.tenido t
+        WHERE t.id = p_receta_id
+    );
+$$;
+
+
+-- ───────────────────────────────────────
+-- diff_tenido
+-- Compares two dyeing recipes field-by-field.
+-- Works for any two recipe IDs — same spec (version history) or different.
+--
+-- Returns JSONB with:
+--   receta_a / receta_b  — summary for each side (id, estado, fyh_cre, fyh_produccion)
+--   spec_igual           — true when both share the same 5-field version key
+--   header_cambios       — [{campo, a, b, nombre_a?, nombre_b?}] for changed header fields
+--   pasos_diff           — per-step comparison ordered by orden:
+--     { orden,
+--       tipo: "igual" | "modificado" | "agregado" | "eliminado",
+--       a: {operacion_id, operacion_codigo, operacion_nombre, ph, temperatura, tiempo_min, nota} | null,
+--       b: same | null,
+--       campos_modificados: ["ph", "temperatura", ...],   -- only on tipo=modificado
+--       insumos_diff: [{tipo, item_id, item_codigo, item_nombre, cantidad_a, cantidad_b}] }
+-- ───────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION receta.diff_tenido(p_id_a INT, p_id_b INT)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'receta'
+AS $$
+DECLARE
+    v_a              JSONB;
+    v_b              JSONB;
+    v_header_cambios JSONB := '[]'::JSONB;
+    v_campo          TEXT;
+    v_result         JSONB;
+BEGIN
+    v_a := receta.get_tenido(p_id_a);
+    v_b := receta.get_tenido(p_id_b);
+
+    IF v_a IS NULL THEN
+        RAISE EXCEPTION 'Receta ID % no encontrada.', p_id_a;
+    END IF;
+    IF v_b IS NULL THEN
+        RAISE EXCEPTION 'Receta ID % no encontrada.', p_id_b;
+    END IF;
+
+    -- Header diff: compare each named field, include display names for FK fields
+    FOREACH v_campo IN ARRAY ARRAY[
+        'color_x_cliente_id', 'articulo_tipo_id', 'fibra',
+        'tenido_id', 'flg_antipilling', 'tipo_receta_id'
+    ] LOOP
+        IF (v_a->v_campo) IS DISTINCT FROM (v_b->v_campo) THEN
+            v_header_cambios := v_header_cambios || jsonb_build_array(
+                jsonb_build_object(
+                    'campo',   v_campo,
+                    'a',       v_a->v_campo,
+                    'b',       v_b->v_campo,
+                    'nombre_a', CASE v_campo
+                                    WHEN 'color_x_cliente_id' THEN v_a->>'color_nombre'
+                                    WHEN 'articulo_tipo_id'   THEN v_a->>'articulo_nombre'
+                                    WHEN 'tenido_id'          THEN v_a->>'tenido_nombre'
+                                    WHEN 'tipo_receta_id'     THEN v_a->>'tipo_receta_nombre'
+                                END,
+                    'nombre_b', CASE v_campo
+                                    WHEN 'color_x_cliente_id' THEN v_b->>'color_nombre'
+                                    WHEN 'articulo_tipo_id'   THEN v_b->>'articulo_nombre'
+                                    WHEN 'tenido_id'          THEN v_b->>'tenido_nombre'
+                                    WHEN 'tipo_receta_id'     THEN v_b->>'tipo_receta_nombre'
+                                END
+                )
+            );
+        END IF;
+    END LOOP;
+
+    -- Pasos + insumos diff via a single CTE chain
+    SELECT sub.result INTO v_result FROM (
+        WITH
+        paso_a AS (
+            SELECT (e->>'orden')::INT AS orden, e AS elem
+            FROM jsonb_array_elements(v_a->'pasos') e
+        ),
+        paso_b AS (
+            SELECT (e->>'orden')::INT AS orden, e AS elem
+            FROM jsonb_array_elements(v_b->'pasos') e
+        ),
+        -- Full outer join pasos by step position (orden)
+        pasos_joined AS (
+            SELECT
+                COALESCE(a.orden, b.orden) AS orden,
+                a.elem AS pa,
+                b.elem AS pb
+            FROM paso_a a FULL OUTER JOIN paso_b b USING (orden)
+        ),
+        -- Flatten insumos from each side, carrying paso_orden
+        ins_a AS (
+            SELECT pj.orden AS paso_orden,
+                   ins      AS elem,
+                   ins->>'item_id' AS item_id
+            FROM pasos_joined pj
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(pj.pa->'insumos', '[]'::jsonb)) ins
+        ),
+        ins_b AS (
+            SELECT pj.orden AS paso_orden,
+                   ins      AS elem,
+                   ins->>'item_id' AS item_id
+            FROM pasos_joined pj
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(pj.pb->'insumos', '[]'::jsonb)) ins
+        ),
+        -- Full outer join insumos by (paso_orden, item_id)
+        ins_joined AS (
+            SELECT
+                COALESCE(a.paso_orden, b.paso_orden)   AS paso_orden,
+                (COALESCE(a.item_id, b.item_id))::INT  AS item_id_sort,
+                a.elem AS ia,
+                b.elem AS ib
+            FROM ins_a a
+            FULL OUTER JOIN ins_b b
+                ON a.paso_orden = b.paso_orden AND a.item_id = b.item_id
+        ),
+        -- Build one diff entry per insumo
+        ins_diff AS (
+            SELECT
+                paso_orden,
+                item_id_sort,
+                jsonb_build_object(
+                    'tipo',        CASE
+                                       WHEN ia IS NULL THEN 'agregado'
+                                       WHEN ib IS NULL THEN 'eliminado'
+                                       WHEN (ia->>'cantidad') IS NOT DISTINCT FROM (ib->>'cantidad') THEN 'igual'
+                                       ELSE 'modificado'
+                                   END,
+                    'item_id',     item_id_sort,
+                    'item_codigo', COALESCE(ia->>'item_codigo', ib->>'item_codigo'),
+                    'item_nombre', COALESCE(ia->>'item_nombre', ib->>'item_nombre'),
+                    'cantidad_a',  ia->'cantidad',
+                    'cantidad_b',  ib->'cantidad'
+                ) AS entry
+            FROM ins_joined
+        ),
+        -- Aggregate insumos diff per paso
+        ins_by_paso AS (
+            SELECT paso_orden,
+                   jsonb_agg(entry ORDER BY item_id_sort) AS insumos_diff
+            FROM ins_diff
+            GROUP BY paso_orden
+        ),
+        -- For matched pasos, find which content fields changed
+        paso_campo_changes AS (
+            SELECT
+                pj.orden,
+                ARRAY_REMOVE(ARRAY[
+                    CASE WHEN (pj.pa->>'operacion_id') IS DISTINCT FROM (pj.pb->>'operacion_id') THEN 'operacion_id' END,
+                    CASE WHEN (pj.pa->>'ph')           IS DISTINCT FROM (pj.pb->>'ph')           THEN 'ph'          END,
+                    CASE WHEN (pj.pa->>'temperatura')  IS DISTINCT FROM (pj.pb->>'temperatura')  THEN 'temperatura'  END,
+                    CASE WHEN (pj.pa->>'tiempo_min')   IS DISTINCT FROM (pj.pb->>'tiempo_min')   THEN 'tiempo_min'   END,
+                    CASE WHEN (pj.pa->>'nota')         IS DISTINCT FROM (pj.pb->>'nota')         THEN 'nota'         END
+                ]::TEXT[], NULL) AS campos_modificados
+            FROM pasos_joined pj
+            WHERE pj.pa IS NOT NULL AND pj.pb IS NOT NULL
+        ),
+        -- Combine into one entry per paso with final tipo classification
+        paso_diff_entry AS (
+            SELECT
+                pj.orden,
+                CASE
+                    WHEN pj.pa IS NULL THEN 'agregado'
+                    WHEN pj.pb IS NULL THEN 'eliminado'
+                    WHEN COALESCE(array_length(pcc.campos_modificados, 1), 0) = 0
+                     AND NOT EXISTS (
+                             SELECT 1 FROM ins_diff id2
+                             WHERE id2.paso_orden = pj.orden
+                               AND id2.entry->>'tipo' != 'igual'
+                         ) THEN 'igual'
+                    ELSE 'modificado'
+                END AS tipo,
+                pj.pa,
+                pj.pb,
+                COALESCE(pcc.campos_modificados, '{}'::TEXT[]) AS campos_modificados,
+                COALESCE(ibp.insumos_diff, '[]'::jsonb)        AS insumos_diff
+            FROM pasos_joined pj
+            LEFT JOIN paso_campo_changes pcc ON pcc.orden = pj.orden
+            LEFT JOIN ins_by_paso        ibp ON ibp.paso_orden = pj.orden
+        )
+        SELECT jsonb_build_object(
+            'receta_a', jsonb_build_object(
+                'id',             v_a->'id',
+                'estado_codigo',  v_a->>'estado_codigo',
+                'estado_nombre',  v_a->>'estado_nombre',
+                'flg_produccion', v_a->'flg_produccion',
+                'fyh_cre',        v_a->'fyh_cre',
+                'fyh_produccion', v_a->'fyh_produccion'
+            ),
+            'receta_b', jsonb_build_object(
+                'id',             v_b->'id',
+                'estado_codigo',  v_b->>'estado_codigo',
+                'estado_nombre',  v_b->>'estado_nombre',
+                'flg_produccion', v_b->'flg_produccion',
+                'fyh_cre',        v_b->'fyh_cre',
+                'fyh_produccion', v_b->'fyh_produccion'
+            ),
+            'spec_igual', (
+                (v_a->>'color_x_cliente_id') IS NOT DISTINCT FROM (v_b->>'color_x_cliente_id')
+                AND (v_a->>'articulo_tipo_id') IS NOT DISTINCT FROM (v_b->>'articulo_tipo_id')
+                AND (v_a->>'fibra')            IS NOT DISTINCT FROM (v_b->>'fibra')
+                AND (v_a->>'tenido_id')        IS NOT DISTINCT FROM (v_b->>'tenido_id')
+                AND (v_a->>'flg_antipilling')  IS NOT DISTINCT FROM (v_b->>'flg_antipilling')
+            ),
+            'header_cambios', v_header_cambios,
+            'pasos_diff', COALESCE((
+                SELECT jsonb_agg(
+                    jsonb_build_object(
+                        'orden', pde.orden,
+                        'tipo',  pde.tipo,
+                        'a', CASE WHEN pde.pa IS NOT NULL THEN
+                                jsonb_build_object(
+                                    'operacion_id',     pde.pa->'operacion_id',
+                                    'operacion_codigo', pde.pa->>'operacion_codigo',
+                                    'operacion_nombre', pde.pa->>'operacion_nombre',
+                                    'ph',               pde.pa->'ph',
+                                    'temperatura',      pde.pa->'temperatura',
+                                    'tiempo_min',       pde.pa->'tiempo_min',
+                                    'nota',             pde.pa->>'nota'
+                                )
+                             END,
+                        'b', CASE WHEN pde.pb IS NOT NULL THEN
+                                jsonb_build_object(
+                                    'operacion_id',     pde.pb->'operacion_id',
+                                    'operacion_codigo', pde.pb->>'operacion_codigo',
+                                    'operacion_nombre', pde.pb->>'operacion_nombre',
+                                    'ph',               pde.pb->'ph',
+                                    'temperatura',      pde.pb->'temperatura',
+                                    'tiempo_min',       pde.pb->'tiempo_min',
+                                    'nota',             pde.pb->>'nota'
+                                )
+                             END,
+                        'campos_modificados', to_jsonb(pde.campos_modificados),
+                        'insumos_diff',       pde.insumos_diff
+                    ) ORDER BY pde.orden
+                )
+                FROM paso_diff_entry pde
+            ), '[]'::jsonb)
+        ) AS result
+    ) sub;
+
+    RETURN v_result;
+END;
+$$;
+
+
+-- ───────────────────────────────────────
 -- vw_tenido
 -- All recipes, all states — enriched with display names.
 -- Frontend applies tab filters:
@@ -839,6 +1119,8 @@ GRANT EXECUTE ON FUNCTION receta.actualizar_lavado_maquina   TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.get_lavado_maquina          TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.resolver_tenido_id          TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.get_tenido_para_partida     TO authenticated;
+GRANT EXECUTE ON FUNCTION receta.get_tenido_versiones        TO authenticated;
+GRANT EXECUTE ON FUNCTION receta.diff_tenido                 TO authenticated;
 -- solicitar_si_ausente: internal only — called from doc.crear_partida (SECURITY DEFINER).
 -- No grant to authenticated; the owner context propagates through crear_partida.
 GRANT SELECT  ON receta.vw_tenido                            TO authenticated;
