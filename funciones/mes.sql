@@ -741,12 +741,14 @@ BEGIN
 
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
 
-    -- Insert one pesaje per lote (weighing gate), then movements for differences
+    -- Upsert one pesaje per lote — ON CONFLICT updates the weight if called again.
     WITH pesajes AS (
         INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, usr_cre)
         SELECT p_orden_id, opi.lote_id, v_peso_prorate, v_usr_id
         FROM mes.orden_produccion_item opi
         WHERE opi.orden_produccion_id = p_orden_id
+        ON CONFLICT (orden_produccion_id, lote_id) DO UPDATE
+            SET peso_real = EXCLUDED.peso_real
         RETURNING id, lote_id
     )
     INSERT INTO inventario.item_movimientos (
@@ -852,6 +854,8 @@ BEGIN
         INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, usr_cre)
         SELECT p_orden_id, ld.lote_id, ld.peso_nuevo, v_usr_id
         FROM lotes_data ld
+        ON CONFLICT (orden_produccion_id, lote_id) DO UPDATE
+            SET peso_real = EXCLUDED.peso_real
         RETURNING id, lote_id
     ),
     movimientos AS (

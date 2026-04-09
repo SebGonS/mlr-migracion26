@@ -297,3 +297,11 @@ CREATE INDEX IF NOT EXISTS idx_opp_orden_id ON mes.orden_produccion_paso(orden_p
 CREATE INDEX IF NOT EXISTS idx_opi_orden_id ON mes.orden_produccion_item(orden_produccion_id);
 CREATE INDEX IF NOT EXISTS idx_lote_doc     ON inventario.lote(documento_tipo, documento_id);
 CREATE INDEX IF NOT EXISTS idx_im_lote_id   ON inventario.item_movimientos(lote_id);
+
+-- ── inventario.pesaje integrity ───────────────────────────────────────────────
+-- Prevents duplicate weighing records for the same lot in the same production order.
+-- Both weighing functions insert without checking for existing rows, so this is
+-- the only guard against silent duplicates.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pesaje_orden_lote
+    ON inventario.pesaje(orden_produccion_id, lote_id)
+    WHERE orden_produccion_id IS NOT NULL;
