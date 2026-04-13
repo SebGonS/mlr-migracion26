@@ -53,9 +53,9 @@ JOIN mes.orden_produccion_paso opp  ON opp.orden_produccion_id = op.id
 JOIN inventario.lote l
     ON  l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
     AND l.documento_id   = opp.id
-JOIN item_rollo_detalle ird
-    ON  ird.item_id    = l.item_id
-    AND ird.flg_tenido = true           -- dyed rolls only
+JOIN inventario.lote_rollo_detalle lrd
+    ON  lrd.lote_id    = l.id
+    AND lrd.flg_tenido = true           -- dyed rolls only
 JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id  -- vw_stock_actual already excludes 0-balance lotes
 GROUP BY
     p.id, p.numero, p.estado, p.tercero_id, t.nombre,
@@ -150,9 +150,9 @@ BEGIN
             JOIN inventario.lote l
                 ON  l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
                 AND l.documento_id   = opp.id
-            JOIN item_rollo_detalle ird
-                ON  ird.item_id    = l.item_id
-                AND ird.flg_tenido = true
+            JOIN inventario.lote_rollo_detalle lrd
+                ON  lrd.lote_id    = l.id
+                AND lrd.flg_tenido = true
             JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id  -- 0-balance lotes already excluded
             WHERE op.partida_id = p.id
             GROUP BY

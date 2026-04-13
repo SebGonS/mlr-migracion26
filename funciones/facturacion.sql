@@ -322,26 +322,32 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    -- Insert factura header (totals computed from lines below)
+    -- Insert header with placeholder totals; updated after lines are inserted
     INSERT INTO doc.factura (
         tipo_comprobante, serie, numero, tercero_id,
-        fecha_emision, fecha_vencimiento, moneda, tipo_cambio,
-        subtotal, igv, total, estado, usr_cre
+        fecha_emision, fecha_vencimiento,
+        moneda, tipo_cambio,
+        subtotal, igv, total,
+        estado, observacion, usr_cre
     ) VALUES (
-        p_tipo_comprobante, p_serie, p_numero, p_tercero_id,
-        p_fecha_emision, p_fecha_vencimiento, p_moneda, p_tipo_cambio,
-        0, 0, 0, 'emitida', v_usr_id
+        (p_factura->>'tipo_comprobante')::CHAR(2),
+        p_factura->>'serie',
+        (p_factura->>'numero')::INT,
+        (p_factura->>'tercero_id')::INT,
+        (p_factura->>'fecha_emision')::DATE,
+        (p_factura->>'fecha_vencimiento')::DATE,
+        COALESCE(p_factura->>'moneda', 'USD')::CHAR(3),
+        (p_factura->>'tipo_cambio')::NUMERIC,
+        0, 0, 0,
+        'emitida',
+        p_factura->>'observacion',
+        v_usr_id
     )
     RETURNING id INTO v_factura_id;
 
-    -- Link dispatch guias to this invoice (unique constraint prevents double billing)
-    INSERT INTO doc.factura_guia_remision (factura_id, guia_remision_id, usr_cre)
-    SELECT v_factura_id, g, v_usr_id
-    FROM unnest(p_guia_remision_ids) g;
-
-    -- Insert aggregated charge lines
     INSERT INTO doc.factura_detalle (
         factura_id,
+        guia_remision_id,
         partida_id,
         operacion_id,
         es_antipilling,
@@ -357,6 +363,7 @@ BEGIN
     )
     SELECT
         v_factura_id,
+        (l->>'guia_remision_id')::BIGINT,
         (l->>'partida_id')::BIGINT,
         (l->>'operacion_id')::SMALLINT,
         COALESCE((l->>'es_antipilling')::BOOLEAN, false),
@@ -369,9 +376,9 @@ BEGIN
         (l->>'precio_unitario')::NUMERIC,
         COALESCE((l->>'igv_porcentaje')::NUMERIC, 18),
         v_usr_id
-    FROM jsonb_array_elements(p_lineas) l;
+    FROM jsonb_array_elements(p_factura->'lineas') l;
 
-    -- Recompute header totals from generated columns on detail lines
+    -- Compute totals from generated columns on detail lines
     SELECT SUM(subtotal_linea), SUM(igv_linea), SUM(total_linea)
     INTO v_subtotal, v_igv, v_total
     FROM doc.factura_detalle
@@ -388,218 +395,160 @@ END;
 $$;
 
 
--- ── doc.fn_get_dispatch_guias_pendientes ──────────────────────
--- Returns dispatch guias (DESPACHO_CLIENTE) not yet billed.
--- This is the invoice creation screen's first step: operator
--- selects one or more guias, then calls fn_get_lineas_factura_preview
--- to see the aggregated charge lines before confirming.
-CREATE OR REPLACE FUNCTION doc.fn_get_dispatch_guias_pendientes(
-    p_tercero_id INT DEFAULT NULL
-)
-RETURNS TABLE (
-    guia_remision_id  BIGINT,
-    serie             TEXT,
-    correlativo       TEXT,
-    fecha_emision     DATE,
-    tercero_id        INT,
-    cliente           TEXT,
-    total_kg          NUMERIC(12,4),
-    n_rollos          BIGINT
-)
-LANGUAGE sql STABLE
-SECURITY DEFINER
-SET search_path TO 'iam', 'doc', 'inventario', 'public'
-AS $$
-    SELECT
-        gr.id,
-        gr.serie,
-        gr.correlativo,
-        gr.fecha_emision::DATE,
-        gr.tercero_id,
-        t.nombre,
-        SUM(grd.cantidad)   AS total_kg,
-        COUNT(grd.id)       AS n_rollos
-    FROM doc.guia_remision gr
-    JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
-                                   AND grt.codigo = 'DESPACHO_CLIENTE'
-    JOIN tercero t                  ON t.id = gr.tercero_id
-    JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
-    WHERE
-        gr.flg_elm = false
-        AND (p_tercero_id IS NULL OR gr.tercero_id = p_tercero_id)
-        -- Not yet billed
-        AND NOT EXISTS (
-            SELECT 1 FROM doc.factura_guia_remision fgr
-            WHERE fgr.guia_remision_id = gr.id
-        )
-    GROUP BY gr.id, gr.serie, gr.correlativo, gr.fecha_emision, gr.tercero_id, t.nombre
-    ORDER BY gr.fecha_emision, gr.serie, gr.correlativo;
-$$;
-
-GRANT EXECUTE ON FUNCTION doc.fn_get_dispatch_guias_pendientes(INT) TO authenticated;
-
-
--- ── doc.fn_get_lineas_factura_preview ─────────────────────────
--- Given a set of dispatch guia IDs, returns aggregated billing
--- lines ready for the operator to review and confirm.
+-- ── doc.vw_pendientes_facturacion ─────────────────────────────
+-- Live view of billable lines not yet invoiced.
+-- One row per (dispatch guia × operacion × billing dimensions × antipilling).
 --
--- Aggregation key: (operacion × articulo_tipo × color_x_cliente
---                   × tenido × es_antipilling)
--- Weight: SUM of dispatched kg across all selected guias for
---   each combination.
--- Price: resolved from catalog via fn_get_precio.
--- Description: auto-generated; operator may override before
---   passing to registrar_factura_cliente.
+-- Unbilled = no matching factura_detalle row for that exact
+-- (guia_remision_id, operacion_id, articulo_tipo_id,
+--  color_x_cliente_id, tenido_id, es_antipilling) key.
+-- Partial billing is handled naturally: if TENIDO is billed but
+-- PLANCHADO isn't, the PLANCHADO row still appears here.
 --
--- sin_precio = true flags combinations with no active catalog
--- entry — operator must set a rate before confirming the invoice.
+-- Usage:
+--   - Guia list screen:
+--       SELECT DISTINCT guia_remision_id, serie, correlativo, cliente, ...
+--       GROUP BY guia to show pending kg per guia
+--   - Invoice creation preview:
+--       WHERE guia_remision_id = ANY(selected_ids)
+--   - sin_precio = true: rate missing, operator must set before billing
 --
 -- Join path:
 --   dispatch guia → guia_detalle.lote_id
---   → lote = orden_produccion_item.lote_id
---   → orden_produccion → partida (price dimensions)
+--   → orden_produccion_item.lote_id → orden_produccion → partida
+--   → completed orden_produccion_paso → operacion
 --   → item_rollo_detalle → articulo (articulo_tipo_id, fibra)
-CREATE OR REPLACE FUNCTION doc.fn_get_lineas_factura_preview(
-    p_guia_remision_ids BIGINT[]
-)
-RETURNS TABLE (
-    operacion_id        SMALLINT,
-    operacion           TEXT,
-    es_antipilling      BOOLEAN,
-    articulo_tipo_id    SMALLINT,
-    articulo_tipo       TEXT,
-    color_x_cliente_id  INT,
-    color               TEXT,
-    tenido_id           INT,
-    tenido              TEXT,
-    partida_id          BIGINT,   -- NULL when multiple partidas aggregate into one line
-    peso_kg             NUMERIC(12,4),
-    precio_kg           NUMERIC(10,4),
-    subtotal            NUMERIC(12,2),
-    sin_precio          BOOLEAN,
-    descripcion         TEXT
-)
-LANGUAGE sql STABLE
-SECURITY DEFINER
-SET search_path TO 'iam', 'doc', 'mes', 'inventario', 'public'
-AS $$
-    WITH base AS (
-        SELECT
-            o.id::SMALLINT                  AS operacion_id,
-            o.nombre                        AS operacion,
-            o.codigo                        AS op_codigo,
-            ar.articulo_tipo_id::SMALLINT   AS articulo_tipo_id,
-            atn.nombre                      AS articulo_tipo,
-            p.color_x_cliente_id,
-            c.color,
-            p.tenido_id,
-            ten.tenido,
-            ar.fibra::SMALLINT              AS fibra,
-            p.tercero_id                    AS partida_tercero_id,
-            p.flg_antipilling,
-            -- Keep partida_id only when all rolls in this group share the same partida
-            MIN(p.id)                       AS partida_id_min,
-            MAX(p.id)                       AS partida_id_max,
-            SUM(grd.cantidad)               AS peso_kg
-        FROM doc.guia_remision gr
-        JOIN doc.guia_remision_tipo grt  ON grt.id = gr.guia_remision_tipo_id
-                                        AND grt.codigo = 'DESPACHO_CLIENTE'
-        JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
-        JOIN inventario.lote l           ON l.id = grd.lote_id
-        JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id
-        JOIN mes.orden_produccion op_h   ON op_h.id = opi.orden_produccion_id
-                                        AND op_h.flg_elm = false
-        JOIN doc.partida p               ON p.id = op_h.partida_id
-                                        AND p.flg_elm = false
-        JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op_h.id
-                                          AND opp.estado = 'COMPLETADO'
-        JOIN mes.operacion o             ON o.id = opp.operacion_id
-        JOIN LATERAL (
-            SELECT ar2.articulo_tipo_id, ar2.fibra
-            FROM item_rollo_detalle ird2
-            JOIN articulo ar2 ON ar2.id = ird2.articulo_id
-            WHERE ird2.item_id = opi.item_id
-            LIMIT 1
-        ) ar ON true
-        JOIN articulo_tipo atn           ON atn.id = ar.articulo_tipo_id
-        JOIN color_x_cliente cxc         ON cxc.id = p.color_x_cliente_id
-        JOIN public.color c              ON c.id = cxc.color_id
-        LEFT JOIN tenido ten             ON ten.id = p.tenido_id AND o.codigo = 'TENIDO'
-        WHERE gr.id = ANY(p_guia_remision_ids)
-          AND gr.flg_elm = false
-        GROUP BY
-            o.id, o.nombre, o.codigo,
-            ar.articulo_tipo_id, atn.nombre,
-            p.color_x_cliente_id, c.color,
-            p.tenido_id, ten.tenido,
-            ar.fibra, p.tercero_id, p.flg_antipilling
-    )
-
-    -- Base service lines
+CREATE OR REPLACE VIEW doc.vw_pendientes_facturacion AS
+WITH lineas AS (
     SELECT
-        b.operacion_id,
-        b.operacion,
-        false                                                       AS es_antipilling,
-        b.articulo_tipo_id,
-        b.articulo_tipo,
-        b.color_x_cliente_id,
-        b.color,
-        b.tenido_id,
-        b.tenido,
-        CASE WHEN b.partida_id_min = b.partida_id_max
-             THEN b.partida_id_min ELSE NULL END                    AS partida_id,
-        b.peso_kg,
-        px.precio_kg,
-        ROUND(b.peso_kg * px.precio_kg, 2)                         AS subtotal,
-        (px.precio_kg IS NULL)                                      AS sin_precio,
-        b.operacion || ' ' || b.articulo_tipo || ' ' || b.color    AS descripcion
-    FROM base b
-    LEFT JOIN LATERAL (
-        SELECT precio_kg FROM doc.fn_get_precio(
-            b.operacion_id,
-            b.color_x_cliente_id,
-            b.partida_tercero_id,
-            b.articulo_tipo_id,
-            CASE WHEN b.op_codigo = 'TENIDO' THEN b.tenido_id ELSE NULL END,
-            b.fibra
-        )
-    ) px ON true
-
+        gr.id                               AS guia_remision_id,
+        gr.serie,
+        gr.correlativo,
+        gr.fecha_emision::DATE              AS fecha_emision,
+        gr.tercero_id,
+        t.nombre                            AS cliente,
+        p.id                                AS partida_id,
+        o.id::SMALLINT                      AS operacion_id,
+        o.nombre                            AS operacion,
+        o.codigo                            AS op_codigo,
+        false                               AS es_antipilling,
+        ar.articulo_tipo_id::SMALLINT       AS articulo_tipo_id,
+        atn.nombre                          AS articulo_tipo,
+        p.color_x_cliente_id,
+        c.color,
+        p.tenido_id,
+        ten.tenido,
+        ar.fibra::SMALLINT                  AS fibra,
+        p.tercero_id                        AS partida_tercero_id,
+        p.flg_antipilling,
+        SUM(grd.cantidad)                   AS peso_kg
+    FROM doc.guia_remision gr
+    JOIN doc.guia_remision_tipo grt    ON grt.id = gr.guia_remision_tipo_id
+                                      AND grt.codigo = 'DESPACHO_CLIENTE'
+    JOIN tercero t                     ON t.id = gr.tercero_id
+    JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
+    JOIN inventario.lote l             ON l.id = grd.lote_id
+    JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id
+    JOIN mes.orden_produccion op_h     ON op_h.id = opi.orden_produccion_id
+                                      AND op_h.flg_elm = false
+    JOIN doc.partida p                 ON p.id = op_h.partida_id
+                                      AND p.flg_elm = false
+    JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op_h.id
+                                      AND opp.estado = 'COMPLETADO'
+    JOIN mes.operacion o               ON o.id = opp.operacion_id
+    JOIN LATERAL (
+        SELECT ar2.articulo_tipo_id, ar2.fibra
+        FROM item_rollo_detalle ird2
+        JOIN articulo ar2 ON ar2.id = ird2.articulo_id
+        WHERE ird2.item_id = opi.item_id
+        LIMIT 1
+    ) ar ON true
+    JOIN articulo_tipo atn             ON atn.id = ar.articulo_tipo_id
+    JOIN color_x_cliente cxc           ON cxc.id = p.color_x_cliente_id
+    JOIN public.color c                ON c.id = cxc.color_id
+    LEFT JOIN tenido ten               ON ten.id = p.tenido_id
+                                      AND o.codigo = 'TENIDO'
+    WHERE gr.flg_elm = false
+    GROUP BY
+        gr.id, gr.serie, gr.correlativo, gr.fecha_emision, gr.tercero_id, t.nombre,
+        p.id, o.id, o.nombre, o.codigo,
+        ar.articulo_tipo_id, atn.nombre,
+        p.color_x_cliente_id, c.color,
+        p.tenido_id, ten.tenido,
+        ar.fibra, p.tercero_id, p.flg_antipilling
+),
+-- Antipilling surcharge lines: same grouping, different price column
+antipilling AS (
+    SELECT
+        l.guia_remision_id, l.serie, l.correlativo, l.fecha_emision,
+        l.tercero_id, l.cliente, l.partida_id,
+        l.operacion_id, l.operacion, l.op_codigo,
+        true                AS es_antipilling,
+        l.articulo_tipo_id, l.articulo_tipo,
+        l.color_x_cliente_id, l.color,
+        l.tenido_id, l.tenido,
+        l.fibra, l.partida_tercero_id, l.flg_antipilling,
+        l.peso_kg
+    FROM lineas l
+    WHERE l.flg_antipilling = true
+      AND l.op_codigo = 'TENIDO'
+),
+all_lineas AS (
+    SELECT * FROM lineas
     UNION ALL
-
-    -- Antipilling surcharge lines
+    SELECT * FROM antipilling
+)
+SELECT
+    l.guia_remision_id,
+    l.serie,
+    l.correlativo,
+    l.fecha_emision,
+    l.tercero_id,
+    l.cliente,
+    l.partida_id,
+    l.operacion_id,
+    l.operacion,
+    l.es_antipilling,
+    l.articulo_tipo_id,
+    l.articulo_tipo,
+    l.color_x_cliente_id,
+    l.color,
+    l.tenido_id,
+    l.tenido,
+    l.peso_kg,
+    px.precio_kg,
+    ROUND(l.peso_kg * px.precio_kg, 2)      AS subtotal,
+    (px.precio_kg IS NULL)                  AS sin_precio,
+    -- Auto-generated description; operator may override at invoice time
+    CASE WHEN l.es_antipilling
+         THEN 'Antipilling ' || l.articulo_tipo || ' ' || l.color
+         ELSE l.operacion   || ' ' || l.articulo_tipo || ' ' || l.color
+    END                                     AS descripcion
+FROM all_lineas l
+LEFT JOIN LATERAL (
     SELECT
-        b.operacion_id,
-        'Antipilling'                                               AS operacion,
-        true                                                        AS es_antipilling,
-        b.articulo_tipo_id,
-        b.articulo_tipo,
-        b.color_x_cliente_id,
-        b.color,
-        b.tenido_id,
-        b.tenido,
-        CASE WHEN b.partida_id_min = b.partida_id_max
-             THEN b.partida_id_min ELSE NULL END                    AS partida_id,
-        b.peso_kg,
-        px.precio_antipilling                                       AS precio_kg,
-        ROUND(b.peso_kg * px.precio_antipilling, 2)                AS subtotal,
-        (px.precio_antipilling IS NULL)                             AS sin_precio,
-        'Antipilling ' || b.articulo_tipo || ' ' || b.color        AS descripcion
-    FROM base b
-    LEFT JOIN LATERAL (
-        SELECT precio_antipilling FROM doc.fn_get_precio(
-            b.operacion_id,
-            b.color_x_cliente_id,
-            b.partida_tercero_id,
-            b.articulo_tipo_id,
-            b.tenido_id,
-            b.fibra
-        )
-    ) px ON true
-    WHERE b.flg_antipilling = true
-      AND b.op_codigo = 'TENIDO'
+        CASE WHEN l.es_antipilling
+             THEN (doc.fn_get_precio(
+                     l.operacion_id, l.color_x_cliente_id, l.partida_tercero_id,
+                     l.articulo_tipo_id, l.tenido_id, l.fibra
+                  )).precio_antipilling
+             ELSE (doc.fn_get_precio(
+                     l.operacion_id, l.color_x_cliente_id, l.partida_tercero_id,
+                     l.articulo_tipo_id,
+                     CASE WHEN l.op_codigo = 'TENIDO' THEN l.tenido_id ELSE NULL END,
+                     l.fibra
+                  )).precio_kg
+        END AS precio_kg
+) px ON true
+-- Unbilled: no matching factura_detalle row
+WHERE NOT EXISTS (
+    SELECT 1 FROM doc.factura_detalle fd
+    WHERE fd.guia_remision_id    = l.guia_remision_id
+      AND fd.operacion_id        = l.operacion_id
+      AND fd.articulo_tipo_id    = l.articulo_tipo_id
+      AND fd.color_x_cliente_id  = l.color_x_cliente_id
+      AND fd.tenido_id IS NOT DISTINCT FROM l.tenido_id
+      AND fd.es_antipilling      = l.es_antipilling
+);
 
-    ORDER BY operacion_id, articulo_tipo_id, color_x_cliente_id, es_antipilling;
-$$;
-
-GRANT EXECUTE ON FUNCTION doc.fn_get_lineas_factura_preview(BIGINT[]) TO authenticated;
+GRANT SELECT ON doc.vw_pendientes_facturacion TO authenticated;

@@ -1025,13 +1025,25 @@ DECLARE
     v_usr_id            int := get_user_id();
     v_orden_id          bigint;
     v_partida_id        bigint;
-    v_detalles          jsonb;
-    v_propietario_id    int;
     v_ing_tipo_id       smallint;
     v_egr_tipo_id       smallint;
     v_consumed          int;
-    v_error_payload     jsonb;
-    v_doc_movimiento_id BIGINT;
+    -- Loop variables for output lote creation
+    v_elem              jsonb;
+    v_input_lote_id     int;
+    v_peso_salida       numeric;
+    v_out_item_id       int;
+    v_out_propietario   int;
+    v_new_lote_id           int;
+    v_guia_remision_id      bigint;
+    v_doc_movimiento_id     BIGINT;
+    -- Partida attributes copied to each output lrd row
+    v_partida_ancho             TEXT;
+    v_partida_malla             TEXT;
+    v_partida_rendimiento       TEXT;
+    v_partida_color_x_cliente   INT;
+    v_partida_tenido_id         INT;
+    v_partida_flg_antipilling   BOOLEAN;
 BEGIN
     IF NOT jwt_has_permission('produccion.ejecutar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
@@ -1074,58 +1086,29 @@ PERFORM 1
 FROM mes.orden_produccion
 WHERE id = v_orden_id
 FOR UPDATE;
-    -- 2. Validation (adjust as needed for UN vs KG)
-    WITH solicitado AS (
-        SELECT (i->>'item_id')::INT AS item_id, COUNT(*) AS cantidad
-        FROM jsonb_array_elements(p_output) i
-        GROUP BY 1
-    ),
-    errores AS (
-        SELECT s.item_id, s.cantidad AS cantidad_solicitada, COALESCE(vppr.cantidad_rollos, 0) AS cantidad_producida, pd.cantidad AS cantidad_planificada
-        FROM solicitado s
-        LEFT JOIN doc.partida_detalle pd ON pd.partida_id = v_partida_id AND pd.item_id = s.item_id
-        LEFT JOIN mes.vw_partida_produccion_rollos vppr ON vppr.partida_id = v_partida_id AND vppr.item_id = s.item_id
-        WHERE pd.id IS NULL
-           OR COALESCE(vppr.cantidad_rollos, 0) + s.cantidad > pd.cantidad
-    )
-    SELECT jsonb_agg(jsonb_build_object(
-        'item_id', item_id,
-        'cantidad_solicitada', cantidad_solicitada,
-        'cantidad_producida', cantidad_producida,
-        'cantidad_planificada', cantidad_planificada
-    ))
-    INTO v_error_payload
-    FROM errores;
-
-    IF v_error_payload IS NOT NULL THEN
-        RAISE EXCEPTION 'Cantidad de rollos excede lo planificado en partida'
-            USING DETAIL = v_error_payload::text;
+    -- 2. Validate all input_lote_ids are assigned to this paso
+    IF EXISTS (
+        SELECT 1 FROM jsonb_array_elements(p_output) i
+        WHERE NOT EXISTS (
+            SELECT 1 FROM mes.orden_produccion_paso_item oppi
+            JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
+            WHERE oppi.orden_produccion_paso_id = p_orden_paso_id
+              AND opi.lote_id = (i->>'input_lote_id')::INT
+        )
+    ) THEN
+        RAISE EXCEPTION 'Uno o más input_lote_id no están asignados a este paso de producción.';
     END IF;
-
-    -- 3. Build lote detalles from partida specs
-    SELECT jsonb_build_object(
-               'tenido_id', p.tenido_id,
-               'color_x_cliente_id', p.color_x_cliente_id,
-               'malla', p.malla,
-               'rendimiento', p.rendimiento,
-               'ancho', p.ancho,
-               'flg_antipilling', p.flg_antipilling
-           )
-    INTO v_detalles
-    FROM doc.partida p WHERE p.id = v_partida_id;
-
-    -- propietario_id inherited from input roll lotes (already locked above)
-    SELECT l.propietario_id INTO v_propietario_id
-    FROM mes.orden_produccion_paso_item oppi
-    JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
-    JOIN inventario.lote l ON l.id = opi.lote_id
-    WHERE oppi.orden_produccion_paso_id = p_orden_paso_id
-    LIMIT 1;
 
     SELECT id INTO v_ing_tipo_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING';
     SELECT id INTO v_egr_tipo_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
+
+    -- Fetch partida attributes once; copied to every output lrd row
+    SELECT ancho, malla, rendimiento, color_x_cliente_id, tenido_id, flg_antipilling
+    INTO v_partida_ancho, v_partida_malla, v_partida_rendimiento,
+         v_partida_color_x_cliente, v_partida_tenido_id, v_partida_flg_antipilling
+    FROM doc.partida WHERE id = v_partida_id;
 
     -- Single posting id shared by backflush + output movements
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;

@@ -47,7 +47,6 @@ jsonb_build_object(
             'articulo_tipo_id', ta.id,
             'articulo_tipo', ta.nombre,
             'fibra', ar.fibra,
-            'flg_tenido', ir.flg_tenido,
             'flg_rib', ir.flg_rib
           )
           FROM item_rollo_detalle ir
@@ -124,11 +123,10 @@ DECLARE
 BEGIN
     IF p_item ? 'articulo_id' THEN
     BEGIN
-        INSERT INTO item_rollo_detalle (item_id, articulo_id, flg_tenido, flg_rib)
+        INSERT INTO item_rollo_detalle (item_id, articulo_id, flg_rib)
         VALUES (
             p_item_id,
             (p_item->>'articulo_id')::INT,
-            COALESCE((p_item->>'flg_tenido')::BOOLEAN, FALSE),
             COALESCE((p_item->>'flg_rib')::BOOLEAN, FALSE)
         );
         EXCEPTION
@@ -479,20 +477,35 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
+    -- Required identity fields
+    IF (p_partida->>'tercero_id') IS NULL THEN
+        RAISE EXCEPTION 'tercero_id es requerido' USING ERRCODE = 'not_null_violation';
+    END IF;
+    IF (p_partida->>'color_x_cliente_id') IS NULL THEN
+        RAISE EXCEPTION 'color_x_cliente_id es requerido' USING ERRCODE = 'not_null_violation';
+    END IF;
+    IF (p_partida->>'tenido_id') IS NULL THEN
+        RAISE EXCEPTION 'tenido_id es requerido' USING ERRCODE = 'not_null_violation';
+    END IF;
+    IF (p_partida->>'articulo_tipo_id') IS NULL THEN
+        RAISE EXCEPTION 'articulo_tipo_id es requerido' USING ERRCODE = 'not_null_violation';
+    END IF;
+
  INSERT INTO logs_api(function_name, user_id, params)
         VALUES ('crear_partida', v_usr_id, p_partida);
 
 -------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,tercero_id,tenido_id,malla,rendimiento,ancho,color_x_cliente_id,flg_antipilling,fecha_acordada)
+    INSERT INTO doc.partida (prioridad_id,tercero_id,tenido_id,articulo_tipo_id,malla,rendimiento,ancho,color_x_cliente_id,flg_antipilling,fecha_acordada)
     VALUES (
        ( p_partida->>'prioridad_id')::INT,
         (p_partida->>'tercero_id')::INT,
         (p_partida->>'tenido_id')::INT,
+        (p_partida->>'articulo_tipo_id')::SMALLINT,
         (p_partida->>'malla')::TEXT,
         p_partida->>'rendimiento',
         (p_partida->>'ancho')::TEXT,
         (p_partida->>'color_x_cliente_id')::INT,
-        (p_partida->>'flg_antipilling')::BOOLEAN,
+        COALESCE((p_partida->>'flg_antipilling')::BOOLEAN, false),
         (p_partida->>'fecha_acordada')::DATE
     )
     RETURNING id INTO v_partida_id;
@@ -580,14 +593,15 @@ BEGIN
     END IF;
 
     -------------------------------------------------------------------------
-    -- CREADA only: cliente, tenido, color, and full detail replace
+    -- CREADA only: identity fields — tercero, tenido, color, articulo_tipo, antipilling
     -------------------------------------------------------------------------
     IF v_estado = 'CREADA' THEN
         UPDATE doc.partida
-        SET tercero_id          = (p_partida->>'tercero_id')::INT,
-            tenido_id           = (p_partida->>'tenido_id')::INT,
-            color_x_cliente_id  = (p_partida->>'color_x_cliente_id')::INT,
-            flg_antipilling     = (p_partida->>'flg_antipilling')::BOOLEAN,
+        SET tercero_id          = COALESCE((p_partida->>'tercero_id')::INT,          tercero_id),
+            tenido_id           = COALESCE((p_partida->>'tenido_id')::INT,           tenido_id),
+            color_x_cliente_id  = COALESCE((p_partida->>'color_x_cliente_id')::INT,  color_x_cliente_id),
+            articulo_tipo_id    = COALESCE((p_partida->>'articulo_tipo_id')::SMALLINT, articulo_tipo_id),
+            flg_antipilling     = COALESCE((p_partida->>'flg_antipilling')::BOOLEAN, flg_antipilling),
             fecha_acordada      = (p_partida->>'fecha_acordada')::DATE
         WHERE id = p_partida_id;
 
@@ -676,6 +690,8 @@ BEGIN
         'color_hex', vc.color_hex,
         'color_x_cliente_hex', vc.color_x_cliente_hex,
         'tono', vc.tono,
+        'articulo_tipo_id', p.articulo_tipo_id,
+        'articulo_tipo', at.nombre,
         'flg_antipilling', p.flg_antipilling,
         'tenido_id', p.tenido_id,
         'tenido', tenido.tenido,
@@ -770,12 +786,17 @@ BEGIN
             SELECT jsonb_agg(
                 jsonb_build_object(
                     'id', op.id,
-                    'tipo', op.tipo,  -- ✅ FIXED (was op.lote_id)
+                    'tipo', op.tipo,
                     'estado', op.estado,
                     'orden_origen_id', op.orden_origen_id,
                     'fyh_cre', op.fyh_cre,
                     'fyh_inicio', op.fyh_inicio,
                     'fyh_fin', op.fyh_fin,
+                    'op_codigo', EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' ||
+                        (SELECT numbered.rn::TEXT
+                         FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS rn
+                               FROM mes.orden_produccion) numbered
+                         WHERE numbered.id = op.id),
                     
                     -- ───────────────────────────────────
                     -- PASOS DE PRODUCCION
@@ -865,21 +886,29 @@ BEGIN
                             jsonb_build_object(
                                 'id', opi.id,
                                 'lote_id', opi.lote_id,
+                                'lote_codigo', EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || LPAD(l.secuencia::TEXT, 5, '0'),
                                 'item_id', l.item_id,
                                 'item_codigo', vi_mat.item_codigo,
                                 'item_nombre', vi_mat.item_nombre,
-                                'peso_kg', l.cantidad,
+                                'cantidad', l.cantidad,
                                 'unidad', vi_mat.unidad_codigo,
-                                'detalles', l.detalles,
-                                'estado_calidad', l.estado_calidad
+                                'estado_calidad', l.estado_calidad,
+                                'guia_remision_id',   lrd_in.guia_remision_id,
+                                'ancho',              lrd_in.ancho,
+                                'malla',              lrd_in.malla,
+                                'flg_tenido',         lrd_in.flg_tenido,
+                                'flg_antipilling',    lrd_in.flg_antipilling,
+                                'color_x_cliente_id', lrd_in.color_x_cliente_id,
+                                'tenido_id',          lrd_in.tenido_id
                             ) ORDER BY opi.id
                         )
                         FROM mes.orden_produccion_item opi
-                        LEFT JOIN inventario.lote l ON l.id = opi.lote_id
-                        LEFT JOIN vw_items vi_mat ON vi_mat.item_id = l.item_id
-                        WHERE opi.orden_produccion_id = op.id  -- ✅ FIXED
+                        LEFT JOIN inventario.lote l                          ON l.id = opi.lote_id
+                        LEFT JOIN vw_items vi_mat                            ON vi_mat.item_id = l.item_id
+                        LEFT JOIN inventario.lote_rollo_detalle lrd_in       ON lrd_in.lote_id = l.id
+                        WHERE opi.orden_produccion_id = op.id
                     ), '[]'::jsonb),
-                    
+
                     -- ───────────────────────────────────
                     -- PRODUCTION OUTPUT (finished goods)
                     -- ───────────────────────────────────
@@ -887,15 +916,23 @@ BEGIN
                         SELECT jsonb_agg(
                             jsonb_build_object(
                                 'id', l.id,
+                                'lote_codigo', EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || LPAD(l.secuencia::TEXT, 5, '0'),
                                 'item_id', l.item_id,
                                 'item_codigo', vi_prod.item_codigo,
                                 'item_nombre', vi_prod.item_nombre,
                                 'cantidad', l.cantidad,
                                 'unidad', vi_prod.unidad_codigo,
-                                'detalles', l.detalles,
                                 'estado_calidad', l.estado_calidad,
                                 'fyh_cre', l.fyh_cre,
-                                
+                                'guia_remision_id',   lrd_out.guia_remision_id,
+                                'ancho',              lrd_out.ancho,
+                                'malla',              lrd_out.malla,
+                                'rendimiento',        lrd_out.rendimiento,
+                                'flg_tenido',         lrd_out.flg_tenido,
+                                'flg_antipilling',    lrd_out.flg_antipilling,
+                                'color_x_cliente_id', lrd_out.color_x_cliente_id,
+                                'tenido_id',          lrd_out.tenido_id,
+
                                 -- ═══════════════════════════════
                                 -- INSPECTIONS (QC history)
                                 -- ═══════════════════════════════
@@ -916,9 +953,10 @@ BEGIN
                                 ), '[]'::jsonb)
                             ) ORDER BY l.fyh_cre
                         )
-                         FROM inventario.lote l
-                        JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id AND opp.id=l.documento_id AND l.documento_tipo='ORDEN_PRODUCCION_PASO'
-                        LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
+                        FROM inventario.lote l
+                        JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id AND opp.id = l.documento_id AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+                        LEFT JOIN vw_items vi_prod                       ON vi_prod.item_id = l.item_id
+                        LEFT JOIN inventario.lote_rollo_detalle lrd_out  ON lrd_out.lote_id = l.id
                         WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
                     ), '[]'::jsonb)
                     
@@ -930,10 +968,11 @@ BEGIN
         
     ) INTO v_result
     FROM doc.partida p
-    LEFT JOIN prioridad pri ON pri.id = p.prioridad_id
-    LEFT JOIN tercero c ON c.id = p.tercero_id
-    LEFT JOIN tenido ON tenido.id = p.tenido_id
-    LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN prioridad pri       ON pri.id = p.prioridad_id
+    LEFT JOIN tercero c           ON c.id = p.tercero_id
+    LEFT JOIN tenido              ON tenido.id = p.tenido_id
+    LEFT JOIN vw_colores vc       ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN articulo_tipo at    ON at.id = p.articulo_tipo_id
     WHERE p.id = p_partida_id;
     
     RETURN v_result;
@@ -1037,6 +1076,23 @@ WITH orden_rollos AS (
                 FROM doc.partida
                 WHERE id = (p_orden->>'partida_id')::BIGINT
             );
+    END IF;
+
+    -- --------------------------------------------------
+    -- VALIDAR QUE LOS ROLLOS ASIGNADOS COINCIDEN CON articulo_tipo_id DE LA PARTIDA
+    -- --------------------------------------------------
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
+        JOIN inventario.lote l       ON l.id = (i->>'lote_id')::INT
+        JOIN item it                 ON it.id = l.item_id
+        JOIN articulo a              ON a.id = it.articulo_id
+        JOIN doc.partida p           ON p.id = (p_orden->>'partida_id')::BIGINT
+        WHERE a.articulo_tipo_id IS DISTINCT FROM p.articulo_tipo_id
+    ) THEN
+        RAISE EXCEPTION
+            'Los rollos asignados no coinciden con el tipo de artículo de la partida (articulo_tipo_id)'
+            USING ERRCODE = 'check_violation';
     END IF;
 
     INSERT INTO logs_api(function_name, user_id, params)
@@ -1239,6 +1295,12 @@ BEGIN
         'fyh_cre',         op.fyh_cre,
         'fyh_inicio',      op.fyh_inicio,
         'fyh_fin',         op.fyh_fin,
+        -- Human-readable run code: "2026-0017-2"
+        'op_codigo', EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' ||
+            (SELECT numbered.rn::TEXT
+             FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS rn
+                   FROM mes.orden_produccion) numbered
+             WHERE numbered.id = op.id),
 
         -- ═══════════════════════════════════════
         -- PARTIDA CONTEXT (lightweight)
@@ -1250,6 +1312,8 @@ BEGIN
             'estado',               p.estado,
             'tercero_id',           p.tercero_id,
             'cliente',              c.nombre,
+            'articulo_tipo_id',     p.articulo_tipo_id,
+            'articulo_tipo',        at.nombre,
             'color_x_cliente_id',   p.color_x_cliente_id,
             'color',                vc.color,
             'tono',                 vc.tono,
@@ -1381,7 +1445,7 @@ BEGIN
                 jsonb_build_object(
                     'id',              opi.id,
                     'lote_id',         opi.lote_id,
-                    'lote_codigo',    'L' || EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || l.secuencia,
+                    'lote_codigo',    EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || LPAD(l.secuencia::TEXT, 5, '0'),
                     'item_id',         l.item_id,
                     'item_codigo',     vi_mat.item_codigo,
                     'item_nombre',     vi_mat.item_nombre,
@@ -1390,15 +1454,24 @@ BEGIN
                     'unidad',          vi_mat.unidad_codigo,
                     'ubicacion',       ubic.nombre,
                     'almacen',         alm.nombre,
-                    'detalles',        l.detalles,
-                    'estado_calidad',  l.estado_calidad
+                    'estado_calidad',  l.estado_calidad,
+                    -- lote_rollo_detalle fields (null for non-roll items)
+                    'guia_remision_id',    lrd_in.guia_remision_id,
+                    'ancho',               lrd_in.ancho,
+                    'malla',               lrd_in.malla,
+                    'rendimiento',         lrd_in.rendimiento,
+                    'flg_tenido',          lrd_in.flg_tenido,
+                    'flg_antipilling',     lrd_in.flg_antipilling,
+                    'color_x_cliente_id',  lrd_in.color_x_cliente_id,
+                    'tenido_id',           lrd_in.tenido_id
                 ) ORDER BY opi.id
             )
             FROM mes.orden_produccion_item opi
-            LEFT JOIN inventario.lote l        ON l.id = opi.lote_id
-            LEFT JOIN vw_items vi_mat          ON vi_mat.item_id = l.item_id
-            LEFT JOIN inventario.ubicacion ubic ON ubic.id = opi.ubicacion_id
-            LEFT JOIN inventario.almacen alm   ON alm.id = ubic.almacen_id
+            LEFT JOIN inventario.lote l                          ON l.id = opi.lote_id
+            LEFT JOIN vw_items vi_mat                            ON vi_mat.item_id = l.item_id
+            LEFT JOIN inventario.ubicacion ubic                  ON ubic.id = opi.ubicacion_id
+            LEFT JOIN inventario.almacen alm                     ON alm.id = ubic.almacen_id
+            LEFT JOIN inventario.lote_rollo_detalle lrd_in       ON lrd_in.lote_id = l.id
             WHERE opi.orden_produccion_id = op.id
         ), '[]'::jsonb),
 
@@ -1409,14 +1482,23 @@ BEGIN
             SELECT jsonb_agg(
                 jsonb_build_object(
                     'id',              l.id,
+                    'lote_codigo',     EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || LPAD(l.secuencia::TEXT, 5, '0'),
                     'item_id',         l.item_id,
                     'item_codigo',     vi_prod.item_codigo,
                     'item_nombre',     vi_prod.item_nombre,
                     'cantidad',        l.cantidad,
                     'unidad',          vi_prod.unidad_codigo,
-                    'detalles',        l.detalles,
                     'estado_calidad',  l.estado_calidad,
                     'fyh_cre',         l.fyh_cre,
+                    -- lote_rollo_detalle fields for finished roll
+                    'guia_remision_id',    lrd_out.guia_remision_id,
+                    'ancho',               lrd_out.ancho,
+                    'malla',               lrd_out.malla,
+                    'rendimiento',         lrd_out.rendimiento,
+                    'flg_tenido',          lrd_out.flg_tenido,
+                    'flg_antipilling',     lrd_out.flg_antipilling,
+                    'color_x_cliente_id',  lrd_out.color_x_cliente_id,
+                    'tenido_id',           lrd_out.tenido_id,
 
                     -- ─── INSPECCIONES (QC) ───
                     'inspecciones', COALESCE((
@@ -1437,17 +1519,19 @@ BEGIN
                 ) ORDER BY l.fyh_cre
             )
             FROM inventario.lote l
-            JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id AND opp.id=l.documento_id AND l.documento_tipo='ORDEN_PRODUCCION_PASO'
-            LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
+            JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id AND opp.id = l.documento_id AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+            LEFT JOIN vw_items vi_prod                       ON vi_prod.item_id = l.item_id
+            LEFT JOIN inventario.lote_rollo_detalle lrd_out  ON lrd_out.lote_id = l.id
             WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
         ), '[]'::jsonb)
 
     ) INTO v_result
     FROM mes.orden_produccion op
-    JOIN doc.partida p      ON p.id = op.partida_id
-    LEFT JOIN tercero c     ON c.id = p.tercero_id
-    LEFT JOIN tenido        ON tenido.id = p.tenido_id
-    LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+    JOIN doc.partida p        ON p.id = op.partida_id
+    LEFT JOIN tercero c       ON c.id = p.tercero_id
+    LEFT JOIN tenido          ON tenido.id = p.tenido_id
+    LEFT JOIN vw_colores vc   ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN articulo_tipo at ON at.id = p.articulo_tipo_id
     WHERE op.id = p_orden_produccion_id;
 
     RETURN v_result;
@@ -1778,6 +1862,16 @@ nuevos_lotes AS(
         nl.cantidad,
         nl.id --id del lote recien creado
         FROM nuevos_lotes nl
+)
+-- Create lote_rollo_detalle for each new ROLLO lote.
+-- guia_remision_id is the billing anchor carried forward through production.
+-- ancho/malla/rendimiento are NULL at ingress — set during weighing.
+, lrd_rows AS (
+    INSERT INTO inventario.lote_rollo_detalle (lote_id, guia_remision_id, flg_tenido)
+    SELECT nl.id, v_guia_id, false
+    FROM nuevos_lotes nl
+    JOIN item i   ON i.id = nl.item_id
+    JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
 )
 INSERT INTO inventario.item_movimientos (doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id, origen_ubicacion_id, destino_ubicacion_id, cantidad, precio_unitario, fecha_hora, documento_tipo, documento_id)
     SELECT

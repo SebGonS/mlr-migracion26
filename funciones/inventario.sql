@@ -383,3 +383,187 @@ BEGIN
     );
 END;
 $$;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- inventario.registrar_pesaje_produccion
+--
+-- Primary ingress weighing flow. Called before production starts,
+-- after rolls have been assigned to an orden_produccion.
+--
+-- Scoped to a single production run (orden_produccion), not the
+-- full partida — a partida can have multiple runs with different
+-- roll sets weighed at different times.
+--
+-- Distributes total weight evenly by roll type:
+--   p_peso_regular → split across non-rib rolls assigned to the order
+--   p_peso_rib     → split across rib rolls assigned to the order
+--   Pass NULL to skip that type.
+--
+-- For each roll: upserts inventario.pesaje, posts PESAJE_POS/NEG
+-- movement for the difference, updates lote.cantidad.
+--
+-- Idempotent: safe to call again for corrections before production
+-- starts. Raises if any assigned roll already has PROD_CONSUMO.
+-- ═══════════════════════════════════════════════════════════════
+DROP FUNCTION IF EXISTS inventario.registrar_pesaje_partida(BIGINT, NUMERIC, NUMERIC);
+
+CREATE OR REPLACE FUNCTION inventario.registrar_pesaje_produccion(
+    p_orden_id      BIGINT,
+    p_peso_regular  NUMERIC,        -- total kg for regular rolls; NULL = skip
+    p_peso_rib      NUMERIC         -- total kg for rib rolls;     NULL = skip
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes','doc'
+AS $$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id            int := get_user_id();
+    v_partida_id        BIGINT;
+    v_pesaje_pos_id     smallint;
+    v_pesaje_neg_id     smallint;
+    v_doc_movimiento_id bigint;
+    v_count_regular     int;
+    v_count_rib         int;
+    v_peso_por_regular  numeric;
+    v_peso_por_rib      numeric;
+    v_updated           int := 0;
+BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Resolve orden → partida
+    SELECT partida_id INTO v_partida_id
+    FROM mes.orden_produccion WHERE id = p_orden_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Orden de producción #% no encontrada.', p_orden_id;
+    END IF;
+    IF v_partida_id IS NULL THEN
+        RAISE EXCEPTION 'La orden #% no está asociada a ninguna partida.', p_orden_id;
+    END IF;
+
+    -- Guard: no roll in this order may already be in production
+    IF EXISTS (
+        SELECT 1
+        FROM mes.orden_produccion_item opi
+        JOIN inventario.item_movimientos im  ON im.lote_id = opi.lote_id
+        JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+        WHERE opi.orden_produccion_id = p_orden_id
+          AND imt.codigo = 'PROD_CONSUMO'
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede modificar pesos de la orden #%: uno o más rollos ya tienen movimientos de producción.',
+            p_orden_id;
+    END IF;
+
+    -- Count rolls by type assigned to this order
+    SELECT
+        COUNT(*) FILTER (WHERE ird.flg_rib = false),
+        COUNT(*) FILTER (WHERE ird.flg_rib = true)
+    INTO v_count_regular, v_count_rib
+    FROM mes.orden_produccion_item opi
+    JOIN inventario.lote l      ON l.id = opi.lote_id AND l.flg_elm = false
+    JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+    WHERE opi.orden_produccion_id = p_orden_id;
+
+    IF v_count_regular = 0 AND v_count_rib = 0 THEN
+        RAISE EXCEPTION 'La orden #% no tiene rollos asignados.', p_orden_id;
+    END IF;
+    IF p_peso_regular IS NOT NULL AND v_count_regular = 0 THEN
+        RAISE EXCEPTION 'Se proporcionó peso_regular pero la orden #% no tiene rollos regulares asignados.', p_orden_id;
+    END IF;
+    IF p_peso_rib IS NOT NULL AND v_count_rib = 0 THEN
+        RAISE EXCEPTION 'Se proporcionó peso_rib pero la orden #% no tiene rollos rib asignados.', p_orden_id;
+    END IF;
+
+    v_peso_por_regular := CASE WHEN v_count_regular > 0 AND p_peso_regular IS NOT NULL
+                               THEN ROUND(p_peso_regular / v_count_regular, 4) END;
+    v_peso_por_rib     := CASE WHEN v_count_rib > 0 AND p_peso_rib IS NOT NULL
+                               THEN ROUND(p_peso_rib / v_count_rib, 4) END;
+
+    SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
+    SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
+    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
+
+    -- Upsert pesaje + post correction movement + update lote.cantidad
+    WITH rolls AS (
+        SELECT
+            l.id        AS lote_id,
+            l.item_id,
+            l.cantidad  AS peso_anterior,
+            sa.ubicacion_id,
+            ird.flg_rib,
+            CASE WHEN ird.flg_rib THEN v_peso_por_rib ELSE v_peso_por_regular END AS peso_nuevo
+        FROM mes.orden_produccion_item opi
+        JOIN inventario.lote l      ON l.id = opi.lote_id AND l.flg_elm = false
+        JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+        JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+        WHERE opi.orden_produccion_id = p_orden_id
+          AND CASE WHEN ird.flg_rib THEN v_peso_por_rib     IS NOT NULL
+                   ELSE                  v_peso_por_regular IS NOT NULL END
+    ),
+    pesajes AS (
+        INSERT INTO inventario.pesaje (lote_id, partida_id, peso_real, usr_cre)
+        SELECT r.lote_id, v_partida_id, r.peso_nuevo, v_usr_id
+        FROM rolls r
+        ON CONFLICT (lote_id) DO UPDATE
+            SET peso_real  = EXCLUDED.peso_real,
+                partida_id = EXCLUDED.partida_id
+        RETURNING lote_id
+    ),
+    movimientos AS (
+        INSERT INTO inventario.item_movimientos (
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, destino_ubicacion_id,
+            cantidad, documento_tipo, documento_id
+        )
+        SELECT
+            v_doc_movimiento_id,
+            r.item_id, r.lote_id,
+            CASE WHEN r.peso_nuevo > r.peso_anterior THEN v_pesaje_pos_id
+                 ELSE v_pesaje_neg_id END,
+            CASE WHEN r.peso_nuevo < r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
+            CASE WHEN r.peso_nuevo > r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
+            ABS(r.peso_nuevo - r.peso_anterior),
+            'ORDEN_PRODUCCION', p_orden_id
+        FROM rolls r
+        JOIN pesajes p ON p.lote_id = r.lote_id
+        WHERE r.peso_nuevo <> r.peso_anterior
+    )
+    UPDATE inventario.lote l
+    SET cantidad = r.peso_nuevo
+    FROM rolls r
+    WHERE l.id = r.lote_id;
+
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_pesaje_produccion', v_usr_id, jsonb_build_object(
+        'orden_id', p_orden_id,
+        'partida_id', v_partida_id,
+        'peso_regular', p_peso_regular,
+        'peso_rib', p_peso_rib
+    ));
+
+    RETURN format(
+        'Pesaje registrado para orden #%s (partida #%s): %s rollos actualizados (%s regulares × %s kg, %s rib × %s kg).',
+        p_orden_id, v_partida_id, v_updated,
+        COALESCE(v_count_regular, 0), COALESCE(v_peso_por_regular::text, 'sin cambio'),
+        COALESCE(v_count_rib, 0),     COALESCE(v_peso_por_rib::text,     'sin cambio')
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_pesaje_produccion - User: %, orden: %, Error: %, Detail: %',
+              v_usr_id, p_orden_id, v_message, v_detail;
+    RAISE;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_produccion(BIGINT, NUMERIC, NUMERIC) TO authenticated;
+
