@@ -1994,4 +1994,163 @@ ORDER BY tlm.nombre, te.flg_activo DESC, te.id DESC;
 
 GRANT SELECT ON mes.vw_tiempos_estandar_lavado TO authenticated;
 GRANT SELECT ON mes.maquina TO authenticated;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- ANULAR PRODUCCION
+-- Reverses a completed production paso:
+--   - Posts PROD_ING_REV for each output lote (removes from stock)
+--   - Posts PROD_CONSUMO_REV for each input lote (restores to stock)
+--   - Soft-deletes output lotes + their lote_rollo_detalle rows
+--   - Resets paso → EN_PROCESO, orden → EN_PROCESO
+--
+-- Guard: fails if any output lote has downstream movements
+--        (SERV_EGR, VENTA_EGR, etc.) — those must be reversed first.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.anular_produccion(p_orden_paso_id BIGINT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','inventario','mes','doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id            int := get_user_id();
+    v_orden_id          bigint;
+    v_estado            orden_produccion_paso_estado_enum;
+    v_ing_rev_id        smallint;
+    v_consumo_rev_id    smallint;
+    v_doc_movimiento_id bigint;
+    v_output_count      int;
+BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- 1. Paso must exist and be COMPLETADO
+    SELECT opp.estado, opp.orden_produccion_id
+    INTO v_estado, v_orden_id
+    FROM mes.orden_produccion_paso opp
+    WHERE opp.id = p_orden_paso_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Paso #% no encontrado.', p_orden_paso_id;
+    END IF;
+    IF v_estado <> 'COMPLETADO' THEN
+        RAISE EXCEPTION 'Solo se puede anular un paso COMPLETADO. Estado actual: %', v_estado;
+    END IF;
+
+    -- 2. Guard: no downstream movements on output lotes
+    IF EXISTS (
+        SELECT 1
+        FROM inventario.lote l
+        JOIN inventario.item_movimientos im     ON im.lote_id = l.id
+        JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+        WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+          AND l.documento_id   = p_orden_paso_id
+          AND l.flg_elm        = false
+          AND imt.codigo NOT IN ('PROD_ING', 'PROD_ING_REV')
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede anular el paso #%: uno o más lotes de salida ya tienen movimientos posteriores (despacho, ajuste, etc.). Anule esos documentos primero.',
+            p_orden_paso_id;
+    END IF;
+
+    -- 3. Lock rows
+    PERFORM 1 FROM inventario.lote
+    WHERE documento_tipo = 'ORDEN_PRODUCCION_PASO' AND documento_id = p_orden_paso_id
+    FOR UPDATE;
+
+    PERFORM 1 FROM mes.orden_produccion WHERE id = v_orden_id FOR UPDATE;
+
+    -- 4. Fetch reversal movement type IDs
+    SELECT id INTO v_ing_rev_id     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING_REV';
+    SELECT id INTO v_consumo_rev_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO_REV';
+
+    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
+
+    -- 5. PROD_ING_REV: reverse ingress of output lotes
+    INSERT INTO inventario.item_movimientos(
+        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+        origen_ubicacion_id, cantidad, documento_tipo, documento_id
+    )
+    SELECT
+        v_doc_movimiento_id,
+        l.item_id,
+        l.id,
+        v_ing_rev_id,
+        sa.ubicacion_id,
+        l.cantidad,
+        'ORDEN_PRODUCCION_PASO',
+        p_orden_paso_id
+    FROM inventario.lote l
+    JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+    WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+      AND l.documento_id   = p_orden_paso_id
+      AND l.flg_elm        = false;
+
+    GET DIAGNOSTICS v_output_count = ROW_COUNT;
+
+    -- 6. PROD_CONSUMO_REV: restore input lotes consumed by this paso
+    INSERT INTO inventario.item_movimientos(
+        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+        destino_ubicacion_id, cantidad, documento_tipo, documento_id
+    )
+    SELECT
+        v_doc_movimiento_id,
+        opi.item_id,
+        opi.lote_id,
+        v_consumo_rev_id,
+        opi.ubicacion_id,
+        l.cantidad,
+        'ORDEN_PRODUCCION_PASO',
+        p_orden_paso_id
+    FROM mes.orden_produccion_paso_item oppi
+    JOIN mes.orden_produccion_item opi ON opi.id = oppi.orden_produccion_item_id
+    JOIN inventario.lote l             ON l.id   = opi.lote_id
+    WHERE oppi.orden_produccion_paso_id = p_orden_paso_id;
+
+    -- 7. Soft-delete output lotes + their batch classification rows
+    UPDATE inventario.lote
+    SET flg_elm = true, usr_elm = v_usr_id, fyh_elm = NOW()
+    WHERE documento_tipo = 'ORDEN_PRODUCCION_PASO'
+      AND documento_id   = p_orden_paso_id
+      AND flg_elm        = false;
+
+    DELETE FROM inventario.lote_rollo_detalle
+    WHERE lote_id IN (
+        SELECT id FROM inventario.lote
+        WHERE documento_tipo = 'ORDEN_PRODUCCION_PASO'
+          AND documento_id   = p_orden_paso_id
+    );
+
+    -- 8. Reset paso back to EN_PROCESO
+    UPDATE mes.orden_produccion_paso
+    SET estado  = 'EN_PROCESO',
+        fyh_fin = NULL
+    WHERE id = p_orden_paso_id;
+
+    -- 9. Reset orden back to EN_PROCESO if it was auto-completed
+    UPDATE mes.orden_produccion
+    SET estado = 'EN_PROCESO', fyh_fin = NULL
+    WHERE id = v_orden_id AND estado = 'FINALIZADA';
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('anular_produccion', v_usr_id, jsonb_build_object('orden_paso_id', p_orden_paso_id));
+
+    RETURN format('Producción del paso #% anulada: % lotes de salida revertidos.', p_orden_paso_id, v_output_count);
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in anular_produccion - User: %, paso: %, Error: %, Detail: %',
+              v_usr_id, p_orden_paso_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION mes.anular_produccion(BIGINT) TO authenticated;
+GRANT EXECUTE ON FUNCTION mes.actualizar_pesos_orden_items(BIGINT, NUMERIC, NUMERIC) TO authenticated;
+GRANT EXECUTE ON FUNCTION mes.actualizar_pesos_individuales_orden(BIGINT, JSONB) TO authenticated;
 GRANT USAGE on SCHEMA mes TO authenticated;

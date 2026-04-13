@@ -238,7 +238,13 @@ VALUES
 -- MUESTRA_ING cubre recepciones de muestra de proveedor sin documento de compra.
 -- MUESTRA_EGR cubre salidas de muestra (cliente, proceso, etc.) registradas en salida_inventario con motivo='muestra'.
 ('MUESTRA_ING',      'Muestra – Ingreso',                         'AJUSTE',          1,  true,  false, false, false, false, true,  'Ingreso de muestra de proveedor'),
-('MUESTRA_EGR',      'Muestra – Egreso',                          'AJUSTE',          -1, true,  false, false, false, true,  false, 'Salida de muestra para cliente/proceso');
+('MUESTRA_EGR',      'Muestra – Egreso',                          'AJUSTE',          -1, true,  false, false, false, true,  false, 'Salida de muestra para cliente/proceso'),
+-- Production reversals: paired with PROD_ING / PROD_CONSUMO to cancel a completed paso.
+-- PROD_ING_REV     reverses the output lote ingress  (factor -1, removes it from stock).
+-- PROD_CONSUMO_REV reverses the input lote backflush (factor +1, restores it to stock).
+-- Not valorizable — the original movements already set valuation; reversal is stock-only.
+('PROD_ING_REV',     'Producción – Anulación Ingreso PT',         'PRODUCCION',      -1, true,  false, false, false, true,  false, 'Anulación de ingreso de producto terminado (reversal de PROD_ING)'),
+('PROD_CONSUMO_REV', 'Producción – Anulación Consumo MP',         'PRODUCCION',      1,  true,  false, false, false, false, true,  'Anulación de consumo de materia prima (reversal de PROD_CONSUMO)');
 
 -- ── inventario.almacen ────────────────────────────────────────
 CREATE TABLE inventario.almacen (

@@ -2479,15 +2479,15 @@ JOIN ghost_posting gp ON gp.partida_id = gs.partida_id;
 -- Steps 7–8: Dyed roll output + dispatch
 -- ============================================================================
 -- Applies to raw lotes on the LAST paso of their partida's chain.
--- Step 7 — PROD_ING: creates a new dyed roll lote (flg_tenido=true item) linked
---           to the last paso, ingressed at fecha_entrega.
+-- Step 7 — PROD_ING: creates a new dyed roll lote (same item_id as raw lote)
+--           linked to the last paso, ingressed at fecha_entrega.
+--           Processing state (color, tenido, flg_tenido=true) is set on
+--           lote_rollo_detalle by migration/18, not here.
 -- Step 8 — SERV_EGR: dispatches the dyed lote back to the client.
 --           Net stock effect = 0.
--- "Last paso" = the paso belonging to the pxr with the latest (fecha, id) for
+-- "Last paso" = the paso belonging to the op with the latest fyh_fin for
 -- that partida. REPROCESO pasos share the raw lote via opi/oppi for traceability
 -- but only the final paso produces the output and dispatch movements.
--- Falls through silently if articulo_id has no flg_tenido=true item_rollo_detalle
--- row — add that item first and re-run if needed.
 -- ============================================================================
 WITH last_paso_per_partida AS (
     -- One paso_id per partida: the paso of the temporally last orden (fyh_fin DESC).
