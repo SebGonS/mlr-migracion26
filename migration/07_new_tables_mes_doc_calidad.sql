@@ -290,13 +290,17 @@ CREATE TABLE mes.orden_produccion (
 
 -- ── inventario.pesaje ─────────────────────────────────────────
 CREATE TABLE inventario.pesaje (
-    id          INT  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id                  INT  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    lote_id             INT  NOT NULL REFERENCES inventario.lote(id),
+    -- Context: one of these is populated depending on when weighing occurred.
+    -- partida_id: ingress weighing before production (primary flow).
+    -- orden_produccion_id: post-assignment correction (rare).
+    partida_id          BIGINT REFERENCES doc.partida(id),
     orden_produccion_id BIGINT REFERENCES mes.orden_produccion(id),
-    lote_id     INT  NOT NULL REFERENCES inventario.lote(id),
-    peso_real   NUMERIC(10,2),
-    observacion TEXT,
-    usr_cre     INT,
-    fyh_cre     TIMESTAMPTZ DEFAULT NOW()
+    peso_real           NUMERIC(10,2),
+    observacion         TEXT,
+    usr_cre             INT,
+    fyh_cre             TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ── mes.orden_produccion_paso ─────────────────────────────────

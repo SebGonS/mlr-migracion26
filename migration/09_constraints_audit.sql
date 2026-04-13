@@ -302,9 +302,7 @@ CREATE INDEX IF NOT EXISTS idx_lote_doc     ON inventario.lote(documento_tipo, d
 CREATE INDEX IF NOT EXISTS idx_im_lote_id   ON inventario.item_movimientos(lote_id);
 
 -- ── inventario.pesaje integrity ───────────────────────────────────────────────
--- Prevents duplicate weighing records for the same lot in the same production order.
--- Both weighing functions insert without checking for existing rows, so this is
--- the only guard against silent duplicates.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_pesaje_orden_lote
-    ON inventario.pesaje(orden_produccion_id, lote_id)
-    WHERE orden_produccion_id IS NOT NULL;
+-- One authoritative weight record per roll — regardless of when or why it was weighed.
+-- Both ingress (partida) and post-assignment (orden) weighing upsert on this key.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pesaje_lote
+    ON inventario.pesaje(lote_id);

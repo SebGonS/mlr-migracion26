@@ -729,8 +729,11 @@ DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id            int := get_user_id();
     v_estado            orden_produccion_estado_enum;
+    v_count_regular     int;
+    v_count_rib         int;
+    v_peso_por_regular  numeric;
+    v_peso_por_rib      numeric;
     v_count             int;
-    v_peso_prorate      numeric;
     v_pesaje_pos_id     smallint;
     v_pesaje_neg_id     smallint;
     v_doc_movimiento_id BIGINT;
@@ -750,59 +753,95 @@ BEGIN
         RAISE EXCEPTION 'No se pueden modificar pesos de una orden en estado %.', v_estado;
     END IF;
 
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('actualizar_pesos_orden_items', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'peso', p_peso));
+    -- Count rolls by type
+    SELECT
+        COUNT(*) FILTER (WHERE ird.flg_rib = false),
+        COUNT(*) FILTER (WHERE ird.flg_rib = true)
+    INTO v_count_regular, v_count_rib
+    FROM mes.orden_produccion_item opi
+    JOIN inventario.lote l      ON l.id = opi.lote_id AND l.flg_elm = false
+    JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+    WHERE opi.orden_produccion_id = p_orden_id;
 
-    SELECT COUNT(*) INTO v_count
-    FROM mes.orden_produccion_item WHERE orden_produccion_id = p_orden_id;
-
-    IF v_count = 0 THEN
+    IF v_count_regular = 0 AND v_count_rib = 0 THEN
         RAISE EXCEPTION 'La orden % no tiene items', p_orden_id;
     END IF;
+    IF p_peso_regular IS NOT NULL AND v_count_regular = 0 THEN
+        RAISE EXCEPTION 'Se proporcionó peso_regular pero la orden #% no tiene rollos regulares asignados.', p_orden_id;
+    END IF;
+    IF p_peso_rib IS NOT NULL AND v_count_rib = 0 THEN
+        RAISE EXCEPTION 'Se proporcionó peso_rib pero la orden #% no tiene rollos rib asignados.', p_orden_id;
+    END IF;
 
-    v_peso_prorate := p_peso / v_count;
+    v_peso_por_regular := CASE WHEN v_count_regular > 0 AND p_peso_regular IS NOT NULL
+                               THEN ROUND(p_peso_regular / v_count_regular, 4) END;
+    v_peso_por_rib     := CASE WHEN v_count_rib > 0 AND p_peso_rib IS NOT NULL
+                               THEN ROUND(p_peso_rib / v_count_rib, 4) END;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_pesos_orden_items', v_usr_id,
+            jsonb_build_object('orden_id', p_orden_id, 'peso_regular', p_peso_regular, 'peso_rib', p_peso_rib));
 
     SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
     SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
-
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
 
-    -- Upsert one pesaje per lote — ON CONFLICT updates the weight if called again.
-    WITH pesajes AS (
-        INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, usr_cre)
-        SELECT p_orden_id, opi.lote_id, v_peso_prorate, v_usr_id
+    WITH rolls AS (
+        SELECT
+            l.id        AS lote_id,
+            l.item_id,
+            l.cantidad  AS peso_anterior,
+            sa.ubicacion_id,
+            ird.flg_rib,
+            CASE WHEN ird.flg_rib THEN v_peso_por_rib ELSE v_peso_por_regular END AS peso_nuevo
         FROM mes.orden_produccion_item opi
+        JOIN inventario.lote l      ON l.id = opi.lote_id AND l.flg_elm = false
+        JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+        JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
         WHERE opi.orden_produccion_id = p_orden_id
-        ON CONFLICT (orden_produccion_id, lote_id) DO UPDATE
-            SET peso_real = EXCLUDED.peso_real
+          AND CASE WHEN ird.flg_rib THEN v_peso_por_rib     IS NOT NULL
+                   ELSE                  v_peso_por_regular IS NOT NULL END
+    ),
+    pesajes AS (
+        INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, usr_cre)
+        SELECT p_orden_id, r.lote_id, r.peso_nuevo, v_usr_id
+        FROM rolls r
+        ON CONFLICT (lote_id) DO UPDATE
+            SET peso_real           = EXCLUDED.peso_real,
+                orden_produccion_id = EXCLUDED.orden_produccion_id
         RETURNING id, lote_id
+    ),
+    movimientos AS (
+        INSERT INTO inventario.item_movimientos (
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, destino_ubicacion_id,
+            cantidad, documento_tipo, documento_id
+        )
+        SELECT
+            v_doc_movimiento_id,
+            r.item_id, r.lote_id,
+            CASE WHEN r.peso_nuevo > r.peso_anterior THEN v_pesaje_pos_id ELSE v_pesaje_neg_id END,
+            CASE WHEN r.peso_nuevo < r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
+            CASE WHEN r.peso_nuevo > r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
+            ABS(r.peso_nuevo - r.peso_anterior),
+            'ORDEN_PRODUCCION', p_orden_id
+        FROM rolls r
+        JOIN pesajes p ON p.lote_id = r.lote_id
+        WHERE ABS(r.peso_nuevo - r.peso_anterior) > 0
     )
-    INSERT INTO inventario.item_movimientos (
-        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-        origen_ubicacion_id, destino_ubicacion_id,
-        cantidad, documento_tipo, documento_id
-    )
-    SELECT
-        v_doc_movimiento_id, l.item_id, l.id,
-        CASE WHEN v_peso_prorate > l.cantidad THEN v_pesaje_pos_id ELSE v_pesaje_neg_id END,
-        CASE WHEN v_peso_prorate < l.cantidad THEN sa.ubicacion_id ELSE NULL END,
-        CASE WHEN v_peso_prorate > l.cantidad THEN sa.ubicacion_id ELSE NULL END,
-        ABS(v_peso_prorate - l.cantidad),
-        'PESAJE', p.id
-    FROM pesajes p
-    JOIN inventario.lote l ON l.id = p.lote_id
-    JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id AND opi.item_id = l.item_id
-    JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
-    WHERE ABS(v_peso_prorate - l.cantidad) > 0;
+    UPDATE inventario.lote l
+    SET cantidad = r.peso_nuevo
+    FROM rolls r
+    WHERE l.id = r.lote_id;
 
-    -- Update lote quantities
-    UPDATE inventario.lote
-    SET cantidad = v_peso_prorate
-    FROM mes.orden_produccion_item opi
-    WHERE opi.orden_produccion_id = p_orden_id
-      AND opi.lote_id = inventario.lote.id AND opi.item_id = inventario.lote.item_id;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
 
-    RETURN format('%s pesos actualizados para orden #%s.', v_count, p_orden_id);
+    RETURN format(
+        '%s pesos actualizados para orden #%s (%s regulares × %s kg, %s rib × %s kg).',
+        v_count, p_orden_id,
+        COALESCE(v_count_regular, 0), COALESCE(v_peso_por_regular::text, 'sin cambio'),
+        COALESCE(v_count_rib, 0),     COALESCE(v_peso_por_rib::text,     'sin cambio')
+    );
 
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS
@@ -880,8 +919,9 @@ BEGIN
         INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, usr_cre)
         SELECT p_orden_id, ld.lote_id, ld.peso_nuevo, v_usr_id
         FROM lotes_data ld
-        ON CONFLICT (orden_produccion_id, lote_id) DO UPDATE
-            SET peso_real = EXCLUDED.peso_real
+        ON CONFLICT (lote_id) DO UPDATE
+            SET peso_real = EXCLUDED.peso_real,
+                orden_produccion_id = EXCLUDED.orden_produccion_id
         RETURNING id, lote_id
     ),
     movimientos AS (
@@ -897,7 +937,7 @@ BEGIN
             CASE WHEN ld.diferencia < 0 THEN ld.ubicacion_id ELSE NULL END,
             CASE WHEN ld.diferencia > 0 THEN ld.ubicacion_id ELSE NULL END,
             ABS(ld.diferencia),
-            'PESAJE', p.id
+            'ORDEN_PRODUCCION', p_orden_id
         FROM lotes_data ld
         JOIN pesajes p ON p.lote_id = ld.lote_id
         WHERE ld.diferencia <> 0
