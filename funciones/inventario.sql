@@ -285,6 +285,18 @@ BEGIN
             INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad)
             VALUES (v_rec.item_id, 'CUADRE', p_cuadre_id, v_rec.diferencia)
             RETURNING id
+        ),
+        ins_lrd AS (
+            -- Stub lote_rollo_detalle for surplus ROLLO lotes found during cuadre.
+            -- No guia_remision_id — these rolls have no ingress document.
+            INSERT INTO inventario.lote_rollo_detalle (lote_id, flg_tenido)
+            SELECT ins_lote.id, false
+            FROM ins_lote
+            WHERE EXISTS (
+                SELECT 1 FROM item i
+                JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+                WHERE i.id = v_rec.item_id
+            )
         )
         INSERT INTO inventario.item_movimientos (
             doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,

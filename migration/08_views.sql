@@ -53,47 +53,73 @@ GRANT SELECT ON inventario.vw_stock_actual TO anon, authenticated;
 
 
 -- ── inventario.vw_lotes_rollos_stock ─────────────────────────
+-- Shows all rolls currently in stock (dyed and undyed).
+-- Batch attributes come from partida for both dyed and undyed rolls —
+-- this shows "expected" specs for undyed rolls (useful for operators).
+-- For dyed rolls the same values are also on lote_rollo_detalle.
+-- lote_rollo_detalle is joined for: guia_remision_id, flg_tenido.
 DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock;
 CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_stock AS
 SELECT
     sa.lote_id,
     sa.item_id,
-    i.codigo AS item_codigo,
-    i.nombre AS item_nombre,
+    i.codigo                        AS item_codigo,
+    i.nombre                        AS item_nombre,
     sa.ubicacion_id,
-    u.nombre AS ubicacion,
-    a.nombre AS almacen,
+    u.nombre                        AS ubicacion,
+    a.nombre                        AS almacen,
     sa.cantidad_disponible,
-    un.codigo AS unidad,
+    un.codigo                       AS unidad,
     l.estado_calidad::text,
-    (l.detalles->>'ancho')::numeric AS ancho,
-    l.cantidad AS peso,
+    l.cantidad                      AS peso,
     ird.articulo_id,
-    art.nombre AS articulo_nombre,
-    ird.flg_tenido,
+    art.nombre                      AS articulo_nombre,
+    lrd.flg_tenido,
     ird.flg_rib,
     art.fibra,
+    -- Color/tenido from partida (single source of truth for batch attributes)
+    p.color_x_cliente_id,
     vc.color_id,
     vc.color,
     vc.tono,
     vc.cliente_id,
     vc.color_hex,
     vc.color_x_cliente_hex,
-    c.id AS propietario_id,
-    c.nombre AS propietario
+    p.tenido_id,
+    tn.tenido,
+    p.ancho,
+    p.malla,
+    p.rendimiento,
+    p.flg_antipilling,
+    p.articulo_tipo_id,
+    l.propietario_id,
+    t.nombre                        AS propietario,
+    -- Ingress guia — billing anchor
+    lrd.guia_remision_id,
+    gr.serie                        AS guia_serie,
+    gr.correlativo                  AS guia_correlativo
 FROM inventario.vw_stock_actual sa
-JOIN inventario.lote l ON l.id = sa.lote_id
-JOIN item i ON i.id = sa.item_id
-JOIN item_tipo it ON it.id = i.item_tipo_id
-JOIN item_rollo_detalle ird ON ird.item_id = i.id
-JOIN articulo art ON art.id = ird.articulo_id
-JOIN unidad un ON un.id = i.unidad_id
-JOIN inventario.ubicacion u ON u.id = sa.ubicacion_id
-JOIN inventario.almacen a ON a.id = u.almacen_id
-LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
-LEFT JOIN tercero c ON c.id = l.propietario_id
-WHERE it.codigo = 'ROLLO'
-ORDER BY a.nombre, u.nombre, i.nombre;
+JOIN inventario.lote l                  ON l.id = sa.lote_id
+JOIN item i                             ON i.id = sa.item_id
+JOIN item_tipo it                       ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+JOIN item_rollo_detalle ird             ON ird.item_id = i.id
+JOIN articulo art                       ON art.id = ird.articulo_id
+JOIN unidad un                          ON un.id = i.unidad_id
+JOIN inventario.ubicacion u             ON u.id = sa.ubicacion_id
+JOIN inventario.almacen a               ON a.id = u.almacen_id
+LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = sa.lote_id
+LEFT JOIN doc.guia_remision gr          ON gr.id = lrd.guia_remision_id
+LEFT JOIN tercero t                     ON t.id = l.propietario_id
+-- Resolve partida: for dyed rolls via OPP chain; for ingress rolls via guia → partida_guia_remision
+LEFT JOIN mes.orden_produccion_paso opp ON opp.id = l.documento_id
+                                         AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+LEFT JOIN mes.orden_produccion op       ON op.id = opp.orden_produccion_id
+LEFT JOIN doc.partida_guia_remision pgr ON pgr.guia_remision_id = lrd.guia_remision_id
+                                         AND l.documento_tipo = 'GUIA_REMISION'
+LEFT JOIN doc.partida p                 ON p.id = COALESCE(op.partida_id, pgr.partida_id)
+LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = p.color_x_cliente_id
+LEFT JOIN tenido tn                     ON tn.id = p.tenido_id
+ORDER BY art.nombre, u.nombre, i.nombre;
 
 -- ── doc.vw_partidas_lista_comercial ───────────────────────────
 DROP VIEW IF EXISTS doc.vw_partidas_lista_comercial;
@@ -167,6 +193,8 @@ SELECT
     op.partida_id,
     p.numero AS partida_numero,
     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
+    -- op_codigo: human-readable run identifier within a partida, e.g. "2026-0017-2"
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' || op.op_seq::TEXT AS op_codigo,
     p.estado AS partida_estado,
     c.id AS tercero_id,
     c.nombre AS cliente,
@@ -197,7 +225,11 @@ SELECT
     END AS duracion_horas,
     op.usr_cre,
     prof.nombre || ' ' || prof.apellido AS creado_por
-FROM mes.orden_produccion op
+FROM (
+    -- Subquery computes op_seq before any outer WHERE so numbering is stable
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS op_seq
+    FROM mes.orden_produccion
+) op
 JOIN doc.partida p ON p.id = op.partida_id
 LEFT JOIN tercero c ON c.id = p.tercero_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
@@ -308,35 +340,44 @@ SELECT
     i.nombre AS item_nombre,
     un.codigo AS unidad,
     l.estado_calidad::text,
-    (l.detalles->>'ancho')::numeric AS ancho,
     l.cantidad AS peso,
     ird.articulo_id,
-    art.nombre AS articulo_nombre,
-    ird.flg_tenido,
+    art.nombre                          AS articulo_nombre,
+    art.articulo_tipo_id,
+    lrd.flg_tenido,
     ird.flg_rib,
     art.fibra,
+    -- Batch attributes from lrd (authoritative for dyed rolls — set by registrar_produccion)
+    lrd.color_x_cliente_id,
     vc.color_id,
     vc.color,
     vc.tono,
     vc.cliente_id,
     vc.color_hex,
     vc.color_x_cliente_hex,
-    c.id AS propietario_id,
-    c.nombre AS propietario,
+    lrd.tenido_id,
+    lrd.ancho,
+    lrd.malla,
+    lrd.rendimiento,
+    lrd.flg_antipilling,
+    c.id                                AS propietario_id,
+    c.nombre                            AS propietario,
     op.partida_id,
-    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
+    lrd.guia_remision_id
 FROM inventario.lote l
-JOIN mov m ON m.lote_id = l.id AND m.saldo <= 0 AND m.has_egreso
-JOIN item i ON i.id = l.item_id
-JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
-JOIN item_rollo_detalle ird ON ird.item_id = i.id
-JOIN articulo art ON art.id = ird.articulo_id
-JOIN unidad un ON un.id = i.unidad_id
-LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = (l.detalles->>'color_x_cliente_id')::smallint
-LEFT JOIN tercero c ON c.id = l.propietario_id
+JOIN mov m                              ON m.lote_id = l.id AND m.saldo <= 0 AND m.has_egreso
+JOIN item i                             ON i.id = l.item_id
+JOIN item_tipo it                       ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+JOIN item_rollo_detalle ird             ON ird.item_id = i.id
+JOIN articulo art                       ON art.id = ird.articulo_id
+JOIN unidad un                          ON un.id = i.unidad_id
+JOIN inventario.lote_rollo_detalle lrd  ON lrd.lote_id = l.id AND lrd.flg_tenido = true
+LEFT JOIN tercero c                     ON c.id = l.propietario_id
 LEFT JOIN mes.orden_produccion_paso opp ON opp.id = l.documento_id AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
-LEFT JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
-LEFT JOIN doc.partida p ON p.id = op.partida_id;
+LEFT JOIN mes.orden_produccion op       ON op.id = opp.orden_produccion_id
+LEFT JOIN doc.partida p                 ON p.id = op.partida_id
+LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_cliente_id;
 
 
 -- ── doc.partida_resumen_tenido ────────────────────────────────
@@ -439,7 +480,6 @@ SELECT
     r.estado_calidad,
     ird.articulo_id,
     art.nombre AS articulo_nombre,
-    ird.flg_tenido,
     ird.flg_rib,
     art.fibra,
     p.tenido_id,

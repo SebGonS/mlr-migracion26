@@ -196,6 +196,9 @@ REVOKE UPDATE (usr_cre, fyh_cre)                   ON inventario.ubicacion FROM 
 ----PARTIDA
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.partida FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.partida FROM anon, authenticated;
+-- Identity fields are CREADA-only via actualizar_partida; block direct UPDATE to enforce the state gate
+REVOKE UPDATE (tercero_id, color_x_cliente_id, tenido_id, articulo_tipo_id, flg_antipilling)
+    ON doc.partida FROM anon, authenticated;
 
 -----PARTIDA DETALLE
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.partida_detalle FROM anon, authenticated;

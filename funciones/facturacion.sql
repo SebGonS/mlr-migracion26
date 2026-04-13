@@ -271,47 +271,40 @@ GRANT SELECT ON doc.vw_precios_pendientes TO authenticated;
 
 
 -- ── doc.registrar_factura_cliente ─────────────────────────────
--- Records an invoice into doc.factura, links it to the dispatch
--- guias it covers (factura_guia_remision), and inserts the
--- aggregated financial charge lines (factura_detalle).
+-- Records an externally-issued client invoice.
+-- Totals (subtotal, igv, total) are always computed from detail
+-- lines — never accepted as input. The physical document is a
+-- reference; the system is the source of truth.
 --
--- Billing coverage is structural: dispatch guias present in
--- factura_guia_remision are billed. No flags stamped anywhere.
---
--- p_guia_remision_ids: dispatch guias (DESPACHO_CLIENTE) covered
---   by this invoice. Enforced unique per guia — double-billing
---   raises a constraint violation.
---
--- p_moneda: 'USD' or 'PEN' (defaults to 'USD')
---
--- p_lineas: aggregated charge lines, one per
---   (operacion × articulo_tipo × color × tenido × antipilling).
---   Each element:
---   {
---     "partida_id":          123,    -- traceability (nullable for ad-hoc)
---     "operacion_id":        1,      -- service charged
---     "es_antipilling":      false,
---     "articulo_tipo_id":    2,      -- denormalized billing dimension
---     "color_x_cliente_id":  45,     -- denormalized billing dimension
---     "tenido_id":           7,      -- null for non-dyeing ops
---     "descripcion":         "Teñido Jersey Rojo - Ref. T001-00123",
---     "cantidad":            42.5,   -- dispatched kg
---     "unidad_id":           3,
---     "precio_unitario":     3.50,
---     "igv_porcentaje":      18
---   }
-CREATE OR REPLACE FUNCTION doc.registrar_factura_cliente(
-    p_tercero_id          INT,
-    p_tipo_comprobante    CHAR(2),
-    p_serie               TEXT,
-    p_numero              INT,
-    p_fecha_emision       DATE,
-    p_fecha_vencimiento   DATE,
-    p_tipo_cambio         NUMERIC(10,4),
-    p_guia_remision_ids   BIGINT[],
-    p_lineas              JSONB,
-    p_moneda              CHAR(3) DEFAULT 'USD'
-)
+-- p_factura: single JSONB — header fields + lineas array:
+-- {
+--   "tercero_id":        1,
+--   "tipo_comprobante":  "01",
+--   "serie":             "F001",
+--   "numero":            123,
+--   "fecha_emision":     "2026-04-12",
+--   "fecha_vencimiento": "2026-05-12",   -- nullable
+--   "moneda":            "USD",           -- defaults 'USD'
+--   "tipo_cambio":       3.75,            -- nullable
+--   "observacion":       "...",           -- nullable
+--   "lineas": [
+--     {
+--       "guia_remision_id":   456,        -- dispatch guia (nullable for ad-hoc)
+--       "partida_id":         123,        -- traceability (nullable)
+--       "operacion_id":       1,          -- service billed (nullable for ad-hoc)
+--       "es_antipilling":     false,
+--       "articulo_tipo_id":   2,          -- billing dimensions (nullable for ad-hoc)
+--       "color_x_cliente_id": 45,
+--       "tenido_id":          7,          -- null for non-dyeing ops
+--       "descripcion":        "Teñido Jersey Rojo - Ref. T001-00123",
+--       "cantidad":           42.5,
+--       "unidad_id":          3,
+--       "precio_unitario":    3.50,
+--       "igv_porcentaje":     18          -- defaults 18
+--     }
+--   ]
+-- }
+CREATE OR REPLACE FUNCTION doc.registrar_factura_cliente(p_factura JSONB)
 RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER

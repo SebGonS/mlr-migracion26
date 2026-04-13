@@ -150,21 +150,21 @@ $$;
 
 -- ── Auto-gen: item (rollo) ────────────────────────────────────────────────────
 -- Fires AFTER INSERT on item_rollo_detalle, updates item.codigo when not yet set.
--- Format: R-{articulo.codigo}-{fibra}-{C|T}  (R-RB-... for rib variants)
+-- Format: R-{articulo.codigo}-{fibra}  (R-RB-... for rib variants)
+-- One item per (articulo, fibra, rib) — no C/T suffix. Processing state (tenido/crudo)
+-- lives on lote_rollo_detalle, not the item catalog.
 CREATE OR REPLACE FUNCTION public.fn_trg_gen_codigo_item_rollo()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
     v_articulo_codigo TEXT;
     v_fibra           TEXT;
-    v_estado          TEXT;
     v_rib             TEXT;
 BEGIN
     SELECT codigo INTO v_articulo_codigo FROM articulo WHERE id = NEW.articulo_id;
     SELECT COALESCE(fibra::text, '1') INTO v_fibra FROM articulo WHERE id = NEW.articulo_id;
-    v_estado := CASE WHEN NEW.flg_tenido THEN 'T' ELSE 'C' END;
     v_rib    := CASE WHEN COALESCE(NEW.flg_rib, false) THEN 'RB-' ELSE '' END;
     UPDATE item
-       SET codigo = UPPER('R-' || v_rib || v_articulo_codigo || '-' || v_fibra || '-' || v_estado)
+       SET codigo = UPPER('R-' || v_rib || v_articulo_codigo || '-' || v_fibra)
      WHERE id = NEW.item_id AND codigo IS NULL;
     RETURN NEW;
 END;

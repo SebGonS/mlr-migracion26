@@ -23,7 +23,13 @@ FROM (
         'orden_tipo',                op.tipo,
         'partida_id',                op.partida_id,
         'partida_codigo',            EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
+        'op_codigo',                 EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' ||
+                                         (SELECT numbered.rn::TEXT
+                                          FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS rn
+                                                FROM mes.orden_produccion) numbered
+                                          WHERE numbered.id = op.id),
         'cliente',                   c.nombre,
+        'articulo_tipo_id',          p.articulo_tipo_id,
         'color',                     vc.color,
         'color_hex',                 vc.color_hex,
         'tono',                      vc.tono,
@@ -73,6 +79,12 @@ FROM (
         'operacion',          o.nombre,
         'operacion_codigo',   o.codigo,
         'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
+        'op_codigo',          EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' ||
+                                  (SELECT numbered.rn::TEXT
+                                   FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS rn
+                                         FROM mes.orden_produccion) numbered
+                                   WHERE numbered.id = op.id),
+        'articulo_tipo_id',   p.articulo_tipo_id,
         'cliente',            c.nombre,
         'color',              vc.color,
         'color_hex',          vc.color_hex,
@@ -115,6 +127,12 @@ FROM (
             'operacion',          o.nombre,
             'operacion_codigo',   o.codigo,
             'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
+            'op_codigo',          EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' ||
+                                      (SELECT numbered.rn::TEXT
+                                       FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS rn
+                                             FROM mes.orden_produccion) numbered
+                                       WHERE numbered.id = op.id),
+            'articulo_tipo_id',   p.articulo_tipo_id,
             'cliente',            c.nombre,
             'color',              vc.color,
             'color_hex',          vc.color_hex,
@@ -692,8 +710,16 @@ $function$;
 
 -- ═══════════════════════════════════════════════════════════════
 -- ACTUALIZAR PESOS DE ORDEN PRODUCCION ITEMS
+-- Correction function for post-assignment weight adjustments.
+-- Distributes totals separately for rib vs regular rolls.
 -- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION mes.actualizar_pesos_orden_items(p_orden_id BIGINT, p_peso numeric)
+DROP FUNCTION IF EXISTS mes.actualizar_pesos_orden_items(BIGINT, NUMERIC);
+
+CREATE OR REPLACE FUNCTION mes.actualizar_pesos_orden_items(
+    p_orden_id      BIGINT,
+    p_peso_regular  NUMERIC,        -- total kg for regular rolls; NULL = skip
+    p_peso_rib      NUMERIC         -- total kg for rib rolls;     NULL = skip
+)
 RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1126,38 +1152,45 @@ FOR UPDATE;
 
     GET DIAGNOSTICS v_consumed = ROW_COUNT;
 
-    -- 4b. Create output lotes + ingress movements
-    WITH input_items AS (
-        SELECT
-            (i->>'item_id')::INT AS item_id,
-            (i->>'cantidad')::NUMERIC AS cantidad
-        FROM jsonb_array_elements(p_output) i
-    ),
-    insert_lotes AS (
-        INSERT INTO inventario.lote(
-            item_id, documento_tipo, documento_id,
-            cantidad, detalles, propietario_id
+    -- 4b. Create output lotes (same item_id as input), PROD_ING movements,
+    --     and lote_rollo_detalle carrying guia_remision_id forward.
+    FOR v_elem IN SELECT value FROM jsonb_array_elements(p_output)
+    LOOP
+        v_input_lote_id := (v_elem->>'input_lote_id')::INT;
+        v_peso_salida   := (v_elem->>'peso_salida')::NUMERIC;
+
+        -- Inherit item_id, propietario, and billing anchor from input lote
+        SELECT l.item_id, l.propietario_id, lrd.guia_remision_id
+        INTO v_out_item_id, v_out_propietario, v_guia_remision_id
+        FROM inventario.lote l
+        JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+        WHERE l.id = v_input_lote_id;
+
+        INSERT INTO inventario.lote(item_id, documento_tipo, documento_id, cantidad, propietario_id)
+        VALUES (v_out_item_id, 'ORDEN_PRODUCCION_PASO', p_orden_paso_id, v_peso_salida, v_out_propietario)
+        RETURNING id INTO v_new_lote_id;
+
+        INSERT INTO inventario.item_movimientos(
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            destino_ubicacion_id, cantidad, documento_tipo, documento_id
         )
-        SELECT item_id, 'ORDEN_PRODUCCION_PASO', p_orden_paso_id,
-               cantidad, v_detalles, v_propietario_id
-        FROM input_items
-RETURNING id, item_id, cantidad
-)
-    INSERT INTO inventario.item_movimientos(
-        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-        destino_ubicacion_id, cantidad,
-        documento_tipo, documento_id
-    )
-    SELECT
-    v_doc_movimiento_id,
-    item_id,
-    id,                -- ← this is the lote_id
-    v_ing_tipo_id,
-    p_ubicacion_id,
-    cantidad,
-    'ORDEN_PRODUCCION_PASO',
-    p_orden_paso_id
-FROM insert_lotes;
+        VALUES (v_doc_movimiento_id, v_out_item_id, v_new_lote_id, v_ing_tipo_id,
+                p_ubicacion_id, v_peso_salida, 'ORDEN_PRODUCCION_PASO', p_orden_paso_id);
+
+        -- Batch classification: carry ingress guia forward; populate all roll identity attributes
+        INSERT INTO inventario.lote_rollo_detalle(
+            lote_id, guia_remision_id,
+            ancho, malla, rendimiento,
+            color_x_cliente_id, tenido_id,
+            flg_tenido, flg_antipilling
+        )
+        VALUES (
+            v_new_lote_id, v_guia_remision_id,
+            v_partida_ancho, v_partida_malla, v_partida_rendimiento,
+            v_partida_color_x_cliente, v_partida_tenido_id,
+            true, v_partida_flg_antipilling
+        );
+    END LOOP;
 
     -- 5. Notifications
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)

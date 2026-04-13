@@ -157,7 +157,6 @@ FOR EACH ROW EXECUTE FUNCTION public.fn_trg_gen_codigo_item_insumo();
 CREATE TABLE item_rollo_detalle (
     item_id INT PRIMARY KEY REFERENCES item(id),
     articulo_id INT NOT NULL REFERENCES articulo(id),
-    flg_tenido boolean NOT NULL DEFAULT false,
     flg_rib boolean NOT NULL DEFAULT FALSE,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),

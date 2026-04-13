@@ -487,8 +487,8 @@ JOIN articulo  a ON a.id = p.articulo_id
 JOIN item_tipo it ON it.codigo='ROLLO'
 JOIN unidad u ON u.codigo = 'kg'
 GROUP BY
-UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C'),
-'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo',
+UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1')),
+'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s)',
 u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1)
 ),
 ins_item AS (
@@ -511,12 +511,10 @@ ins_item AS (
 INSERT INTO item_rollo_detalle (
     item_id,
     articulo_id,
-    flg_tenido,
     fyh_cre)
 SELECT
     i.id,
     b.articulo_id,
-    false,
     NOW()
 FROM ins_item i
 JOIN base b USING (codigo);
@@ -524,8 +522,8 @@ JOIN base b USING (codigo);
 -----MIGRAR ROLLOS RIB CRUDOS
 
 WITH base AS (
-   SELECT  UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C') codigo,
-'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo' nombre,
+   SELECT  UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1')) codigo,
+'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s)' nombre,
 u.id unidad_id,
 it.id item_tipo_id,
 p.articulo_id,
@@ -536,8 +534,8 @@ JOIN item_tipo it ON it.codigo='ROLLO'
 JOIN unidad u ON u.codigo = 'kg'
 WHERE p.rib > 0
 GROUP BY
-UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C'),
-'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo',
+UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1')),
+'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s)',
 u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1)
 ),
 ins_item AS (
@@ -570,102 +568,6 @@ SELECT
 FROM ins_item i
 JOIN base b USING (codigo);
 
---------------------INSERTAR ITEM ROLLO teñido
-WITH base AS (
-   SELECT  UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-T') codigo,
-'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Teñido' nombre,
-u.id unidad_id,
-it.id item_tipo_id,
-p.articulo_id,
-COALESCE(a.fibra, 1) fibra
-FROM partida p
-JOIN articulo  a ON a.id = p.articulo_id
-JOIN item_tipo it ON it.codigo='ROLLO'
-JOIN unidad u ON u.codigo = 'kg'
-GROUP BY
-UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-T'),
-'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Teñido',
-u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1)
-),
-ins_item AS (
-    INSERT INTO item (
-        codigo,
-        nombre,
-        item_tipo_id,
-        unidad_id,
-        fyh_cre
-    )
-    SELECT
-        b.codigo,
-        b.nombre,
-        b.item_tipo_id,
-        b.unidad_id,
-        NOW()
-    FROM base b
-    RETURNING id, codigo
-)
-INSERT INTO item_rollo_detalle (
-    item_id,
-    articulo_id,
-    flg_tenido,
-    fyh_cre)
-SELECT
-    i.id,
-    b.articulo_id,
-    true,
-    NOW()
-FROM ins_item i
-JOIN base b USING (codigo);
----- RIB TEÑIDO
-
-WITH base AS (
-   SELECT  UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-T') codigo,
-'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Teñido' nombre,
-u.id unidad_id,
-it.id item_tipo_id,
-p.articulo_id,
-COALESCE(a.fibra, 1) fibra
-FROM partida p
-JOIN articulo  a ON a.id = p.articulo_id
-JOIN item_tipo it ON it.codigo='ROLLO'
-JOIN unidad u ON u.codigo = 'kg'
-WHERE p.rib > 0
-GROUP BY
-UPPER('R-RB-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-T'),
-'Rollo Rib ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Teñido',
-u.id, it.id, p.articulo_id, COALESCE(a.fibra, 1)
-),
-ins_item AS (
-    INSERT INTO item (
-        codigo,
-        nombre,
-        item_tipo_id,
-        unidad_id,
-        fyh_cre
-    )
-    SELECT
-        b.codigo,
-        b.nombre,
-        b.item_tipo_id,
-        b.unidad_id,
-        NOW()
-    FROM base b
-    RETURNING id, codigo
-)
-INSERT INTO item_rollo_detalle (
-    item_id,
-    articulo_id,
-    flg_rib,
-    flg_tenido,
-    fyh_cre)
-SELECT
-    i.id,
-    b.articulo_id,
-    true,
-    true,
-    NOW()
-FROM ins_item i
-JOIN base b USING (codigo);
 
 
 -- ============================================================================
@@ -931,7 +833,7 @@ RETURNING id
         p.fyh_cre_tz
     FROM base p
     JOIN item_rollo_detalle ird
-    ON ird.articulo_id=p.articulo_id AND ird.flg_tenido=true AND (ird.flg_rib=false OR (ird.flg_rib AND p.rib>0));
+    ON ird.articulo_id=p.articulo_id AND (ird.flg_rib=false OR (ird.flg_rib AND p.rib>0));
 SELECT setval(
   pg_get_serial_sequence('doc.partida', 'id'),
   (SELECT MAX(id) FROM doc.partida)
@@ -2275,7 +2177,7 @@ WITH roll_source AS (
     FROM public.partida p
     JOIN public.cliente c ON c.id = p.cliente_id
     JOIN item_rollo_detalle ird
-        ON ird.articulo_id = p.articulo_id AND ird.flg_tenido = false AND ird.flg_rib = false
+        ON ird.articulo_id = p.articulo_id AND ird.flg_rib = false
     JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
     CROSS JOIN generate_series(1, GREATEST(p.rollos, 0)) gs(n)
     WHERE p.rollos > 0 AND p.peso_rollos > 0
@@ -2295,7 +2197,7 @@ WITH roll_source AS (
     FROM public.partida p
     JOIN public.cliente c ON c.id = p.cliente_id
     JOIN item_rollo_detalle ird
-        ON ird.articulo_id = p.articulo_id AND ird.flg_tenido = false AND ird.flg_rib = true
+        ON ird.articulo_id = p.articulo_id AND ird.flg_rib = true
     JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
     CROSS JOIN generate_series(1, GREATEST(p.rib, 0)) gs(n)
     WHERE p.rib > 0 AND p.peso_rib > 0
@@ -2320,7 +2222,7 @@ lote_with_rn AS (
         ird.flg_rib,
         ROW_NUMBER() OVER (PARTITION BY li.partida_id, ird.flg_rib ORDER BY li.lote_id) AS rn
     FROM lote_insert li
-    JOIN item_rollo_detalle ird ON ird.item_id = li.item_id AND ird.flg_tenido = false
+    JOIN item_rollo_detalle ird ON ird.item_id = li.item_id
 ),
 pt_ranges AS (
     -- Roll ranges per pt row (= per op), using pt.rollos directly.
@@ -2602,7 +2504,7 @@ dyed_source AS (
         l.cantidad,
         l.propietario_id,
         l.usr_cre,
-        ird_dyed.item_id                                                           AS dyed_item_id,
+        l.item_id                                                                  AS dyed_item_id,
         lpp.paso_id,
         COALESCE(p.fecha_entrega::TIMESTAMP + INTERVAL '5 hours', opp.fyh_fin, l.fyh_cre) AS fyh_out
     FROM inventario.lote l
@@ -2612,10 +2514,6 @@ dyed_source AS (
     -- Only the last paso for this partida
     JOIN last_paso_per_partida           lpp  ON lpp.partida_id                   = l.documento_id
                                              AND lpp.paso_id                      = opp.id
-    JOIN item_rollo_detalle              ird_raw  ON ird_raw.item_id              = l.item_id
-    JOIN item_rollo_detalle              ird_dyed ON ird_dyed.articulo_id         = ird_raw.articulo_id
-                                                 AND ird_dyed.flg_tenido = true
-                                                 AND ird_dyed.flg_rib    = ird_raw.flg_rib
     JOIN public.partida p ON p.id = l.documento_id
     WHERE l.documento_tipo = 'PARTIDA'
 ),
