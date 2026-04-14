@@ -372,11 +372,13 @@ FROM tercero t
 WHERE t.cliente_id = cxc.cliente_id
    OR t.cliente_id2 = cxc.cliente_id;
 
+END;
 
+BEGIN;
 -- ============================================================================
 -- 1. MASTER DATA MIGRATION - Public Schema
 -- ============================================================================
-TRUNCATE item_insumo_detalle, item_rollo_detalle, item CASCADE;
+-- TRUNCATE item_insumo_detalle, item_rollo_detalle, item CASCADE;
 
 -- ============================================================================
 -- MIGRAR INSUMOS
@@ -465,7 +467,7 @@ UPDATE item_insumo_detalle SET factor_stock = 1.0/6.0 WHERE item_id = 13;
 SELECT setval(pg_get_serial_sequence('item', 'id'), (SELECT MAX(id) FROM item));
 
 -- ============================================================================
--- CREAR ROLLOS CRUDOS
+-- CREAR ROLLOS 
 -- ============================================================================
 -- Preview (SELECT only, not inserted):
 -- SELECT UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C') codigo,
@@ -476,8 +478,8 @@ SELECT setval(pg_get_serial_sequence('item', 'id'), (SELECT MAX(id) FROM item));
 -- GROUP BY 1,2,3,4,5,6;
 
 WITH base AS (
-   SELECT  UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1') || '-C') codigo,
-'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s) Crudo' nombre,
+   SELECT  UPPER('R-' || a.codigo || '-' || COALESCE(a.fibra::text, '1')) codigo,
+'Rollo ' || a.nombre || ' ' || COALESCE(a.fibra, 1) || ' fibra(s)' nombre,
 u.id unidad_id,
 it.id item_tipo_id,
 p.articulo_id,
@@ -785,6 +787,7 @@ LEFT JOIN estado e ON ue.estado_id = e.id)
     tercero_id,
     color_x_cliente_id,
     tenido_id,
+    articulo_tipo_id,
     malla,
     rendimiento,
     ancho,
@@ -804,6 +807,7 @@ SELECT
     (SELECT t.id FROM tercero t WHERE t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id),  -- bridge: covers both plain X and MLR/X aliases
     p.color_x_cliente_id,
     p.tenido_id,
+    (SELECT a.articulo_tipo_id FROM articulo a WHERE a.id = p.articulo_id),
     p.malla,
     p.rendimiento,
     p.ancho,
@@ -852,7 +856,7 @@ UPDATE doc.partida SET flg_antipilling=(CASE p.adicional_id WHEN 1 THEN true ELS
 
 -- Replaced by combined 1-pxr → 1-orden → 1-paso CTE below (after tipo_receta setup).
 -- TRUNCATE here so re-runs are safe and the combined insert starts clean.
-TRUNCATE mes.orden_produccion CASCADE;
+-- TRUNCATE mes.orden_produccion CASCADE;
 --===========================================
 --Migrar pasos
 --===========================================
@@ -1479,7 +1483,7 @@ SELECT setval(
 --
 -- New shape (doc schema):
 --   factura_proveedor → split out from compra; letras now hang off factura, not compra
---   compra            → lightweight header; factura_proveedor_id nullable (invoice may arrive later)
+--   compra            → lightweight header; linked to facturas via doc.compra_factura_proveedor junction
 --   compra_detalle    → line items; insumo_id resolved → item_id directly (item.id = insumo.id)
 --   compra_guia_remision → junction written by the guia block below; no action needed here
 --   letra             → re-linked from compra → factura_proveedor chain
@@ -1488,7 +1492,7 @@ SELECT setval(
 -- Step 1: doc.factura_proveedor
 -- Sourced from public.compra rows that have a parseable 'SERIE-CORRELATIVO' factura.
 -- subtotal/igv breakdown is not available in legacy data; total carries the full amount.
--- Rows with missing or malformed factura are skipped (they produce a compra with NULL factura_proveedor_id).
+-- Rows with missing or malformed factura are skipped (no compra_factura_proveedor row created for them).
 -- Run the orphan check query below before go-live to assess the gap.
 INSERT INTO doc.factura_proveedor (
     tercero_id,
@@ -1536,11 +1540,9 @@ ORDER BY c.proveedor_id, SPLIT_PART(c.factura, '-', 1), NULLIF(regexp_replace(SP
 
 
 -- Step 2: doc.compra  (OVERRIDING SYSTEM VALUE preserves public.compra.id for FK compatibility)
--- factura_proveedor_id is NULL for compras that had no factura or an unparseable one.
 INSERT INTO doc.compra (
     id,
     tercero_id,
-    factura_proveedor_id,
     fecha,
     usr_cre,
     fyh_cre
@@ -1549,16 +1551,26 @@ OVERRIDING SYSTEM VALUE
 SELECT
     c.id,
     (SELECT id FROM tercero WHERE proveedor_id = c.proveedor_id),
-    fp.id,
     COALESCE(c.fecha_remision, c.fyh_cre_tz::DATE) AS fecha,
     CASE WHEN c.usr_cre NOT IN ('authenticated', 'anon', 'postgres') THEN c.usr_cre::INT ELSE NULL END,
     c.fyh_cre_tz
 FROM public.compra c
-LEFT JOIN doc.factura_proveedor fp
+WHERE c.proveedor_id IS NOT NULL;
+
+-- Step 2b: doc.compra_factura_proveedor — link each compra to its factura (where parseable)
+INSERT INTO doc.compra_factura_proveedor (compra_id, factura_proveedor_id, fyh_cre)
+SELECT
+    c.id,
+    fp.id,
+    c.fyh_cre_tz
+FROM public.compra c
+JOIN doc.factura_proveedor fp
     ON  fp.tercero_id = (SELECT id FROM tercero WHERE proveedor_id = c.proveedor_id)
     AND fp.serie      = SPLIT_PART(c.factura, '-', 1)
     AND fp.numero     = NULLIF(regexp_replace(SPLIT_PART(c.factura, '-', 2), '[^0-9].*$', ''), '')::INT
-WHERE c.proveedor_id IS NOT NULL;
+WHERE c.proveedor_id IS NOT NULL
+  AND c.factura IS NOT NULL
+ON CONFLICT DO NOTHING;
 
 SELECT setval(
     pg_get_serial_sequence('doc.compra', 'id'),
@@ -1593,45 +1605,59 @@ WHERE cxi.compra_id IN (SELECT id FROM doc.compra);
 -- WHERE it.id IS NULL;
 
 
--- Step 4: doc.letra  (from public.letra_compra)
--- Old letras were tied to compra_id; new letras require factura_proveedor_id.
--- Migration path: letra_compra.compra_id → doc.compra.factura_proveedor_id.
--- Letras on compras with no linked factura_proveedor cannot be migrated automatically;
--- run the unmigrated check below and handle manually if the count is significant.
--- Enum mapping: 'emitida' → 'pendiente'  (closest semantic match in new enum)
---               'pagada'  → 'pagada'
-INSERT INTO doc.letra (
-    factura_proveedor_id,
-    numero,
-    monto,
-    fecha_giro,
-    fecha_vencimiento,
-    estado,
-    fecha_pago,
-    observacion,
-    fyh_cre
-)
-SELECT
-    dc.factura_proveedor_id,
-    lc.numero_letra,
-    lc.monto_usd,
-    lc.fecha_emision         AS fecha_giro,
-    lc.fecha_vencimiento,
-    CASE lc.estado
-        WHEN 'emitida'    THEN 'emitida'::letra_estado_enum
-        WHEN 'pagada'     THEN 'pagada'::letra_estado_enum
-        WHEN 'vencida'    THEN 'vencida'::letra_estado_enum
-        WHEN 'protestada' THEN 'protestada'::letra_estado_enum
-        WHEN 'anulada'    THEN 'anulada'::letra_estado_enum
-        ELSE                   'emitida'::letra_estado_enum
-    END,
-    lc.fecha_pago,
-    lc.observaciones,
-    COALESCE(lc.fyh_cre_tz, lc.fyh_cre::TIMESTAMPTZ)
-FROM public.letra_compra lc
-JOIN doc.compra dc ON dc.id = lc.compra_id
-WHERE dc.factura_proveedor_id IS NOT NULL;
+-- Step 4: doc.letra + doc.letra_factura  (from public.letra_compra)
+-- New model: letra is a standalone payment instrument (tercero_id from proveedor).
+-- Clearing to factura_proveedor is done via letra_factura junction.
+-- Migration path: letra_compra → letra (header) + letra_factura (clearing line).
+-- Letras on compras with no linked factura_proveedor get a letra row but no clearing line;
+-- run the unmigrated check below to quantify.
+-- Insert letras header rows, tag each with its legacy lc.id via observacion temp column
+-- then insert clearing rows by joining back on the legacy id stored in a temp table.
+CREATE TEMP TABLE _letra_map (lc_id INT, letra_id BIGINT, factura_proveedor_id BIGINT, monto NUMERIC);
 
+WITH src AS (
+    SELECT
+        lc.id                    AS lc_id,
+        dc.tercero_id,
+        lc.numero_letra,
+        lc.monto_usd,
+        lc.fecha_emision         AS fecha_giro,
+        lc.fecha_vencimiento,
+        CASE lc.estado
+            WHEN 'emitida'    THEN 'emitida'::letra_estado_enum
+            WHEN 'pagada'     THEN 'pagada'::letra_estado_enum
+            WHEN 'vencida'    THEN 'vencida'::letra_estado_enum
+            WHEN 'protestada' THEN 'protestada'::letra_estado_enum
+            WHEN 'anulada'    THEN 'anulada'::letra_estado_enum
+            ELSE                   'emitida'::letra_estado_enum
+        END                      AS estado,
+        lc.fecha_pago,
+        lc.observaciones,
+        COALESCE(lc.fyh_cre_tz, lc.fyh_cre::TIMESTAMPTZ) AS fyh_cre,
+        dc.factura_proveedor_id
+    FROM public.letra_compra lc
+    JOIN doc.compra dc ON dc.id = lc.compra_id
+),
+ins AS (
+    INSERT INTO doc.letra (tercero_id, numero, monto, fecha_giro, fecha_vencimiento,
+                           estado, fecha_pago, observacion, fyh_cre)
+    SELECT tercero_id, numero_letra, monto_usd, fecha_giro, fecha_vencimiento,
+           estado, fecha_pago, observaciones, fyh_cre
+    FROM src
+    RETURNING id
+)
+INSERT INTO _letra_map (lc_id, letra_id, factura_proveedor_id, monto)
+SELECT s.lc_id, i.id, s.factura_proveedor_id, s.monto_usd
+FROM (SELECT *, ROW_NUMBER() OVER () AS rn FROM src) s
+JOIN (SELECT id, ROW_NUMBER() OVER () AS rn FROM ins) i USING (rn);
+
+-- Clearing: one letra_factura row per letra (1:1 in legacy — full amount applied)
+INSERT INTO doc.letra_factura (letra_id, factura_proveedor_id, monto_aplicado, fyh_cre)
+SELECT letra_id, factura_proveedor_id, monto, NOW()
+FROM _letra_map
+WHERE factura_proveedor_id IS NOT NULL;
+
+DROP TABLE _letra_map;
 
 -- Unmigrated letras: compras that had letras but no linked factura
 -- SELECT lc.id, lc.compra_id, lc.numero_letra, lc.monto_usd
@@ -2279,6 +2305,23 @@ oppi_insert AS ( -- Step 3: link opi → orden_produccion_paso_item
         ON opp.orden_produccion_id = opi.orden_produccion_id AND opp.secuencia = 1
     JOIN lote_with_rn li ON li.lote_id = opi.lote_id
     RETURNING orden_produccion_paso_id, orden_produccion_item_id
+),
+lrd_insert AS ( -- Step 1b: lote_rollo_detalle for each raw roll lote
+    -- Raw ingress: no spec fields (ancho/malla/rendimiento/color set at dyeing step)
+    -- guia_remision_id: NULL for now — will be wired when stub guias are created (point 3)
+    INSERT INTO inventario.lote_rollo_detalle (
+        lote_id,
+        flg_tenido, flg_antipilling,
+        fyh_cre
+    )
+    SELECT
+        li.lote_id,
+        false,
+        false,
+        li.fyh_cre
+    FROM lote_insert li
+    ON CONFLICT (lote_id) DO NOTHING
+    RETURNING lote_id
 )
 INSERT INTO inventario.item_movimientos (
     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
@@ -2450,7 +2493,8 @@ WITH ghost_source AS (
     LEFT JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_item_id = opi.id
     JOIN public.partida p ON p.id = l.documento_id
     WHERE l.documento_tipo = 'PARTIDA'
-      AND oppi.id IS NULL  -- no completed paso assignment (covers no-opi AND opi-without-oppi)
+      AND oppi.id IS NULL          -- no completed paso assignment (covers no-opi AND opi-without-oppi)
+      AND p.fecha_entrega IS NOT NULL  -- only finished partidas: in-progress rolls stay in stock
 ),
 ghost_posting AS (
     SELECT partida_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
@@ -2482,7 +2526,7 @@ JOIN ghost_posting gp ON gp.partida_id = gs.partida_id;
 -- Step 7 — PROD_ING: creates a new dyed roll lote (same item_id as raw lote)
 --           linked to the last paso, ingressed at fecha_entrega.
 --           Processing state (color, tenido, flg_tenido=true) is set on
---           lote_rollo_detalle by migration/18, not here.
+--           lote_rollo_detalle populated at end of this file, not here.
 -- Step 8 — SERV_EGR: dispatches the dyed lote back to the client.
 --           Net stock effect = 0.
 -- "Last paso" = the paso belonging to the op with the latest fyh_fin for
@@ -2661,107 +2705,135 @@ WHERE duracion IS NOT NULL
 --     DROP COLUMN IF EXISTS cliente_id2,
 --     DROP COLUMN IF EXISTS proveedor_id;
 
--- ============================================================================
--- IAM: permisos and rol_permiso seed
--- Idempotent — ON CONFLICT DO NOTHING on both tables.
--- Covers every permission code referenced in RLS policies and function guards.
--- ============================================================================
+-- ── Step: inventario.lote_rollo_detalle population ────────────
+-- Populates lote_rollo_detalle for remaining ROLLO lote origin types.
+-- PARTIDA lotes are handled inline in the roll lote CTE above (lrd_insert).
+-- Three remaining origin types:
+--   GUIA_REMISION  → new-flow ingress rolls: billing anchor only, spec fields NULL
+--   ORDEN_PRODUCCION_PASO → dyed rolls: full identity from doc.partida
+--   CUADRE         → surplus rolls from stock count: no guia, no spec fields
+INSERT INTO inventario.lote_rollo_detalle (
+    lote_id,
+    guia_remision_id,
+    ancho,
+    malla,
+    rendimiento,
+    color_x_cliente_id,
+    tenido_id,
+    flg_tenido,
+    flg_antipilling,
+    fyh_cre
+)
+-- New-flow ingress rolls (GUIA_REMISION) — guia IS the documento_id; spec fields not yet set
+SELECT
+    l.id,
+    l.documento_id,
+    NULL, NULL, NULL, NULL, NULL,
+    false,
+    false,
+    l.fyh_cre
+FROM inventario.lote l
+JOIN item i       ON i.id = l.item_id
+JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+WHERE l.documento_tipo = 'GUIA_REMISION'
+  AND l.flg_elm = false
 
-INSERT INTO iam.permiso (code, descripcion) VALUES
-    ('comercial.ver',        'Ver partidas, guías, compras y documentos comerciales'),
-    ('comercial.crear',      'Crear partidas, guías de remisión y compras'),
-    ('comercial.editar',     'Editar documentos comerciales, registrar facturas y letras'),
-    ('inventario.ver',       'Ver stock, lotes, movimientos e ítems'),
-    ('inventario.crear',     'Crear ítems e ingresar stock'),
-    ('inventario.editar',    'Ajustar stock, actualizar pesos y valoraciones'),
-    ('produccion.ver',       'Ver órdenes, pasos, programación y lavados'),
-    ('produccion.crear',     'Crear órdenes de producción'),
-    ('produccion.editar',    'Editar pasos y estructura de órdenes'),
-    ('produccion.ejecutar',  'Iniciar y finalizar pasos y lavados, registrar consumos'),
-    ('produccion.programar', 'Guardar y modificar la programación de máquinas'),
-    ('calidad.ver',          'Ver inspecciones y resultados de calidad'),
-    ('calidad.crear',        'Registrar inspecciones de calidad'),
-    ('calidad.editar',       'Editar inspecciones existentes'),
-    ('configuracion.ver',    'Ver usuarios, roles y configuración del sistema'),
-    ('configuracion.admin',  'Gestionar usuarios, roles, máquinas, operaciones y plantillas')
-ON CONFLICT (code) DO NOTHING;
+UNION ALL
 
--- rol_permiso: resolved by code so IDs don't need to be hardcoded
-INSERT INTO iam.rol_permiso (rol_id, permiso_id)
-SELECT r.id, p.id
-FROM (VALUES
-    -- ── admin: todo ──────────────────────────────────────────
-    ('admin', 'comercial.ver'),
-    ('admin', 'comercial.crear'),
-    ('admin', 'comercial.editar'),
-    ('admin', 'inventario.ver'),
-    ('admin', 'inventario.crear'),
-    ('admin', 'inventario.editar'),
-    ('admin', 'produccion.ver'),
-    ('admin', 'produccion.crear'),
-    ('admin', 'produccion.editar'),
-    ('admin', 'produccion.ejecutar'),
-    ('admin', 'produccion.programar'),
-    ('admin', 'calidad.ver'),
-    ('admin', 'calidad.crear'),
-    ('admin', 'calidad.editar'),
-    ('admin', 'configuracion.ver'),
-    ('admin', 'configuracion.admin'),
-    -- ── jefe_planta: full operations, no user/config mgmt ────
-    ('jefe_planta', 'comercial.ver'),
-    ('jefe_planta', 'inventario.ver'),
-    ('jefe_planta', 'inventario.crear'),
-    ('jefe_planta', 'inventario.editar'),
-    ('jefe_planta', 'produccion.ver'),
-    ('jefe_planta', 'produccion.crear'),
-    ('jefe_planta', 'produccion.editar'),
-    ('jefe_planta', 'produccion.ejecutar'),
-    ('jefe_planta', 'produccion.programar'),
-    ('jefe_planta', 'calidad.ver'),
-    ('jefe_planta', 'calidad.crear'),
-    ('jefe_planta', 'calidad.editar'),
-    ('jefe_planta', 'configuracion.ver'),
-    -- ── supervisor_produccion: plan + execute, read-only elsewhere
-    ('supervisor_produccion', 'comercial.ver'),
-    ('supervisor_produccion', 'inventario.ver'),
-    ('supervisor_produccion', 'produccion.ver'),
-    ('supervisor_produccion', 'produccion.crear'),
-    ('supervisor_produccion', 'produccion.editar'),
-    ('supervisor_produccion', 'produccion.ejecutar'),
-    ('supervisor_produccion', 'produccion.programar'),
-    ('supervisor_produccion', 'calidad.ver'),
-    -- ── operador_produccion: execute only ────────────────────
-    ('operador_produccion', 'produccion.ver'),
-    ('operador_produccion', 'produccion.ejecutar'),
-    ('operador_produccion', 'inventario.ver'),
-    ('operador_produccion', 'calidad.ver'),
-    -- ── calidad ──────────────────────────────────────────────
-    ('calidad', 'calidad.ver'),
-    ('calidad', 'calidad.crear'),
-    ('calidad', 'calidad.editar'),
-    ('calidad', 'produccion.ver'),
-    ('calidad', 'inventario.ver'),
-    -- ── inventario ───────────────────────────────────────────
-    ('inventario', 'inventario.ver'),
-    ('inventario', 'inventario.crear'),
-    ('inventario', 'inventario.editar'),
-    ('inventario', 'produccion.ver'),
-    ('inventario', 'comercial.ver'),
-    -- ── compras ──────────────────────────────────────────────
-    ('compras', 'comercial.ver'),
-    ('compras', 'comercial.crear'),
-    ('compras', 'comercial.editar'),
-    ('compras', 'inventario.ver'),
-    ('compras', 'inventario.crear'),
-    -- ── sistema: automated processes, broad read + execute ───
-    ('sistema', 'produccion.ver'),
-    ('sistema', 'produccion.ejecutar'),
-    ('sistema', 'inventario.ver'),
-    ('sistema', 'inventario.editar'),
-    ('sistema', 'calidad.ver')
-) AS mapping(rol_code, permiso_code)
-JOIN iam.rol     r ON r.code = mapping.rol_code
-JOIN iam.permiso p ON p.code = mapping.permiso_code
-ON CONFLICT (rol_id, permiso_id) DO NOTHING;
+-- Dyed rolls — full roll identity from partida; guia traced through production chain
+SELECT
+    l.id,
+    gr.id,
+    p.ancho,
+    p.malla,
+    p.rendimiento,
+    p.color_x_cliente_id,
+    p.tenido_id,
+    true,
+    p.flg_antipilling,
+    l.fyh_cre
+FROM inventario.lote l
+JOIN item i       ON i.id = l.item_id
+JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+JOIN mes.orden_produccion_paso opp  ON opp.id = l.documento_id
+JOIN mes.orden_produccion op        ON op.id = opp.orden_produccion_id
+JOIN doc.partida p                  ON p.id = op.partida_id
+JOIN mes.orden_produccion_item opi  ON opi.orden_produccion_id = op.id
+JOIN inventario.lote l_orig         ON l_orig.id = opi.lote_id
+JOIN doc.guia_remision_detalle grd  ON grd.lote_id = l_orig.id
+JOIN doc.guia_remision gr           ON gr.id = grd.guia_remision_id
+WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+  AND l.flg_elm = false
+
+UNION ALL
+
+-- Surplus rolls from stock count — no ingress guia, no spec fields
+SELECT
+    l.id,
+    NULL,
+    NULL, NULL, NULL, NULL, NULL,
+    false,
+    false,
+    l.fyh_cre
+FROM inventario.lote l
+JOIN item i       ON i.id = l.item_id
+JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+WHERE l.documento_tipo = 'CUADRE'
+  AND l.flg_elm = false
+
+ON CONFLICT (lote_id) DO NOTHING;
+
+-- ============================================================================
+-- doc.catalogo_precios — migrate from legacy public.catalogo_precios
+-- ============================================================================
+-- Mapping:
+--   tipo_articulo_id  → articulo_tipo_id  (table renamed in step 4)
+--   adicional_id rows → skipped (shadow rows never used in billing;
+--                        antipilling goes on base TENIDO row as precio_antipilling)
+--   activo = 0        → fyh_elm = fyh_fin
+--   activo = 1        → fyh_elm = NULL (active)
+--   operacion_id      → always TENIDO (legacy catalog was dyeing-only)
+--   costo_kg          → NULL (no historical cost data)
+--
+-- After running: set precio_antipilling on active TENIDO rows per client agreement,
+-- and manually add PLANCHADO/PERCHADO rates.
+DO $$
+DECLARE
+    v_tenido_op_id SMALLINT;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_tables
+        WHERE schemaname = 'public' AND tablename = 'catalogo_precios'
+    ) THEN
+        RETURN;
+    END IF;
+
+    SELECT id INTO v_tenido_op_id FROM mes.operacion WHERE codigo = 'TENIDO';
+
+    INSERT INTO doc.catalogo_precios (
+        operacion_id,
+        color_x_cliente_id,
+        articulo_tipo_id,
+        tenido_id,
+        fibra,
+        precio_kg,
+        precio_antipilling,
+        fyh_elm,
+        fyh_cre
+    )
+    SELECT
+        v_tenido_op_id,
+        cp.color_x_cliente_id,
+        cp.tipo_articulo_id::smallint,
+        cp.tenido_id,
+        cp.fibra::smallint,
+        cp.precio_tenido,
+        NULL,
+        CASE WHEN cp.activo = 0 THEN cp.fyh_fin ELSE NULL END,
+        cp.fyh_cre
+    FROM public.catalogo_precios cp
+    WHERE cp.adicional_id IS NULL OR cp.adicional_id = 0
+    ON CONFLICT DO NOTHING;
+END $$;
 
 COMMIT;

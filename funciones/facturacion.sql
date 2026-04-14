@@ -52,10 +52,169 @@ AS $$
 $$;
 
 
+-- ── doc.fn_get_costo_receta ───────────────────────────────────
+-- Returns the chemical cost per kg for a given dyeing recipe.
+-- Cost = SUM(insumo.cantidad × item_unit_price) across all pasos.
+-- cantidad is in kg-chemical / kg-fabric (OWF fraction, e.g. 0.02 = 2%).
+--
+-- Price source priority:
+--   1. Most recent doc.factura_proveedor_detalle.precio_unitario
+--      (actual invoice price, ex-IGV — authoritative per migration/16)
+--   2. Most recent doc.compra_detalle.precio_unitario
+--      (estimated/agreed price — fallback when invoice not yet received)
+--
+-- Returns NULL if the recipe has no insumos or no price data found for any insumo.
+-- Returns 0 if all prices resolve to 0 (e.g. items with zero cost).
+CREATE OR REPLACE FUNCTION doc.fn_get_costo_receta(p_receta_id INT)
+RETURNS NUMERIC(10,4)
+LANGUAGE sql STABLE
+SET search_path TO 'receta', 'doc', 'public'
+AS $$
+    SELECT ROUND(
+        SUM(
+            tpi.cantidad * COALESCE(
+                -- Authoritative: latest supplier invoice line (ex-IGV)
+                (
+                    SELECT fpd.precio_unitario
+                    FROM doc.factura_proveedor_detalle fpd
+                    WHERE fpd.item_id = tpi.item_id
+                    ORDER BY fpd.fyh_cre DESC
+                    LIMIT 1
+                ),
+                -- Fallback: latest purchase order estimated price
+                (
+                    SELECT cd.precio_unitario
+                    FROM doc.compra_detalle cd
+                    WHERE cd.item_id = tpi.item_id
+                    ORDER BY cd.fyh_cre DESC
+                    LIMIT 1
+                ),
+                0
+            )
+        ),
+        4
+    )
+    FROM receta.tenido_paso tp
+    JOIN receta.tenido_paso_insumo tpi ON tpi.paso_id = tp.id
+    WHERE tp.receta_id = p_receta_id;
+$$;
+
+
+-- ── doc.fn_precio_info ────────────────────────────────────────
+-- Pricing UI helper: returns current chemical cost, active catalog
+-- price, and derived margin for a given TENIDO service combination.
+-- Designed to power the price-setting form.
+--
+-- Lookup:
+--   - Finds the approved recipe (flg_produccion = true) matching the
+--     dyeing dimensions (color_x_cliente_id, articulo_tipo_id, fibra,
+--     tenido_id, flg_antipilling).
+--   - Computes chemical cost via fn_get_costo_receta.
+--   - Fetches current catalog price via fn_get_precio.
+--
+-- margen = (precio_kg - costo_kg) / precio_kg (NULL if no price set).
+--
+-- Only meaningful for TENIDO operations. For PLANCHADO/PERCHADO,
+-- pass p_receta_id = NULL — returns price only, no cost.
+--
+-- p_flg_antipilling: when true, also returns the antipilling surcharge margin.
+CREATE OR REPLACE FUNCTION doc.fn_precio_info(
+    p_operacion_id        SMALLINT,
+    p_color_x_cliente_id  INT,
+    p_tercero_id          INT,
+    p_articulo_tipo_id    SMALLINT,
+    p_tenido_id           INT,
+    p_fibra               SMALLINT,
+    p_flg_antipilling     BOOLEAN DEFAULT false
+)
+RETURNS TABLE (
+    receta_id           INT,
+    costo_kg            NUMERIC(10,4),
+    precio_kg           NUMERIC(10,4),
+    precio_antipilling  NUMERIC(10,4),
+    margen              NUMERIC(8,6),   -- (precio - costo) / precio; NULL if no price
+    margen_antipilling  NUMERIC(8,6)    -- NULL if flg_antipilling=false or no price set
+)
+LANGUAGE plpgsql STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'receta', 'doc', 'public'
+AS $$
+DECLARE
+    v_receta_id  INT;
+    v_costo_kg   NUMERIC(10,4);
+    v_precio     RECORD;
+BEGIN
+    IF NOT jwt_has_permission('comercial.ver') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.ver'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Find approved recipe for these dyeing dimensions (NULL = no recipe, e.g. non-TENIDO op)
+    SELECT rt.id INTO v_receta_id
+    FROM receta.tenido rt
+    WHERE rt.color_x_cliente_id = p_color_x_cliente_id
+      AND rt.articulo_tipo_id   = p_articulo_tipo_id
+      AND rt.fibra               = p_fibra
+      AND rt.tenido_id           = p_tenido_id
+      AND rt.flg_antipilling     = p_flg_antipilling
+      AND rt.flg_produccion      = true
+    LIMIT 1;
+
+    -- Compute chemical cost (NULL if no recipe)
+    IF v_receta_id IS NOT NULL THEN
+        v_costo_kg := doc.fn_get_costo_receta(v_receta_id);
+    END IF;
+
+    -- Fetch current catalog price
+    SELECT p.precio_kg, p.precio_antipilling
+    INTO v_precio
+    FROM doc.fn_get_precio(
+        p_operacion_id,
+        p_color_x_cliente_id,
+        p_tercero_id,
+        p_articulo_tipo_id,
+        p_tenido_id,
+        p_fibra
+    ) p;
+
+    RETURN QUERY SELECT
+        v_receta_id,
+        v_costo_kg,
+        v_precio.precio_kg,
+        v_precio.precio_antipilling,
+        CASE
+            WHEN v_precio.precio_kg IS NOT NULL AND v_costo_kg IS NOT NULL
+                 AND v_precio.precio_kg > 0
+            THEN ROUND((v_precio.precio_kg - v_costo_kg) / v_precio.precio_kg, 6)
+            ELSE NULL
+        END,
+        CASE
+            WHEN p_flg_antipilling
+                 AND v_precio.precio_antipilling IS NOT NULL AND v_costo_kg IS NOT NULL
+                 AND v_precio.precio_antipilling > 0
+            THEN ROUND((v_precio.precio_antipilling - v_costo_kg) / v_precio.precio_antipilling, 6)
+            ELSE NULL
+        END;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION doc.fn_precio_info(SMALLINT, INT, INT, SMALLINT, INT, SMALLINT, BOOLEAN)
+    TO authenticated;
+
+GRANT EXECUTE ON FUNCTION doc.fn_get_costo_receta(INT)
+    TO authenticated;
+
+
 -- ── doc.upsert_catalogo_precio ────────────────────────────────
--- Changes a price: closes the currently active row (sets fyh_fin)
+-- Changes a price: closes the currently active row (sets fyh_elm)
 -- and inserts a new active row. Both happen atomically.
 -- Returns the new row id.
+--
+-- costo_kg is auto-computed from the approved recipe matching the
+-- given dimensions (color_x_cliente_id, articulo_tipo_id, fibra,
+-- tenido_id). NULL when no approved recipe exists (non-TENIDO ops,
+-- or recipe not yet approved). Stored as a snapshot — does not
+-- update automatically if purchase prices change later.
 --
 -- Replaces the legacy insertar_catalogo_precio_v2 pattern.
 CREATE OR REPLACE FUNCTION doc.upsert_catalogo_precio(
@@ -71,11 +230,13 @@ CREATE OR REPLACE FUNCTION doc.upsert_catalogo_precio(
 RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'iam', 'doc', 'public'
+SET search_path TO 'iam', 'receta', 'doc', 'public'
 AS $$
 DECLARE
-    v_usr_id INT := get_user_id();
-    v_id     BIGINT;
+    v_usr_id    INT := get_user_id();
+    v_id        BIGINT;
+    v_receta_id INT;
+    v_costo_kg  NUMERIC(10,4);
 BEGIN
     IF NOT jwt_has_permission('comercial.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
@@ -84,6 +245,20 @@ BEGIN
 
     IF p_color_x_cliente_id IS NOT NULL AND p_tercero_id IS NOT NULL THEN
         RAISE EXCEPTION 'color_x_cliente_id and tercero_id are mutually exclusive';
+    END IF;
+
+    -- Auto-compute cost from the approved recipe (NULL if none — non-TENIDO or no recipe yet)
+    SELECT rt.id INTO v_receta_id
+    FROM receta.tenido rt
+    WHERE rt.color_x_cliente_id = p_color_x_cliente_id
+      AND rt.articulo_tipo_id   = p_articulo_tipo_id
+      AND rt.fibra               = p_fibra
+      AND rt.tenido_id           = p_tenido_id
+      AND rt.flg_produccion      = true
+    LIMIT 1;
+
+    IF v_receta_id IS NOT NULL THEN
+        v_costo_kg := doc.fn_get_costo_receta(v_receta_id);
     END IF;
 
     UPDATE doc.catalogo_precios
@@ -99,10 +274,10 @@ BEGIN
 
     INSERT INTO doc.catalogo_precios (
         operacion_id, color_x_cliente_id, tercero_id, articulo_tipo_id,
-        tenido_id, fibra, precio_kg, precio_antipilling, usr_cre
+        tenido_id, fibra, precio_kg, precio_antipilling, costo_kg, usr_cre
     ) VALUES (
         p_operacion_id, p_color_x_cliente_id, p_tercero_id, p_articulo_tipo_id,
-        p_tenido_id, p_fibra, p_precio_kg, p_precio_antipilling, v_usr_id
+        p_tenido_id, p_fibra, p_precio_kg, p_precio_antipilling, v_costo_kg, v_usr_id
     )
     RETURNING id INTO v_id;
 
@@ -141,22 +316,23 @@ AS $$
             p.tercero_id,
             p.tenido_id,
             p.flg_antipilling,
-            ar.articulo_tipo_id::smallint AS articulo_tipo_id,
+            p.articulo_tipo_id::smallint  AS articulo_tipo_id,
             ar.fibra::smallint            AS fibra,
-            -- Distinct completed operaciones for this partida
+            -- Distinct completed operaciones across ALL ops for this partida (reproceso included)
             ARRAY(
                 SELECT DISTINCT opp.operacion_id
                 FROM mes.orden_produccion op
                 JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id
                 WHERE op.partida_id = p.id
+                  AND op.flg_elm = false
                   AND opp.estado = 'COMPLETADO'
             ) AS operacion_ids
         FROM doc.partida p
-        -- Derive articulo_tipo_id + fibra from the assigned production lots
-        JOIN mes.orden_produccion op_r   ON op_r.partida_id = p.id AND op_r.flg_elm = false
+        -- fibra only — articulo_tipo_id comes directly from partida
+        JOIN mes.orden_produccion op_r    ON op_r.partida_id = p.id AND op_r.flg_elm = false
         JOIN mes.orden_produccion_item opi ON opi.orden_produccion_id = op_r.id
-        JOIN item_rollo_detalle ird       ON ird.item_id = opi.item_id
-        JOIN articulo ar                  ON ar.id = ird.articulo_id
+        JOIN item_rollo_detalle ird        ON ird.item_id = opi.item_id
+        JOIN articulo ar                   ON ar.id = ird.articulo_id
         WHERE p.id = ANY(p_partida_ids) AND p.flg_elm = false
         ORDER BY p.id
     ),
@@ -227,30 +403,30 @@ SELECT DISTINCT
     c.color,
     cxc.tercero_id,
     t.nombre                AS cliente,
-    ar.articulo_tipo_id,
+    p.articulo_tipo_id,
     aty.nombre              AS articulo_tipo,
     CASE WHEN op.codigo = 'TENIDO' THEN p.tenido_id ELSE NULL END AS tenido_id,
     ten.tenido,
     ar.fibra
 FROM doc.partida p
-JOIN color_x_cliente cxc         ON cxc.id = p.color_x_cliente_id
-JOIN public.color c              ON c.id   = cxc.color_id
-JOIN tercero t                   ON t.id   = cxc.tercero_id
-JOIN mes.orden_produccion op_h   ON op_h.partida_id = p.id AND op_h.flg_elm = false
+JOIN color_x_cliente cxc           ON cxc.id = p.color_x_cliente_id
+JOIN public.color c                ON c.id   = cxc.color_id
+JOIN tercero t                     ON t.id   = cxc.tercero_id
+-- ALL OPs for this partida — covers reproceso operations too
+JOIN mes.orden_produccion op_h     ON op_h.partida_id = p.id AND op_h.flg_elm = false
 JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op_h.id
                                    AND opp.estado = 'COMPLETADO'
-JOIN mes.operacion op            ON op.id = opp.operacion_id
--- Derive articulo_tipo_id + fibra from one assigned lot (all share the same articulo_tipo)
+JOIN mes.operacion op              ON op.id = opp.operacion_id
+-- fibra from articulo (articulo_tipo_id now directly on partida)
 CROSS JOIN LATERAL (
-    SELECT ar2.articulo_tipo_id::smallint AS articulo_tipo_id,
-           ar2.fibra::smallint            AS fibra
+    SELECT ar2.fibra::smallint AS fibra
     FROM mes.orden_produccion_item opi2
     JOIN item_rollo_detalle ird2 ON ird2.item_id = opi2.item_id
     JOIN articulo ar2            ON ar2.id = ird2.articulo_id
     WHERE opi2.orden_produccion_id = op_h.id
     LIMIT 1
 ) ar
-JOIN public.articulo_tipo aty    ON aty.id = ar.articulo_tipo_id
+JOIN public.articulo_tipo aty    ON aty.id = p.articulo_tipo_id
 LEFT JOIN tenido ten             ON ten.id = p.tenido_id AND op.codigo = 'TENIDO'
 WHERE
     p.flg_elm = false
@@ -261,7 +437,7 @@ WHERE
         WHERE cp.operacion_id = op.id
           AND (cp.color_x_cliente_id IS NULL OR cp.color_x_cliente_id = p.color_x_cliente_id)
           AND (cp.tercero_id         IS NULL OR cp.tercero_id         = p.tercero_id)
-          AND (cp.articulo_tipo_id   IS NULL OR cp.articulo_tipo_id   = ar.articulo_tipo_id)
+          AND (cp.articulo_tipo_id   IS NULL OR cp.articulo_tipo_id   = p.articulo_tipo_id)
           AND (cp.tenido_id          IS NULL OR cp.tenido_id          = p.tenido_id)
           AND (cp.fibra              IS NULL OR cp.fibra              = ar.fibra)
           AND cp.fyh_elm IS NULL
@@ -432,7 +608,7 @@ WITH lineas AS (
         o.nombre                            AS operacion,
         o.codigo                            AS op_codigo,
         false                               AS es_antipilling,
-        ar.articulo_tipo_id::SMALLINT       AS articulo_tipo_id,
+        p.articulo_tipo_id::SMALLINT        AS articulo_tipo_id,
         atn.nombre                          AS articulo_tipo,
         p.color_x_cliente_id,
         c.color,
@@ -447,23 +623,29 @@ WITH lineas AS (
                                       AND grt.codigo = 'DESPACHO_CLIENTE'
     JOIN tercero t                     ON t.id = gr.tercero_id
     JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
+    -- Dispatched lote is always a dyed OUTPUT lote (documento_tipo = 'ORDEN_PRODUCCION_PASO')
     JOIN inventario.lote l             ON l.id = grd.lote_id
-    JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id
-    JOIN mes.orden_produccion op_h     ON op_h.id = opi.orden_produccion_id
-                                      AND op_h.flg_elm = false
-    JOIN doc.partida p                 ON p.id = op_h.partida_id
-                                      AND p.flg_elm = false
-    JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op_h.id
-                                      AND opp.estado = 'COMPLETADO'
-    JOIN mes.operacion o               ON o.id = opp.operacion_id
+                                      AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+    -- Trace: dyed output lote → OPP → OP → partida
+    JOIN mes.orden_produccion_paso opp_out ON opp_out.id = l.documento_id
+    JOIN mes.orden_produccion op_out       ON op_out.id  = opp_out.orden_produccion_id
+                                          AND op_out.flg_elm = false
+    JOIN doc.partida p                     ON p.id = op_out.partida_id
+                                          AND p.flg_elm = false
+    -- Only completed operations from the SAME OP that produced this output lote.
+    -- A reproceso roll is billed separately when its own output is dispatched.
+    JOIN mes.orden_produccion_paso opp     ON opp.orden_produccion_id = op_out.id
+                                          AND opp.estado = 'COMPLETADO'
+    JOIN mes.operacion o                   ON o.id = opp.operacion_id
+    -- fibra still needs articulo join; articulo_tipo_id now comes directly from partida
     JOIN LATERAL (
-        SELECT ar2.articulo_tipo_id, ar2.fibra
+        SELECT ar2.fibra
         FROM item_rollo_detalle ird2
         JOIN articulo ar2 ON ar2.id = ird2.articulo_id
-        WHERE ird2.item_id = opi.item_id
+        WHERE ird2.item_id = l.item_id
         LIMIT 1
     ) ar ON true
-    JOIN articulo_tipo atn             ON atn.id = ar.articulo_tipo_id
+    JOIN articulo_tipo atn             ON atn.id = p.articulo_tipo_id
     JOIN color_x_cliente cxc           ON cxc.id = p.color_x_cliente_id
     JOIN public.color c                ON c.id = cxc.color_id
     LEFT JOIN tenido ten               ON ten.id = p.tenido_id
@@ -472,7 +654,7 @@ WITH lineas AS (
     GROUP BY
         gr.id, gr.serie, gr.correlativo, gr.fecha_emision, gr.tercero_id, t.nombre,
         p.id, o.id, o.nombre, o.codigo,
-        ar.articulo_tipo_id, atn.nombre,
+        p.articulo_tipo_id, atn.nombre,
         p.color_x_cliente_id, c.color,
         p.tenido_id, ten.tenido,
         ar.fibra, p.tercero_id, p.flg_antipilling

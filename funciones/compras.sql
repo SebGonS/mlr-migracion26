@@ -179,78 +179,110 @@ END;
 $function$;
 
 -- ───────────────────────────────────────────────────────────────
--- registrar_letras
--- Replaces pending letras for a factura with a new set.
--- Idempotent: calling again overwrites previous pending letras.
--- Validates sum of letras does not exceed factura total.
+-- registrar_letra
+-- SAP clearing model: one payment document (letra) issued to a
+-- tercero that can clear one or more supplier invoices.
+--
+-- p_datos shape:
+-- {
+--   "tercero_id":          INT,
+--   "numero":              TEXT   (optional),
+--   "monto":               NUMERIC,
+--   "fecha_giro":          DATE   (optional),
+--   "fecha_vencimiento":   DATE,
+--   "banco":               TEXT   (optional),
+--   "facturas": [
+--     { "factura_proveedor_id": BIGINT, "monto_aplicado": NUMERIC }
+--   ]
+-- }
+--
+-- Returns the new letra.id.
 -- ───────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION doc.registrar_letras(
-    p_factura_proveedor_id bigint,
-    p_letras jsonb          -- [{monto, fecha_vencimiento, fecha_giro?, banco?, numero?}]
-)
-RETURNS text
+CREATE OR REPLACE FUNCTION doc.registrar_letra(p_datos jsonb)
+RETURNS bigint
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO 'iam', 'public', 'doc'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id       int := get_user_id();
-    v_total        numeric;
-    v_total_letras numeric;
+    v_usr_id        int    := get_user_id();
+    v_tercero_id    int    := (p_datos->>'tercero_id')::INT;
+    v_letra_id      bigint;
+    v_total_aplicado numeric;
 BEGIN
     IF NOT jwt_has_permission('comercial.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    SELECT total INTO v_total
-    FROM doc.factura_proveedor
-    WHERE id = p_factura_proveedor_id
-    FOR UPDATE;
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_letra', v_usr_id, p_datos);
 
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Factura #% no encontrada.', p_factura_proveedor_id;
+    -- All linked facturas must belong to the same tercero as the letra
+    IF p_datos ? 'facturas' AND jsonb_array_length(p_datos->'facturas') > 0 THEN
+        IF EXISTS (
+            SELECT 1 FROM doc.factura_proveedor fp
+            WHERE fp.id IN (
+                SELECT (f->>'factura_proveedor_id')::bigint
+                FROM jsonb_array_elements(p_datos->'facturas') f
+            )
+            AND fp.tercero_id IS DISTINCT FROM v_tercero_id
+        ) THEN
+            RAISE EXCEPTION 'Una o más facturas no pertenecen al tercero indicado (%).', v_tercero_id;
+        END IF;
     END IF;
 
-    SELECT SUM((l->>'monto')::NUMERIC)
-    INTO v_total_letras
-    FROM jsonb_array_elements(p_letras) l;
+    -- Validate sum of monto_aplicado does not exceed letra monto
+    SELECT COALESCE(SUM((f->>'monto_aplicado')::NUMERIC), 0)
+    INTO v_total_aplicado
+    FROM jsonb_array_elements(COALESCE(p_datos->'facturas', '[]'::jsonb)) f;
 
-    IF v_total_letras > v_total THEN
-        RAISE EXCEPTION 'Monto total de letras (%) excede total de factura (%).',
-            v_total_letras, v_total;
+    IF v_total_aplicado > (p_datos->>'monto')::NUMERIC THEN
+        RAISE EXCEPTION 'Monto aplicado total (%) excede monto de letra (%).',
+            v_total_aplicado, (p_datos->>'monto')::NUMERIC;
     END IF;
 
-    -- Idempotent: wipe pending letras and rewrite
-    DELETE FROM doc.letra
-    WHERE factura_proveedor_id = p_factura_proveedor_id
-      AND estado = 'emitida';
-
+    -- Create the letra header
     INSERT INTO doc.letra(
-        factura_proveedor_id, numero, monto,
+        tercero_id, numero, monto,
         fecha_giro, fecha_vencimiento, banco, usr_cre
     )
-    SELECT
-        p_factura_proveedor_id,
-        l->>'numero',
-        (l->>'monto')::NUMERIC,
-        (l->>'fecha_giro')::DATE,
-        (l->>'fecha_vencimiento')::DATE,
-        l->>'banco',
+    VALUES (
+        v_tercero_id,
+        p_datos->>'numero',
+        (p_datos->>'monto')::NUMERIC,
+        (p_datos->>'fecha_giro')::DATE,
+        (p_datos->>'fecha_vencimiento')::DATE,
+        p_datos->>'banco',
         v_usr_id
-    FROM jsonb_array_elements(p_letras) l;
+    )
+    RETURNING id INTO v_letra_id;
 
-    -- Mark factura as paid by letras (letras implies credito payment type)
-    UPDATE doc.factura_proveedor
-    SET tipo_pago = 'credito', usr_mod = v_usr_id, fyh_mod = NOW()
-    WHERE id = p_factura_proveedor_id;
+    -- Link to invoices via clearing junction
+    IF p_datos ? 'facturas' AND jsonb_array_length(p_datos->'facturas') > 0 THEN
+        INSERT INTO doc.letra_factura(letra_id, factura_proveedor_id, monto_aplicado, fyh_cre)
+        SELECT
+            v_letra_id,
+            (f->>'factura_proveedor_id')::bigint,
+            (f->>'monto_aplicado')::NUMERIC,
+            NOW()
+        FROM jsonb_array_elements(p_datos->'facturas') f;
 
-    RETURN format('%s letras registradas para factura #%s.', jsonb_array_length(p_letras), p_factura_proveedor_id);
+        -- Mark linked facturas as credito payment type
+        UPDATE doc.factura_proveedor
+        SET tipo_pago = 'credito', usr_mod = v_usr_id, fyh_mod = NOW()
+        WHERE id IN (
+            SELECT (f->>'factura_proveedor_id')::bigint
+            FROM jsonb_array_elements(p_datos->'facturas') f
+        );
+    END IF;
+
+    RETURN v_letra_id;
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in registrar_letras - User: %, factura: %, Error: %', v_usr_id, p_factura_proveedor_id, v_message;
+    RAISE LOG 'Error in registrar_letra - User: %, Error: %', v_usr_id, v_message;
     RAISE;
 END;
 $function$;
@@ -271,18 +303,17 @@ SET search_path TO 'iam', 'public', 'doc'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id        int := get_user_id();
-    v_factura_id    bigint;
-    v_estado_actual letra_estado_enum;
-    v_todas_pagadas boolean;
+    v_usr_id          int := get_user_id();
+    v_estado_actual   letra_estado_enum;
+    v_facturas_count  int;
 BEGIN
     IF NOT jwt_has_permission('comercial.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    SELECT factura_proveedor_id, estado
-    INTO v_factura_id, v_estado_actual
+    SELECT estado
+    INTO v_estado_actual
     FROM doc.letra WHERE id = p_letra_id FOR UPDATE;
 
     IF NOT FOUND THEN
@@ -300,26 +331,29 @@ BEGIN
         fyh_mod    = NOW()
     WHERE id = p_letra_id;
 
-    -- Cascade to factura estado_pago
-    SELECT NOT EXISTS (
-        SELECT 1 FROM doc.letra
-        WHERE factura_proveedor_id = v_factura_id
-          AND estado NOT IN ('pagada', 'anulada')
-    ) INTO v_todas_pagadas;
-
-    UPDATE doc.factura_proveedor
-    SET estado_pago = CASE WHEN v_todas_pagadas THEN 'total' ELSE 'parcial' END,
-        usr_mod     = v_usr_id,
-        fyh_mod     = NOW()
-    WHERE id = v_factura_id;
-
-    RETURN format('Letra #%s pagada el %s.%s',
-        p_letra_id,
-        p_fecha_pago,
-        CASE WHEN v_todas_pagadas
-             THEN ' Factura #' || v_factura_id || ' totalmente pagada.'
-             ELSE '' END
+    -- Cascade estado_pago to every factura cleared by this letra.
+    -- A factura is 'total' when none of its linked letras remain unpaid.
+    UPDATE doc.factura_proveedor fp
+    SET estado_pago = CASE
+            WHEN NOT EXISTS (
+                SELECT 1
+                FROM doc.letra_factura lf2
+                JOIN doc.letra l2 ON l2.id = lf2.letra_id
+                WHERE lf2.factura_proveedor_id = fp.id
+                  AND l2.estado NOT IN ('pagada', 'anulada')
+            ) THEN 'total'
+            ELSE 'parcial'
+        END,
+        usr_mod = v_usr_id,
+        fyh_mod = NOW()
+    WHERE fp.id IN (
+        SELECT factura_proveedor_id FROM doc.letra_factura WHERE letra_id = p_letra_id
     );
+
+    GET DIAGNOSTICS v_facturas_count = ROW_COUNT;
+
+    RETURN format('Letra #%s pagada el %s. %s factura(s) actualizada(s).',
+        p_letra_id, p_fecha_pago, v_facturas_count);
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
@@ -387,12 +421,15 @@ $function$;
 
 -- ───────────────────────────────────────────────────────────────
 -- vincular_factura_compra
--- Links an existing factura_proveedor to an existing compra.
--- Validates both belong to the same proveedor.
+-- Links a factura_proveedor to a compra via the junction table.
+-- Idempotent (ON CONFLICT DO NOTHING). Validates same proveedor.
+-- A compra can be linked to multiple facturas (e.g. factura-en-0
+-- + real invoice, or split shipments).
 -- ───────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION doc.vincular_factura_compra(
     p_compra_id  bigint,
-    p_factura_id bigint
+    p_factura_id bigint,
+    p_nota       text DEFAULT NULL
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -401,9 +438,9 @@ SET search_path TO 'iam', 'public', 'doc'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id          int := get_user_id();
-    v_compra_prov     int;
-    v_factura_prov    int;
+    v_usr_id       int := get_user_id();
+    v_compra_prov  int;
+    v_factura_prov int;
 BEGIN
     IF NOT jwt_has_permission('comercial.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
@@ -427,10 +464,9 @@ BEGIN
             v_compra_prov, v_factura_prov;
     END IF;
 
-    UPDATE doc.compra
-    SET factura_proveedor_id = p_factura_id,
-        usr_mod = v_usr_id, fyh_mod = NOW()
-    WHERE id = p_compra_id;
+    INSERT INTO doc.compra_factura_proveedor (compra_id, factura_proveedor_id, nota, usr_cre)
+    VALUES (p_compra_id, p_factura_id, p_nota, v_usr_id)
+    ON CONFLICT DO NOTHING;
 
     RETURN format('Factura #% vinculada a compra #%.', p_factura_id, p_compra_id);
 EXCEPTION WHEN OTHERS THEN
@@ -441,3 +477,45 @@ EXCEPTION WHEN OTHERS THEN
     RAISE;
 END;
 $function$;
+
+-- ───────────────────────────────────────────────────────────────
+-- desvincular_factura_compra
+-- Removes a specific compra ↔ factura link from the junction.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.desvincular_factura_compra(
+    p_compra_id  bigint,
+    p_factura_id bigint
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    DELETE FROM doc.compra_factura_proveedor
+    WHERE compra_id = p_compra_id AND factura_proveedor_id = p_factura_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Vínculo entre compra #% y factura #% no encontrado.', p_compra_id, p_factura_id;
+    END IF;
+
+    RETURN format('Factura #% desvinculada de compra #%.', p_factura_id, p_compra_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in desvincular_factura_compra - User: %, compra: %, factura: %, Error: %',
+        v_usr_id, p_compra_id, p_factura_id, v_message;
+    RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION doc.vincular_factura_compra(bigint, bigint, text) TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.desvincular_factura_compra(bigint, bigint)    TO authenticated;

@@ -321,6 +321,8 @@ CREATE TABLE tercero (
     fyh_elm TIMESTAMPTZ
 );
 
+ALTER TABLE color_x_cliente ADD COLUMN IF NOT EXISTS tercero_id INT REFERENCES tercero(id);
+
 CREATE TRIGGER trg_bi_tercero_codigo_canon
 BEFORE INSERT OR UPDATE ON tercero
 FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();

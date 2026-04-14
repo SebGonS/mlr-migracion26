@@ -157,6 +157,11 @@ REVOKE UPDATE (usr_cre, fyh_cre)                   ON unidad FROM anon, authenti
 REVOKE INSERT (usr_cre, fyh_cre) ON inventario.pesaje FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre) ON inventario.pesaje FROM anon, authenticated;
 
+---LOTE ROLLO DETALLE
+REVOKE INSERT (usr_cre, fyh_cre, usr_mod, fyh_mod) ON inventario.lote_rollo_detalle FROM anon, authenticated;
+-- Identity fields locked after insert: billing anchor and dyeing state
+REVOKE UPDATE (guia_remision_id, color_x_cliente_id, tenido_id, flg_tenido) ON inventario.lote_rollo_detalle FROM anon, authenticated;
+
 ----ITEM TIPO
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON item_tipo FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON item_tipo FROM anon, authenticated;
@@ -273,13 +278,38 @@ REVOKE INSERT (usr_cre, fyh_cre) ON calidad.inspeccion_foto FROM anon, authentic
 
 -- ── Compras ───────────────────────────────────────────────────────────────────
 
+-----CATALOGO PRECIOS
+REVOKE INSERT (usr_cre, fyh_cre, usr_elm, fyh_elm) ON doc.catalogo_precios FROM anon, authenticated;
+
+-- One active row per key combination at any time.
+-- COALESCE(-1): NULL dimensions participate correctly in the unique index.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_catalogo_precios_activo
+    ON doc.catalogo_precios (
+        operacion_id,
+        COALESCE(color_x_cliente_id,    -1),
+        COALESCE(tercero_id,            -1),
+        COALESCE(articulo_tipo_id::int, -1),
+        COALESCE(tenido_id,             -1),
+        COALESCE(fibra::int,            -1)
+    )
+    WHERE fyh_elm IS NULL;
+
 -----FACTURA PROVEEDOR
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.factura_proveedor FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.factura_proveedor FROM anon, authenticated;
 
+-----FACTURA PROVEEDOR DETALLE
+REVOKE INSERT (usr_cre, fyh_cre) ON doc.factura_proveedor_detalle FROM anon, authenticated;
+
+-----PARTIDA GUIA REMISION
+REVOKE INSERT (usr_cre, fyh_cre) ON doc.partida_guia_remision FROM anon, authenticated;
+
 -----COMPRA
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod, usr_elm, fyh_elm) ON doc.compra FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                                      ON doc.compra FROM anon, authenticated;
+
+-----COMPRA FACTURA PROVEEDOR
+REVOKE INSERT (usr_cre, fyh_cre) ON doc.compra_factura_proveedor FROM anon, authenticated;
 
 -----COMPRA DETALLE
 REVOKE INSERT (usr_cre, fyh_cre) ON doc.compra_detalle FROM anon, authenticated;
@@ -287,6 +317,9 @@ REVOKE INSERT (usr_cre, fyh_cre) ON doc.compra_detalle FROM anon, authenticated;
 -----LETRA
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.letra FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.letra FROM anon, authenticated;
+
+-----LETRA FACTURA
+REVOKE INSERT (usr_cre, fyh_cre) ON doc.letra_factura FROM anon, authenticated;
 
 -----FACTURA
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod, usr_elm, fyh_elm) ON doc.factura FROM anon, authenticated;
@@ -298,8 +331,33 @@ REVOKE INSERT (usr_cre, fyh_cre) ON doc.factura_detalle FROM anon, authenticated
 -- ── Performance indexes ───────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_opp_orden_id ON mes.orden_produccion_paso(orden_produccion_id);
 CREATE INDEX IF NOT EXISTS idx_opi_orden_id ON mes.orden_produccion_item(orden_produccion_id);
-CREATE INDEX IF NOT EXISTS idx_lote_doc     ON inventario.lote(documento_tipo, documento_id);
-CREATE INDEX IF NOT EXISTS idx_im_lote_id   ON inventario.item_movimientos(lote_id);
+CREATE INDEX IF NOT EXISTS idx_lote_doc             ON inventario.lote(documento_tipo, documento_id);
+CREATE INDEX IF NOT EXISTS idx_im_lote_id           ON inventario.item_movimientos(lote_id);
+CREATE INDEX IF NOT EXISTS idx_letra_factura_factura     ON doc.letra_factura(factura_proveedor_id);
+CREATE INDEX IF NOT EXISTS idx_compra_factura_factura_id ON doc.compra_factura_proveedor(factura_proveedor_id);
+
+-- lote_rollo_detalle lookup indexes
+CREATE INDEX IF NOT EXISTS idx_lrd_guia
+    ON inventario.lote_rollo_detalle (guia_remision_id)
+    WHERE guia_remision_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_lrd_undyed
+    ON inventario.lote_rollo_detalle (flg_tenido)
+    WHERE flg_tenido = false;
+
+CREATE INDEX IF NOT EXISTS idx_lrd_color
+    ON inventario.lote_rollo_detalle (color_x_cliente_id)
+    WHERE color_x_cliente_id IS NOT NULL;
+
+-- Coverage check index: powers the unbilled dispatch guias query.
+CREATE INDEX IF NOT EXISTS idx_factura_detalle_guia
+    ON doc.factura_detalle (guia_remision_id)
+    WHERE guia_remision_id IS NOT NULL;
+
+-- Grouping/display index: invoice review screen grouped by dimensions.
+CREATE INDEX IF NOT EXISTS idx_factura_detalle_dims
+    ON doc.factura_detalle (operacion_id, articulo_tipo_id, color_x_cliente_id)
+    WHERE operacion_id IS NOT NULL;
 
 -- ── inventario.pesaje integrity ───────────────────────────────────────────────
 -- One authoritative weight record per roll — regardless of when or why it was weighed.

@@ -28,6 +28,15 @@ CREATE TRIGGER trg_bu_unidad_audit BEFORE UPDATE ON unidad
 CREATE TRIGGER trg_bi_pesaje_audit BEFORE INSERT ON inventario.pesaje
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 
+-----LOTE ROLLO DETALLE
+CREATE TRIGGER trg_bi_lote_rollo_detalle_audit
+    BEFORE INSERT ON inventario.lote_rollo_detalle
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+CREATE TRIGGER trg_bu_lote_rollo_detalle_audit
+    BEFORE UPDATE ON inventario.lote_rollo_detalle
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+
 ----ITEM TIPO
 CREATE TRIGGER trg_bi_item_tipo_audit BEFORE INSERT ON item_tipo
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
@@ -216,6 +225,12 @@ CREATE TRIGGER trg_bi_inspeccion_foto_audit BEFORE INSERT ON calidad.inspeccion_
 
 -- ── Compras ───────────────────────────────────────────────────────────────────
 
+-----CATALOGO PRECIOS
+-- No mod trigger: rows are immutable. fyh_elm is set by upsert_catalogo_precio.
+CREATE TRIGGER trg_bi_catalogo_precios_audit
+    BEFORE INSERT ON doc.catalogo_precios
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
 -----FACTURA PROVEEDOR
 CREATE TRIGGER trg_biud_factura_proveedor_audit BEFORE INSERT OR UPDATE OR DELETE ON doc.factura_proveedor
     FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
@@ -223,6 +238,18 @@ CREATE TRIGGER trg_bi_factura_proveedor_audit BEFORE INSERT ON doc.factura_prove
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 CREATE TRIGGER trg_bu_factura_proveedor_audit BEFORE UPDATE ON doc.factura_proveedor
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+
+-----FACTURA PROVEEDOR DETALLE
+CREATE TRIGGER trg_bi_factura_proveedor_detalle_audit BEFORE INSERT ON doc.factura_proveedor_detalle
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+-----PARTIDA GUIA REMISION
+CREATE TRIGGER trg_bi_partida_guia_remision_audit BEFORE INSERT ON doc.partida_guia_remision
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+-----COMPRA FACTURA PROVEEDOR
+CREATE TRIGGER trg_bi_compra_factura_proveedor_audit BEFORE INSERT ON doc.compra_factura_proveedor
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 
 -----COMPRA
 CREATE TRIGGER trg_biud_compra_audit BEFORE INSERT OR UPDATE OR DELETE ON doc.compra

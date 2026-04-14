@@ -9,12 +9,12 @@ SELECT
     a.id          AS color_x_cliente_id,
     b.id          AS color_id,
     b.color,
-    a.cliente_id,                    -- legacy FK kept for backward compat
-    a.tercero_id,
+    a.cliente_id::integer,                    -- legacy FK kept for backward compat
     t.nombre      AS tono,
     t.nombre      AS cliente,        -- alias kept for backward compat
     a.hex         AS color_x_cliente_hex,
-    b.hex         AS color_hex
+    b.hex         AS color_hex,
+        a.tercero_id
 FROM color_x_cliente a
 JOIN color b    ON a.color_id   = b.id
 LEFT JOIN tercero t ON a.tercero_id = t.id;
@@ -74,24 +74,24 @@ SELECT
     l.cantidad                      AS peso,
     ird.articulo_id,
     art.nombre                      AS articulo_nombre,
-    lrd.flg_tenido,
+    art.articulo_tipo_id,
     ird.flg_rib,
     art.fibra,
-    -- Color/tenido from partida (single source of truth for batch attributes)
-    p.color_x_cliente_id,
+    -- All batch attributes from lrd — NULL for undyed rolls (not yet set)
+    lrd.flg_tenido,
+    lrd.flg_antipilling,
+    lrd.color_x_cliente_id,
     vc.color_id,
     vc.color,
     vc.tono,
     vc.cliente_id,
     vc.color_hex,
     vc.color_x_cliente_hex,
-    p.tenido_id,
+    lrd.tenido_id,
     tn.tenido,
-    p.ancho,
-    p.malla,
-    p.rendimiento,
-    p.flg_antipilling,
-    p.articulo_tipo_id,
+    lrd.ancho,
+    lrd.malla,
+    lrd.rendimiento,
     l.propietario_id,
     t.nombre                        AS propietario,
     -- Ingress guia — billing anchor
@@ -110,15 +110,8 @@ JOIN inventario.almacen a               ON a.id = u.almacen_id
 LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = sa.lote_id
 LEFT JOIN doc.guia_remision gr          ON gr.id = lrd.guia_remision_id
 LEFT JOIN tercero t                     ON t.id = l.propietario_id
--- Resolve partida: for dyed rolls via OPP chain; for ingress rolls via guia → partida_guia_remision
-LEFT JOIN mes.orden_produccion_paso opp ON opp.id = l.documento_id
-                                         AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
-LEFT JOIN mes.orden_produccion op       ON op.id = opp.orden_produccion_id
-LEFT JOIN doc.partida_guia_remision pgr ON pgr.guia_remision_id = lrd.guia_remision_id
-                                         AND l.documento_tipo = 'GUIA_REMISION'
-LEFT JOIN doc.partida p                 ON p.id = COALESCE(op.partida_id, pgr.partida_id)
-LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = p.color_x_cliente_id
-LEFT JOIN tenido tn                     ON tn.id = p.tenido_id
+LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_cliente_id
+LEFT JOIN tenido tn                     ON tn.id = lrd.tenido_id
 ORDER BY art.nombre, u.nombre, i.nombre;
 
 -- ── doc.vw_partidas_lista_comercial ───────────────────────────
@@ -269,13 +262,12 @@ SELECT
     c.tercero_id,
     p.nombre AS proveedor_nombre,
     c.fecha,
-    c.factura_proveedor_id,
-    fp.serie                  AS factura_serie,
-    fp.numero                 AS factura_numero,
-    fp.total                  AS factura_total,
-    fp.moneda                 AS factura_moneda,
-    fp.estado_pago,
-    fp.fecha_vencimiento,
+    -- Aggregated factura info (N facturas per compra)
+    facturas.total_facturas,
+    facturas.facturas_ids,
+    facturas.facturas_numeros,
+    facturas.monto_facturas_total,
+    facturas.estado_pago_consolidado,
     COALESCE(det.total_items, 0)               AS total_items,
     COALESCE(det.monto_total, 0)               AS monto_total,
     COALESCE(guias.total_guias, 0)             AS total_guias,
@@ -286,7 +278,22 @@ SELECT
     c.fyh_cre
 FROM doc.compra c
 JOIN tercero p ON p.id = c.tercero_id
-LEFT JOIN doc.factura_proveedor fp ON fp.id = c.factura_proveedor_id
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*)                                                       AS total_facturas,
+        jsonb_agg(fp.id ORDER BY fp.fyh_cre)                          AS facturas_ids,
+        string_agg(fp.serie || '-' || fp.numero, ', ' ORDER BY fp.fyh_cre) AS facturas_numeros,
+        SUM(fp.total)                                                  AS monto_facturas_total,
+        CASE
+            WHEN COUNT(*) = 0                           THEN 'sin_factura'
+            WHEN bool_and(fp.estado_pago = 'total')     THEN 'total'
+            WHEN bool_or(fp.estado_pago != 'pendiente') THEN 'parcial'
+            ELSE                                             'pendiente'
+        END                                                            AS estado_pago_consolidado
+    FROM doc.compra_factura_proveedor cfp
+    JOIN doc.factura_proveedor fp ON fp.id = cfp.factura_proveedor_id
+    WHERE cfp.compra_id = c.id
+) facturas ON true
 LEFT JOIN LATERAL (
     SELECT COUNT(*) AS total_items, SUM(cd.cantidad * cd.precio_unitario) AS monto_total
     FROM doc.compra_detalle cd WHERE cd.compra_id = c.id
@@ -296,9 +303,12 @@ LEFT JOIN LATERAL (
     FROM doc.compra_guia_remision cgr WHERE cgr.compra_id = c.id
 ) guias ON true
 LEFT JOIN LATERAL (
-    SELECT COUNT(*) AS total_letras,
-           SUM(l.monto) FILTER (WHERE l.estado = 'emitida') AS monto_letras_pendiente
-    FROM doc.letra l WHERE l.factura_proveedor_id = c.factura_proveedor_id
+    SELECT COUNT(DISTINCT lf.letra_id)                                         AS total_letras,
+           SUM(lf.monto_aplicado) FILTER (WHERE l.estado = 'emitida')          AS monto_letras_pendiente
+    FROM doc.compra_factura_proveedor cfp
+    JOIN doc.letra_factura lf ON lf.factura_proveedor_id = cfp.factura_proveedor_id
+    JOIN doc.letra l ON l.id = lf.letra_id
+    WHERE cfp.compra_id = c.id
 ) letras ON true;
 
 GRANT SELECT ON doc.vw_compras TO authenticated;
@@ -447,63 +457,56 @@ GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre, vi.item_tipo_id, vi.item_ti
 
 -- ── inventario.vw_stock_rollos ────────────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_stock_rollos AS
-WITH rollos AS (
-    SELECT
-        sa.item_id,
-        i.codigo AS item_codigo,
-        i.nombre AS item_nombre,
-        op.partida_id,
-        COUNT(sa.lote_id) AS cantidad_rollos,
-        SUM(sa.cantidad_disponible) AS cantidad_total,
-        u.codigo AS unidad_codigo,
-        l.propietario_id,
-        l.estado_calidad
-    FROM inventario.vw_stock_actual sa
-    JOIN inventario.lote l ON l.id = sa.lote_id
-    LEFT JOIN mes.orden_produccion_paso opp
-        ON documento_tipo = 'ORDEN_PRODUCCION_PASO' AND opp.id = l.documento_id
-    LEFT JOIN mes.orden_produccion op ON opp.orden_produccion_id = op.id
-    JOIN item i ON i.id = sa.item_id
-    JOIN item_tipo it ON it.id = i.item_tipo_id
-    JOIN unidad u ON i.unidad_id = u.id
-    WHERE it.codigo = 'ROLLO'
-    GROUP BY sa.item_id, i.codigo, i.nombre, op.partida_id, u.codigo, l.propietario_id, l.estado_calidad
-)
+-- Aggregated roll stock by (item × lrd grouping dimensions).
+-- Batch attributes from lrd — NULL for undyed rolls.
 SELECT
-    r.item_id,
-    r.item_codigo,
-    r.item_nombre,
-    r.partida_id,
-    r.cantidad_rollos,
-    r.cantidad_total,
-    r.unidad_codigo,
-    r.estado_calidad,
+    sa.item_id,
+    i.codigo AS item_codigo,
+    i.nombre AS item_nombre,
+    u.codigo AS unidad_codigo,
     ird.articulo_id,
     art.nombre AS articulo_nombre,
+    art.articulo_tipo_id,
     ird.flg_rib,
     art.fibra,
-    p.tenido_id,
-    t.tenido,
-    p.ancho,
-    p.malla,
-    p.rendimiento,
-    p.flg_antipilling,
+    lrd.flg_tenido,
+    lrd.flg_antipilling,
+    lrd.color_x_cliente_id,
     vc.color_id,
     vc.color,
     vc.tono,
     vc.cliente_id,
     vc.color_hex,
     vc.color_x_cliente_hex,
-    c.id AS propietario_id,
-    c.nombre AS propietario
-FROM rollos r
-JOIN item_rollo_detalle ird ON ird.item_id = r.item_id
-JOIN articulo art ON art.id = ird.articulo_id
-LEFT JOIN doc.partida p ON p.id = r.partida_id
-LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
-LEFT JOIN tercero c ON c.id = r.propietario_id
-LEFT JOIN tenido t ON t.id = p.tenido_id
-ORDER BY art.nombre, r.item_nombre;  -- FIX: art.articulo → art.nombre
+    lrd.tenido_id,
+    tn.tenido,
+    lrd.ancho,
+    lrd.malla,
+    lrd.rendimiento,
+    l.propietario_id,
+    c.nombre AS propietario,
+    COUNT(sa.lote_id)           AS cantidad_rollos,
+    SUM(sa.cantidad_disponible) AS cantidad_total
+FROM inventario.vw_stock_actual sa
+JOIN inventario.lote l          ON l.id = sa.lote_id
+JOIN item i                     ON i.id = sa.item_id
+JOIN item_tipo it               ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+JOIN unidad u                   ON u.id = i.unidad_id
+JOIN item_rollo_detalle ird     ON ird.item_id = i.id
+JOIN articulo art               ON art.id = ird.articulo_id
+LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = sa.lote_id
+LEFT JOIN vw_colores vc         ON vc.color_x_cliente_id = lrd.color_x_cliente_id
+LEFT JOIN tenido tn             ON tn.id = lrd.tenido_id
+LEFT JOIN tercero c             ON c.id = l.propietario_id
+GROUP BY
+    sa.item_id, i.codigo, i.nombre, u.codigo,
+    ird.articulo_id, art.nombre, art.articulo_tipo_id, ird.flg_rib, art.fibra,
+    lrd.flg_tenido, lrd.flg_antipilling,
+    lrd.color_x_cliente_id, vc.color_id, vc.color, vc.tono, vc.cliente_id,
+    vc.color_hex, vc.color_x_cliente_hex,
+    lrd.tenido_id, tn.tenido, lrd.ancho, lrd.malla, lrd.rendimiento,
+    l.propietario_id, c.nombre
+ORDER BY art.nombre, i.nombre;
 
 -- ── inventario.vw_stock_insumos ───────────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_stock_insumos AS
@@ -672,8 +675,7 @@ SELECT
     e.nombre || ' ' || e.apellido AS nombre_completo,
     e.rol_id,
     er.nombre AS rol_nombre,
-    e.turno_id,
-    e.perfil_id
+    e.turno_id
 FROM mes.empleado e
 JOIN mes.empleado_rol er ON er.id = e.rol_id
 WHERE e.activo = true;
@@ -903,7 +905,39 @@ FROM (
 WHERE count > 0
 ORDER BY CASE urgencia WHEN 'alta' THEN 1 ELSE 2 END;
 
+-- ── inventario.vw_rollos_por_guia ────────────────────────────
+-- Roll counts and weights aggregated per ingress guia.
+-- Used for intake review and guia → partida assignment UI.
+-- Only covers rolls with a guia (MLR-confectioned rolls excluded).
+CREATE OR REPLACE VIEW inventario.vw_rollos_por_guia AS
+SELECT
+    gr.id                               AS guia_remision_id,
+    gr.serie,
+    gr.correlativo,
+    gr.serie || '-' || gr.correlativo   AS guia_numero,
+    gr.fecha_emision,
+    gr.tercero_id,
+    t.nombre                            AS tercero_nombre,
+    grt.codigo                          AS guia_tipo,
+    COUNT(lrd.lote_id)                  AS total_rollos,
+    COUNT(lrd.lote_id) FILTER (WHERE lrd.flg_tenido = false) AS rollos_crudos,
+    COUNT(lrd.lote_id) FILTER (WHERE lrd.flg_tenido = true)  AS rollos_tenidos,
+    SUM(l.cantidad)                     AS peso_total_kg,
+    -- Stock status
+    COUNT(sa.lote_id)                   AS rollos_en_stock,
+    SUM(sa.cantidad_disponible)         AS peso_en_stock_kg
+FROM doc.guia_remision gr
+JOIN doc.guia_remision_tipo grt         ON grt.id = gr.guia_remision_tipo_id
+JOIN tercero t                          ON t.id = gr.tercero_id
+JOIN inventario.lote_rollo_detalle lrd  ON lrd.guia_remision_id = gr.id
+JOIN inventario.lote l                  ON l.id = lrd.lote_id AND l.flg_elm = false
+LEFT JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+GROUP BY gr.id, gr.serie, gr.correlativo, gr.fecha_emision, gr.tercero_id,
+         t.nombre, grt.codigo;
+
 -- ── Grants ────────────────────────────────────────────────────
+GRANT SELECT ON inventario.vw_rollos_por_guia         TO anon, authenticated;
+GRANT SELECT ON inventario.vw_lotes_rollos_stock      TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_rollos        TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_general       TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_insumos       TO anon, authenticated;

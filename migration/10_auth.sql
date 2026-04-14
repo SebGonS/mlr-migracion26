@@ -136,46 +136,58 @@ CREATE POLICY "auth_read" ON inventario.item_movimiento_tipo FOR SELECT TO authe
 -- ── Inventario ───────────────────────────────────────────────────────────────
 ALTER TABLE public.item                      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.item_insumo_detalle       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.item_rollo_detalle        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE inventario.almacen               ENABLE ROW LEVEL SECURITY;
-ALTER TABLE inventario.ubicacion             ENABLE ROW LEVEL SECURITY;
-ALTER TABLE inventario.lote                  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE inventario.item_movimientos      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE inventario.pesaje                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_rollo_detalle             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.almacen                    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.ubicacion                  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.lote                       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.item_movimientos           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.pesaje                     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventario.lote_rollo_detalle         ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "inventario_ver" ON public.item                 FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
-CREATE POLICY "inventario_ver" ON public.item_insumo_detalle  FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
-CREATE POLICY "inventario_ver" ON public.item_rollo_detalle   FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
-CREATE POLICY "inventario_ver" ON inventario.almacen          FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
-CREATE POLICY "inventario_ver" ON inventario.ubicacion        FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
-CREATE POLICY "inventario_ver" ON inventario.lote             FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
-CREATE POLICY "inventario_ver" ON inventario.item_movimientos FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
-CREATE POLICY "inventario_ver" ON inventario.pesaje           FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON public.item                        FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON public.item_insumo_detalle         FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON public.item_rollo_detalle          FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.almacen                 FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.ubicacion               FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.lote                    FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.item_movimientos        FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "inventario_ver" ON inventario.pesaje                  FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
+CREATE POLICY "ver_lote_rollo"  ON inventario.lote_rollo_detalle     FOR SELECT TO authenticated USING (true);
 
 -- ── Comercial ─────────────────────────────────────────────────────────────────
 ALTER TABLE doc.partida                ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.partida_detalle        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.guia_remision          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.guia_remision_detalle  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.compra                 ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.compra_detalle         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.compra_guia_remision   ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.factura_proveedor      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.letra                  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.factura                ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.factura_detalle        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.catalogo_precios              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.compra                        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.compra_detalle                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.compra_guia_remision          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.factura_proveedor             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.factura_proveedor_detalle     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.letra                         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.letra_factura                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.factura                       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.factura_detalle               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.partida_guia_remision         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.compra_factura_proveedor      ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "comercial_ver" ON doc.partida               FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.partida_detalle       FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.guia_remision         FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.guia_remision_detalle FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.compra                FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.compra_detalle        FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.compra_guia_remision  FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.factura_proveedor     FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.letra                 FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.factura               FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.factura_detalle       FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.partida                    FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.partida_detalle            FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.guia_remision              FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.guia_remision_detalle      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.catalogo_precios           FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.compra                     FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.compra_detalle             FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.compra_guia_remision       FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.factura_proveedor          FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.factura_proveedor_detalle  FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.letra                      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.letra_factura              FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.factura                    FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.factura_detalle            FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.partida_guia_remision      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.compra_factura_proveedor   FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 
 -- ── Producción ────────────────────────────────────────────────────────────────
 ALTER TABLE mes.maquina                      ENABLE ROW LEVEL SECURITY;
@@ -251,7 +263,7 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- │  registrar/anular guia_remision              │ comercial.crear/editar     │
 -- │  crear_compra, vincular_*                    │ comercial.crear            │
 -- │  registrar_factura_proveedor                 │ comercial.crear            │
--- │  registrar_letras, vincular_factura_compra   │ comercial.editar           │
+-- │  registrar_letra, vincular_factura_compra    │ comercial.editar           │
 -- │  pagar_letra                                 │ comercial.editar           │
 -- ├─────────────────────────────────────────────┼────────────────────────────┤
 -- │ INVENTARIO                                                               │
@@ -303,3 +315,107 @@ DROP TRIGGER IF EXISTS trg_bi_auth_users_usuario ON auth.users;
 CREATE TRIGGER trg_bi_auth_users_usuario
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.fn_trg_bi_usuario_from_auth();
+
+  
+-- ============================================================================
+-- IAM: permisos and rol_permiso seed
+-- Idempotent — ON CONFLICT DO NOTHING on both tables.
+-- Covers every permission code referenced in RLS policies and function guards.
+-- ============================================================================
+
+INSERT INTO iam.permiso (code, descripcion) VALUES
+    ('comercial.ver',        'Ver partidas, guías, compras y documentos comerciales'),
+    ('comercial.crear',      'Crear partidas, guías de remisión y compras'),
+    ('comercial.editar',     'Editar documentos comerciales, registrar facturas y letras'),
+    ('inventario.ver',       'Ver stock, lotes, movimientos e ítems'),
+    ('inventario.crear',     'Crear ítems e ingresar stock'),
+    ('inventario.editar',    'Ajustar stock, actualizar pesos y valoraciones'),
+    ('produccion.ver',       'Ver órdenes, pasos, programación y lavados'),
+    ('produccion.crear',     'Crear órdenes de producción'),
+    ('produccion.editar',    'Editar pasos y estructura de órdenes'),
+    ('produccion.ejecutar',  'Iniciar y finalizar pasos y lavados, registrar consumos'),
+    ('produccion.programar', 'Guardar y modificar la programación de máquinas'),
+    ('calidad.ver',          'Ver inspecciones y resultados de calidad'),
+    ('calidad.crear',        'Registrar inspecciones de calidad'),
+    ('calidad.editar',       'Editar inspecciones existentes'),
+    ('configuracion.ver',    'Ver usuarios, roles y configuración del sistema'),
+    ('configuracion.admin',  'Gestionar usuarios, roles, máquinas, operaciones y plantillas')
+ON CONFLICT (code) DO NOTHING;
+
+-- rol_permiso: resolved by code so IDs don't need to be hardcoded
+INSERT INTO iam.rol_permiso (rol_id, permiso_id)
+SELECT r.id, p.id
+FROM (VALUES
+    -- ── admin: todo ──────────────────────────────────────────
+    ('admin', 'comercial.ver'),
+    ('admin', 'comercial.crear'),
+    ('admin', 'comercial.editar'),
+    ('admin', 'inventario.ver'),
+    ('admin', 'inventario.crear'),
+    ('admin', 'inventario.editar'),
+    ('admin', 'produccion.ver'),
+    ('admin', 'produccion.crear'),
+    ('admin', 'produccion.editar'),
+    ('admin', 'produccion.ejecutar'),
+    ('admin', 'produccion.programar'),
+    ('admin', 'calidad.ver'),
+    ('admin', 'calidad.crear'),
+    ('admin', 'calidad.editar'),
+    ('admin', 'configuracion.ver'),
+    ('admin', 'configuracion.admin'),
+    -- ── jefe_planta: full operations, no user/config mgmt ────
+    ('jefe_planta', 'comercial.ver'),
+    ('jefe_planta', 'inventario.ver'),
+    ('jefe_planta', 'inventario.crear'),
+    ('jefe_planta', 'inventario.editar'),
+    ('jefe_planta', 'produccion.ver'),
+    ('jefe_planta', 'produccion.crear'),
+    ('jefe_planta', 'produccion.editar'),
+    ('jefe_planta', 'produccion.ejecutar'),
+    ('jefe_planta', 'produccion.programar'),
+    ('jefe_planta', 'calidad.ver'),
+    ('jefe_planta', 'calidad.crear'),
+    ('jefe_planta', 'calidad.editar'),
+    ('jefe_planta', 'configuracion.ver'),
+    -- ── supervisor_produccion: plan + execute, read-only elsewhere
+    ('supervisor_produccion', 'comercial.ver'),
+    ('supervisor_produccion', 'inventario.ver'),
+    ('supervisor_produccion', 'produccion.ver'),
+    ('supervisor_produccion', 'produccion.crear'),
+    ('supervisor_produccion', 'produccion.editar'),
+    ('supervisor_produccion', 'produccion.ejecutar'),
+    ('supervisor_produccion', 'produccion.programar'),
+    ('supervisor_produccion', 'calidad.ver'),
+    -- ── operador_produccion: execute only ────────────────────
+    ('operador_produccion', 'produccion.ver'),
+    ('operador_produccion', 'produccion.ejecutar'),
+    ('operador_produccion', 'inventario.ver'),
+    ('operador_produccion', 'calidad.ver'),
+    -- ── calidad ──────────────────────────────────────────────
+    ('calidad', 'calidad.ver'),
+    ('calidad', 'calidad.crear'),
+    ('calidad', 'calidad.editar'),
+    ('calidad', 'produccion.ver'),
+    ('calidad', 'inventario.ver'),
+    -- ── inventario ───────────────────────────────────────────
+    ('inventario', 'inventario.ver'),
+    ('inventario', 'inventario.crear'),
+    ('inventario', 'inventario.editar'),
+    ('inventario', 'produccion.ver'),
+    ('inventario', 'comercial.ver'),
+    -- ── compras ──────────────────────────────────────────────
+    ('compras', 'comercial.ver'),
+    ('compras', 'comercial.crear'),
+    ('compras', 'comercial.editar'),
+    ('compras', 'inventario.ver'),
+    ('compras', 'inventario.crear'),
+    -- ── sistema: automated processes, broad read + execute ───
+    ('sistema', 'produccion.ver'),
+    ('sistema', 'produccion.ejecutar'),
+    ('sistema', 'inventario.ver'),
+    ('sistema', 'inventario.editar'),
+    ('sistema', 'calidad.ver')
+) AS mapping(rol_code, permiso_code)
+JOIN iam.rol     r ON r.code = mapping.rol_code
+JOIN iam.permiso p ON p.code = mapping.permiso_code
+ON CONFLICT (rol_id, permiso_id) DO NOTHING;

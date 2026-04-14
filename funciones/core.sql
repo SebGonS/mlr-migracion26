@@ -1095,6 +1095,40 @@ WITH orden_rollos AS (
             USING ERRCODE = 'check_violation';
     END IF;
 
+    -- --------------------------------------------------
+    -- VALIDAR QUE LAS GUÍAS DE LOS ROLLOS ESTÉN REGISTRADAS EN LA PARTIDA
+    -- Rolls sin guia (confeccionados por MLR) se omiten del chequeo.
+    -- --------------------------------------------------
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
+        JOIN inventario.lote l                 ON l.id = (i->>'lote_id')::INT
+        JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+        WHERE lrd.guia_remision_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM doc.partida_guia_remision pgr
+              WHERE pgr.partida_id      = (p_orden->>'partida_id')::BIGINT
+                AND pgr.guia_remision_id = lrd.guia_remision_id
+          )
+    ) THEN
+        RAISE EXCEPTION
+            'Uno o más rollos provienen de guías no registradas en la partida. Registre las guías antes de asignar estos rollos.'
+            USING ERRCODE = 'check_violation',
+                  DETAIL  = (
+                      SELECT string_agg(DISTINCT gr.numero::text, ', ' ORDER BY gr.numero::text)
+                      FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
+                      JOIN inventario.lote l                 ON l.id = (i->>'lote_id')::INT
+                      JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+                      JOIN doc.guia_remision gr              ON gr.id = lrd.guia_remision_id
+                      WHERE lrd.guia_remision_id IS NOT NULL
+                        AND NOT EXISTS (
+                            SELECT 1 FROM doc.partida_guia_remision pgr
+                            WHERE pgr.partida_id      = (p_orden->>'partida_id')::BIGINT
+                              AND pgr.guia_remision_id = lrd.guia_remision_id
+                        )
+                  );
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('crear_orden_produccion', v_usr_id, p_orden);
 

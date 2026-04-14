@@ -242,6 +242,8 @@ CREATE TABLE mes.empleado (
     apellido text,
     rol_id smallint NOT NULL REFERENCES mes.empleado_rol(id),
     turno_id smallint REFERENCES turno(id),   -- legacy FK
+    activo   BOOLEAN NOT NULL DEFAULT true,
+    perfil_id INT REFERENCES public.usuario(id),  -- auth user account link for employee portal
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
@@ -303,6 +305,44 @@ CREATE TABLE inventario.pesaje (
     fyh_cre             TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ── inventario.lote_rollo_detalle ────────────────────────────
+-- SAP Batch Classification equivalent for roll lotes.
+-- 1:1 extension of inventario.lote for ROLLO lotes.
+-- Every ROLLO lote must have exactly one row here (enforced at all creation points).
+--
+--   item             → stable catalog (what material it is)
+--   lote             → physical instance (this specific roll)
+--   lote_rollo_detalle → processing state (what has been done to it)
+--
+-- Attributes set at ingress: guia_remision_id (billing anchor)
+-- Physical attributes (ancho, malla, rendimiento): set from partida at production time
+-- Dyeing attributes: color_x_cliente_id, tenido_id, flg_tenido, flg_antipilling
+--   set when dyeing step completes (registrar_produccion)
+--
+-- Replaces lote.detalles JSONB for roll-specific attributes.
+CREATE TABLE inventario.lote_rollo_detalle (
+    lote_id             INT PRIMARY KEY REFERENCES inventario.lote(id),
+
+    -- Billing anchor — set at ingress, carried forward through production
+    guia_remision_id    BIGINT REFERENCES doc.guia_remision(id),
+
+    -- Physical attributes — set at ingress (from partida) or on first weighing
+    ancho               TEXT,
+    malla               TEXT,
+    rendimiento         TEXT,
+
+    -- Dyeing identity — set when production (dyeing) step completes
+    color_x_cliente_id  INT REFERENCES color_x_cliente(id),
+    tenido_id           INT REFERENCES tenido(id),
+    flg_tenido          BOOLEAN NOT NULL DEFAULT false,
+    flg_antipilling     BOOLEAN NOT NULL DEFAULT false,
+
+    usr_cre INT,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT,
+    fyh_mod TIMESTAMPTZ
+);
+
 -- ── mes.orden_produccion_paso ─────────────────────────────────
 CREATE TABLE mes.orden_produccion_paso (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -320,6 +360,8 @@ CREATE TABLE mes.orden_produccion_paso (
     flg_genera_produccion bool DEFAULT false,
     fyh_inicio timestamptz,
     fyh_fin timestamptz,
+    -- Free-text field for backfill attribution when registering production retroactively
+    observacion_backfill TEXT,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
@@ -475,16 +517,53 @@ CREATE TABLE doc.factura_proveedor (
     )
 );
 
+-- ── doc.factura_proveedor_detalle ─────────────────────────────
+-- Per-line detail of a supplier invoice.
+-- Authoritative source for item purchase price — use this for
+-- recipe cost calculations, not compra_detalle.precio_unitario.
+-- compra_detalle.precio_unitario is the estimated/agreed price at the
+-- time of purchase registration (which may precede the invoice).
+-- A factura_proveedor without detalle rows is valid for lump-sum invoices.
+CREATE TABLE doc.factura_proveedor_detalle (
+    id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    factura_proveedor_id BIGINT        NOT NULL REFERENCES doc.factura_proveedor(id),
+    item_id              INT           NOT NULL REFERENCES item(id),
+    cantidad             NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
+    precio_unitario      NUMERIC(12,4) NOT NULL CHECK (precio_unitario >= 0),
+    igv_porcentaje       NUMERIC(5,2)  NOT NULL DEFAULT 18
+                             CHECK (igv_porcentaje IN (0, 18)),
+    subtotal_linea       NUMERIC(12,2) GENERATED ALWAYS AS
+                             (ROUND(cantidad * precio_unitario, 2)) STORED,
+    igv_linea            NUMERIC(12,2) GENERATED ALWAYS AS
+                             (ROUND(cantidad * precio_unitario * igv_porcentaje / 100, 2)) STORED,
+    total_linea          NUMERIC(12,2) GENERATED ALWAYS AS
+                             (ROUND(cantidad * precio_unitario * (1 + igv_porcentaje / 100), 2)) STORED,
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW()
+);
+
+
 CREATE TABLE doc.compra (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    tercero_id   INT NOT NULL REFERENCES tercero(id),
-    factura_proveedor_id BIGINT REFERENCES doc.factura_proveedor(id),
+    tercero_id  INT NOT NULL REFERENCES tercero(id),
     fecha       DATE NOT NULL DEFAULT CURRENT_DATE,
     observacion TEXT,
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod INT, fyh_mod TIMESTAMPTZ,
     flg_elm BOOLEAN NOT NULL DEFAULT FALSE,
     usr_elm INT,  fyh_elm TIMESTAMPTZ
+);
+
+-- ── doc.compra_factura_proveedor ───────────────────────────────
+-- N:M junction: one compra can be covered by multiple invoices
+-- (e.g. partial shipments, amended invoices, factura-en-0 + real).
+-- One factura can consolidate multiple compras from the same supplier.
+CREATE TABLE doc.compra_factura_proveedor (
+    compra_id            BIGINT NOT NULL REFERENCES doc.compra(id),
+    factura_proveedor_id BIGINT NOT NULL REFERENCES doc.factura_proveedor(id),
+    PRIMARY KEY (compra_id, factura_proveedor_id),
+    nota     TEXT,
+    usr_cre  INT,
+    fyh_cre  TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE doc.compra_detalle (
@@ -502,19 +581,117 @@ CREATE TABLE doc.compra_guia_remision (
     PRIMARY KEY (compra_id, guia_remision_id)
 );
 
+-- ── doc.catalogo_precios ──────────────────────────────────────
+-- Per-kg rate for each billable service combination.
+-- All prices are in USD — MLR bills exclusively in USD.
+--
+-- Lookup key: operacion × color/client × article type × dyeing × fiber.
+-- NULL in any dimension = wildcard (matches any value of that dimension).
+-- Most-specific active match wins — see doc.fn_get_precio().
+--
+-- Historicity: rows are immutable once created. To change a price,
+-- set fyh_elm on the current row (via doc.upsert_catalogo_precio)
+-- and insert a new row. This preserves pricing history for invoice
+-- reconstruction without a separate history table.
+--
+-- Antipilling: stored as precio_antipilling on the TENIDO row.
+-- The billing query emits a second line when
+-- partida.flg_antipilling = true AND precio_antipilling IS NOT NULL.
+--
+-- costo_kg: chemical cost per kg snapshot at time of price-setting (ex-IGV).
+-- NULL for legacy rows and non-dyeing operations.
+-- Margin is always derived: (precio_kg - costo_kg) / precio_kg.
+--
+-- tercero_id: client-level wildcard dimension.
+-- Specificity tiers (high → low):
+--   color_x_cliente_id  — specific color for specific client
+--   tercero_id          — any color for this client
+--   both NULL           — universal default
+-- color_x_cliente_id and tercero_id are mutually exclusive.
+CREATE TABLE IF NOT EXISTS doc.catalogo_precios (
+    id                  BIGINT   GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    -- Lookup dimensions (NULL = wildcard)
+    operacion_id        SMALLINT NOT NULL REFERENCES mes.operacion(id),
+    color_x_cliente_id  INT      REFERENCES color_x_cliente(id),
+    tercero_id          INT      REFERENCES tercero(id),
+    articulo_tipo_id    SMALLINT REFERENCES articulo_tipo(id),
+    tenido_id           INT      REFERENCES tenido(id),
+    fibra               SMALLINT,
+
+    -- Prices (USD/kg)
+    precio_kg           NUMERIC(10,4) NOT NULL CHECK (precio_kg >= 0),
+    precio_antipilling  NUMERIC(10,4)           CHECK (precio_antipilling >= 0),
+
+    -- Cost snapshot (ex-IGV, from recipe at time of price-setting)
+    costo_kg            NUMERIC(10,4)           CHECK (costo_kg IS NULL OR costo_kg >= 0),
+
+    -- Audit (fyh_elm = inactive: superseded or deleted)
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_elm INT, fyh_elm TIMESTAMPTZ,
+
+    CONSTRAINT chk_precio_client_dim
+        CHECK (color_x_cliente_id IS NULL OR tercero_id IS NULL)
+);
+
+GRANT SELECT, INSERT, UPDATE ON doc.catalogo_precios TO authenticated;
+
+
+-- ── doc.partida_guia_remision ─────────────────────────────────
+-- N:N junction: service order ↔ ingress guias. Mirrors compra_guia_remision.
+-- Authoritative document-layer link — the derivable path
+-- (guia_detalle → lote → OP → partida) exists for genealogy
+-- but is expensive; this is the query-time anchor.
+--
+-- SAP document graph (service/sales side):
+--   partida ─────────────────────── hub (service order)
+--     ├── partida_guia_remision ──→ guia_remision CLIENTE_ENVIO_PROCESO (ingress)
+--     └── factura ────────────────→ financial document
+--           └── factura_detalle ─── one line per (dispatch guia × service × dimensions)
+--
+-- Unbilled coverage: DESPACHO_CLIENTE guias whose id does not appear in any
+-- factura_detalle.guia_remision_id row — no junction table needed for that.
+CREATE TABLE doc.partida_guia_remision (
+    partida_id        BIGINT NOT NULL REFERENCES doc.partida(id),
+    guia_remision_id  BIGINT NOT NULL REFERENCES doc.guia_remision(id),
+    PRIMARY KEY (partida_id, guia_remision_id),
+    usr_cre INT,
+    fyh_cre TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ── doc.letra ─────────────────────────────────────────────────
+-- Payment instrument (SAP: payment document).
+-- Standalone — not tied to a single factura.
+-- Clearing to one or more facturas is done via doc.letra_factura.
+-- tercero_id: the provider who issued the letra.
 CREATE TABLE doc.letra (
-    id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    factura_proveedor_id BIGINT NOT NULL REFERENCES doc.factura_proveedor(id),
-    numero               TEXT,
-    monto                NUMERIC(12,2) NOT NULL CHECK (monto > 0),
-    fecha_giro           DATE,
-    fecha_vencimiento    DATE NOT NULL,
-    banco                TEXT,
-    estado               letra_estado_enum NOT NULL DEFAULT 'emitida',
-    fecha_pago           DATE,
-    observacion          TEXT,
+    id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tercero_id        INT  NOT NULL REFERENCES tercero(id),
+    numero            TEXT,
+    monto             NUMERIC(12,2) NOT NULL CHECK (monto > 0),
+    fecha_giro        DATE,
+    fecha_vencimiento DATE NOT NULL,
+    banco             TEXT,
+    estado            letra_estado_enum NOT NULL DEFAULT 'emitida',
+    fecha_pago        DATE,
+    observacion       TEXT,
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod INT, fyh_mod TIMESTAMPTZ
+);
+
+-- ── doc.letra_factura ─────────────────────────────────────────
+-- Clearing document: applies a portion of a letra to a factura_proveedor.
+-- SAP equivalent: clearing item / open item matching.
+-- One letra → N facturas; one factura → N letras (many-to-many with amount).
+-- monto_aplicado: portion of letra.monto allocated to this factura.
+-- Invariant (enforced by registrar_letra): SUM(monto_aplicado) per letra ≤ letra.monto
+CREATE TABLE doc.letra_factura (
+    id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    letra_id             BIGINT NOT NULL REFERENCES doc.letra(id),
+    factura_proveedor_id BIGINT NOT NULL REFERENCES doc.factura_proveedor(id),
+    monto_aplicado       NUMERIC(12,2) NOT NULL CHECK (monto_aplicado > 0),
+    UNIQUE (letra_id, factura_proveedor_id),
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ── doc.factura ───────────────────────────────────────────────
@@ -560,14 +737,29 @@ CREATE TABLE doc.factura (
 );
 
 -- ── doc.factura_detalle ────────────────────────────────────────
--- One line per billable item / service.
+-- One row per (dispatch guia × operacion × billing dimensions).
 -- partida_id links back to the sales order for billing-to-order reconciliation.
 -- igv_porcentaje allows 0% for IGV-exempt items (e.g. exported goods).
+--
+-- guia_remision_id: dispatch guia this line traces to (justified denorm —
+--   natural display grouping unit, expensive to re-derive through movements).
+--   NULL for ad-hoc lines.
+-- operacion_id: which billable service (TENIDO, PLANCHADO...). NULL for ad-hoc.
+-- es_antipilling: true for the antipilling surcharge line on TENIDO.
+-- Billing dimensions denormalized at invoice time — financial document is
+-- self-contained and does not depend on partida state.
 CREATE TABLE doc.factura_detalle (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     factura_id          BIGINT NOT NULL REFERENCES doc.factura(id),
     -- Sales order line this invoice line covers (nullable for ad-hoc lines)
-    partida_id          BIGINT REFERENCES doc.partida(id),
+    partida_id          BIGINT   REFERENCES doc.partida(id),
+    -- Billing document links (denormalized at invoice time)
+    guia_remision_id    BIGINT   REFERENCES doc.guia_remision(id),
+    operacion_id        SMALLINT REFERENCES mes.operacion(id),
+    es_antipilling      BOOLEAN  NOT NULL DEFAULT false,
+    articulo_tipo_id    SMALLINT REFERENCES articulo_tipo(id),
+    color_x_cliente_id  INT      REFERENCES color_x_cliente(id),
+    tenido_id           INT      REFERENCES tenido(id),
     descripcion         TEXT   NOT NULL,
     cantidad            NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
     unidad_id           INT    NOT NULL REFERENCES unidad(id),
@@ -584,8 +776,12 @@ CREATE TABLE doc.factura_detalle (
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW()
 );
 
-GRANT SELECT ON doc.factura         TO authenticated;
-GRANT SELECT ON doc.factura_detalle TO authenticated;
+GRANT SELECT ON doc.factura                         TO authenticated;
+GRANT SELECT ON doc.factura_detalle                 TO authenticated;
+GRANT SELECT ON doc.factura_proveedor_detalle       TO authenticated;
+GRANT SELECT ON doc.compra_factura_proveedor        TO authenticated;
+GRANT SELECT ON doc.partida_guia_remision           TO authenticated;
+GRANT SELECT ON inventario.lote_rollo_detalle       TO authenticated;
 
 -- ── mes.tiempos_estandar_tenido ───────────────────────────────
 -- Planning reference: expected duration for a dyeing step given
