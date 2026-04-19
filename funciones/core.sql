@@ -1807,7 +1807,7 @@ IF v_guia_tipo.flg_emitida THEN
     SELECT
         v_guia_id,
         (item->>'item_id')::INT,
-        (item->>'cantidad')::NUMERIC(12,2),
+        (item->>'cantidad')::NUMERIC(12,4),
         (item->>'lote_id')::INT,
         (item->>'ubicacion_id')::INT
     FROM jsonb_array_elements(p_guia->'items') AS item;
@@ -1827,7 +1827,7 @@ IF v_guia_tipo.flg_emitida THEN
         v_guia_tipo.item_movimiento_tipo_id,
         (item->>'ubicacion_id')::INT,  -- per-item origin location
         NULL, -- destination is external
-        (item->>'cantidad')::NUMERIC(12,2),
+        (item->>'cantidad')::NUMERIC(12,4),
         v_fecha_mov,
         'GUIA_REMISION',
         v_guia_id
@@ -1844,7 +1844,7 @@ ELSE
         (item->>'lote_id')::INT,
         v_guia_tipo.item_movimiento_tipo_id,
         (item->>'ubicacion_id')::INT,
-        (item->>'cantidad')::NUMERIC(12,2),
+        (item->>'cantidad')::NUMERIC(12,4),
         v_fecha_mov,
         'GUIA_REMISION',
         v_guia_id
