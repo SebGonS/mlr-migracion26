@@ -1,13 +1,27 @@
 -- ═══════════════════════════════════════════════════════════════
 -- Facturación / Pricing functions
--- Depends on: migration/15_catalogo_precios.sql,
---             migration/17_billing_document_links.sql
+-- Depends on: migration/07 (doc.catalogo_precios, doc.factura),
+--             migration/05 (inventario.lote), funciones/core.sql
+--
+-- Pricing workflow:
+--   1. Client onboarded → insert ANTIPILLING wildcard row (tercero_id, precio_kg=0.15/0.10)
+--   2. Recipe approved → vw_precios_pendientes surfaces the gap
+--   3. Admin calls fn_precio_info (flg_antipilling=false + true) to preview cost/margin,
+--      then upsert_catalogo_precio for each variant
+--   4. Dispatch → vw_pendientes_facturacion → registrar_factura_cliente
+--
+-- Antipilling:
+--   Two separate concerns:
+--   a) TENIDO catalog rows have flg_antipilling=false/true — tracks costo_kg per variant
+--      (antipilling recipe uses different/more chemicals → higher cost)
+--   b) ANTIPILLING ghost operation row (client wildcard) — the service charge billed
+--      as a separate invoice line when partida.flg_antipilling = true
+--   Legacy equivalent: adicional_id=0/1 rows + hardcoded CASE WHEN cliente='Urban'
 -- ═══════════════════════════════════════════════════════════════
 
 
 -- ── doc.fn_get_precio ─────────────────────────────────────────
--- Returns the applicable precio_kg (and precio_antipilling) for a
--- given service combination on a given date (defaults to today).
+-- Returns the applicable precio_kg for a given service combination.
 --
 -- NULL dimensions in catalog rows are wildcards: a row with
 -- color_x_cliente_id = NULL matches any client/color value.
@@ -20,13 +34,14 @@ CREATE OR REPLACE FUNCTION doc.fn_get_precio(
     p_tercero_id          INT,
     p_articulo_tipo_id    SMALLINT,
     p_tenido_id           INT,
-    p_fibra               SMALLINT
+    p_fibra               SMALLINT,
+    p_flg_antipilling     BOOLEAN DEFAULT NULL
 )
-RETURNS TABLE (precio_kg NUMERIC(10,4), precio_antipilling NUMERIC(10,4))
+RETURNS NUMERIC(10,4)
 LANGUAGE sql STABLE
 SET search_path TO 'doc', 'public'
 AS $$
-    SELECT cp.precio_kg, cp.precio_antipilling
+    SELECT cp.precio_kg
     FROM doc.catalogo_precios cp
     WHERE
         cp.operacion_id = p_operacion_id
@@ -39,6 +54,7 @@ AS $$
         AND (cp.articulo_tipo_id   IS NULL OR cp.articulo_tipo_id   = p_articulo_tipo_id)
         AND (cp.tenido_id          IS NULL OR cp.tenido_id          = p_tenido_id)
         AND (cp.fibra              IS NULL OR cp.fibra              = p_fibra)
+        AND (cp.flg_antipilling    IS NULL OR cp.flg_antipilling    = p_flg_antipilling)
         AND cp.fyh_elm IS NULL
     ORDER BY
         -- color_x_cliente_id wins over tercero_id (implies the client + specific color)
@@ -46,7 +62,8 @@ AS $$
        + CASE WHEN cp.tercero_id         IS NOT NULL THEN 1 ELSE 0 END
        + CASE WHEN cp.articulo_tipo_id   IS NOT NULL THEN 1 ELSE 0 END
        + CASE WHEN cp.tenido_id          IS NOT NULL THEN 1 ELSE 0 END
-       + CASE WHEN cp.fibra              IS NOT NULL THEN 1 ELSE 0 END) DESC,
+       + CASE WHEN cp.fibra              IS NOT NULL THEN 1 ELSE 0 END
+       + CASE WHEN cp.flg_antipilling    IS NOT NULL THEN 1 ELSE 0 END) DESC,
         cp.fyh_cre DESC
     LIMIT 1;
 $$;
@@ -113,11 +130,11 @@ $$;
 --   - Fetches current catalog price via fn_get_precio.
 --
 -- margen = (precio_kg - costo_kg) / precio_kg (NULL if no price set).
+-- p_flg_antipilling drives both the recipe lookup (for costo_kg) and the catalog lookup.
+-- Pass NULL for non-TENIDO operations — returns price only, no cost.
 --
--- Only meaningful for TENIDO operations. For PLANCHADO/PERCHADO,
--- pass p_receta_id = NULL — returns price only, no cost.
---
--- p_flg_antipilling: when true, also returns the antipilling surcharge margin.
+-- For the price-setting form: call twice (false + true) to show both base and
+-- antipilling variant costs side by side, helping set precio_kg for each.
 CREATE OR REPLACE FUNCTION doc.fn_precio_info(
     p_operacion_id        SMALLINT,
     p_color_x_cliente_id  INT,
@@ -125,15 +142,13 @@ CREATE OR REPLACE FUNCTION doc.fn_precio_info(
     p_articulo_tipo_id    SMALLINT,
     p_tenido_id           INT,
     p_fibra               SMALLINT,
-    p_flg_antipilling     BOOLEAN DEFAULT false
+    p_flg_antipilling     BOOLEAN DEFAULT NULL
 )
 RETURNS TABLE (
-    receta_id           INT,
-    costo_kg            NUMERIC(10,4),
-    precio_kg           NUMERIC(10,4),
-    precio_antipilling  NUMERIC(10,4),
-    margen              NUMERIC(8,6),   -- (precio - costo) / precio; NULL if no price
-    margen_antipilling  NUMERIC(8,6)    -- NULL if flg_antipilling=false or no price set
+    receta_id  INT,
+    costo_kg   NUMERIC(10,4),
+    precio_kg  NUMERIC(10,4),
+    margen     NUMERIC(8,6)    -- (precio_kg - costo_kg) / precio_kg; NULL if no price
 )
 LANGUAGE plpgsql STABLE
 SECURITY DEFINER
@@ -142,57 +157,45 @@ AS $$
 DECLARE
     v_receta_id  INT;
     v_costo_kg   NUMERIC(10,4);
-    v_precio     RECORD;
+    v_precio_kg  NUMERIC(10,4);
 BEGIN
     IF NOT jwt_has_permission('comercial.ver') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.ver'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    -- Find approved recipe for these dyeing dimensions (NULL = no recipe, e.g. non-TENIDO op)
-    SELECT rt.id INTO v_receta_id
-    FROM receta.tenido rt
-    WHERE rt.color_x_cliente_id = p_color_x_cliente_id
-      AND rt.articulo_tipo_id   = p_articulo_tipo_id
-      AND rt.fibra               = p_fibra
-      AND rt.tenido_id           = p_tenido_id
-      AND rt.flg_antipilling     = p_flg_antipilling
-      AND rt.flg_produccion      = true
-    LIMIT 1;
+    -- Find approved recipe matching p_flg_antipilling variant.
+    -- NULL → skip recipe lookup (non-TENIDO or ANTIPILLING op).
+    IF p_flg_antipilling IS NOT NULL THEN
+        SELECT rt.id INTO v_receta_id
+        FROM receta.tenido rt
+        WHERE rt.color_x_cliente_id = p_color_x_cliente_id
+          AND rt.articulo_tipo_id   = p_articulo_tipo_id
+          AND rt.fibra               = p_fibra
+          AND rt.tenido_id           = p_tenido_id
+          AND rt.flg_antipilling     = p_flg_antipilling
+          AND rt.flg_produccion      = true
+        LIMIT 1;
+    END IF;
 
     -- Compute chemical cost (NULL if no recipe)
     IF v_receta_id IS NOT NULL THEN
         v_costo_kg := doc.fn_get_costo_receta(v_receta_id);
     END IF;
 
-    -- Fetch current catalog price
-    SELECT p.precio_kg, p.precio_antipilling
-    INTO v_precio
-    FROM doc.fn_get_precio(
-        p_operacion_id,
-        p_color_x_cliente_id,
-        p_tercero_id,
-        p_articulo_tipo_id,
-        p_tenido_id,
-        p_fibra
-    ) p;
+    -- Fetch current catalog price for this variant
+    v_precio_kg := doc.fn_get_precio(
+        p_operacion_id, p_color_x_cliente_id, p_tercero_id,
+        p_articulo_tipo_id, p_tenido_id, p_fibra, p_flg_antipilling
+    );
 
     RETURN QUERY SELECT
         v_receta_id,
         v_costo_kg,
-        v_precio.precio_kg,
-        v_precio.precio_antipilling,
+        v_precio_kg,
         CASE
-            WHEN v_precio.precio_kg IS NOT NULL AND v_costo_kg IS NOT NULL
-                 AND v_precio.precio_kg > 0
-            THEN ROUND((v_precio.precio_kg - v_costo_kg) / v_precio.precio_kg, 6)
-            ELSE NULL
-        END,
-        CASE
-            WHEN p_flg_antipilling
-                 AND v_precio.precio_antipilling IS NOT NULL AND v_costo_kg IS NOT NULL
-                 AND v_precio.precio_antipilling > 0
-            THEN ROUND((v_precio.precio_antipilling - v_costo_kg) / v_precio.precio_antipilling, 6)
+            WHEN v_precio_kg IS NOT NULL AND v_costo_kg IS NOT NULL AND v_precio_kg > 0
+            THEN ROUND((v_precio_kg - v_costo_kg) / v_precio_kg, 6)
             ELSE NULL
         END;
 END;
@@ -224,8 +227,8 @@ CREATE OR REPLACE FUNCTION doc.upsert_catalogo_precio(
     p_articulo_tipo_id    SMALLINT,
     p_tenido_id           INT,
     p_fibra               SMALLINT,
-    p_precio_kg           NUMERIC(10,4),
-    p_precio_antipilling  NUMERIC(10,4) DEFAULT NULL
+    p_flg_antipilling     BOOLEAN,      -- NULL for ANTIPILLING op rows and non-TENIDO ops
+    p_precio_kg           NUMERIC(10,4)
 )
 RETURNS BIGINT
 LANGUAGE plpgsql
@@ -247,18 +250,24 @@ BEGIN
         RAISE EXCEPTION 'color_x_cliente_id and tercero_id are mutually exclusive';
     END IF;
 
-    -- Auto-compute cost from the approved recipe (NULL if none — non-TENIDO or no recipe yet)
-    SELECT rt.id INTO v_receta_id
-    FROM receta.tenido rt
-    WHERE rt.color_x_cliente_id = p_color_x_cliente_id
-      AND rt.articulo_tipo_id   = p_articulo_tipo_id
-      AND rt.fibra               = p_fibra
-      AND rt.tenido_id           = p_tenido_id
-      AND rt.flg_produccion      = true
-    LIMIT 1;
+    -- Auto-compute cost from the approved recipe matching p_flg_antipilling.
+    -- TENIDO base row (false) → base recipe cost.
+    -- TENIDO antipilling row (true) → antipilling recipe cost (higher chemicals).
+    -- Non-TENIDO or ANTIPILLING op (NULL) → no recipe lookup.
+    IF p_flg_antipilling IS NOT NULL THEN
+        SELECT rt.id INTO v_receta_id
+        FROM receta.tenido rt
+        WHERE rt.color_x_cliente_id = p_color_x_cliente_id
+          AND rt.articulo_tipo_id   = p_articulo_tipo_id
+          AND rt.fibra               = p_fibra
+          AND rt.tenido_id           = p_tenido_id
+          AND rt.flg_antipilling     = p_flg_antipilling
+          AND rt.flg_produccion      = true
+        LIMIT 1;
 
-    IF v_receta_id IS NOT NULL THEN
-        v_costo_kg := doc.fn_get_costo_receta(v_receta_id);
+        IF v_receta_id IS NOT NULL THEN
+            v_costo_kg := doc.fn_get_costo_receta(v_receta_id);
+        END IF;
     END IF;
 
     UPDATE doc.catalogo_precios
@@ -270,14 +279,15 @@ BEGIN
         AND COALESCE(articulo_tipo_id::int, -1) = COALESCE(p_articulo_tipo_id::int, -1)
         AND COALESCE(tenido_id,             -1) = COALESCE(p_tenido_id,             -1)
         AND COALESCE(fibra::int,            -1) = COALESCE(p_fibra::int,            -1)
+        AND (flg_antipilling IS NOT DISTINCT FROM p_flg_antipilling)
         AND fyh_elm IS NULL;
 
     INSERT INTO doc.catalogo_precios (
         operacion_id, color_x_cliente_id, tercero_id, articulo_tipo_id,
-        tenido_id, fibra, precio_kg, precio_antipilling, costo_kg, usr_cre
+        tenido_id, fibra, flg_antipilling, precio_kg, costo_kg, usr_cre
     ) VALUES (
         p_operacion_id, p_color_x_cliente_id, p_tercero_id, p_articulo_tipo_id,
-        p_tenido_id, p_fibra, p_precio_kg, p_precio_antipilling, v_costo_kg, v_usr_id
+        p_tenido_id, p_fibra, p_flg_antipilling, p_precio_kg, v_costo_kg, v_usr_id
     )
     RETURNING id INTO v_id;
 
@@ -343,39 +353,41 @@ AS $$
             op.id::smallint                         AS operacion_id,
             op.nombre                               AS operacion,
             false                                   AS es_antipilling,
-            (doc.fn_get_precio(
+            doc.fn_get_precio(
                 op.id::smallint,
                 pt.color_x_cliente_id,
                 pt.tercero_id,
                 pt.articulo_tipo_id,
-                -- tenido_id only relevant for TENIDO operation
                 CASE WHEN op.codigo = 'TENIDO' THEN pt.tenido_id ELSE NULL END,
-                pt.fibra
-            )).precio_kg                            AS precio_kg
+                pt.fibra,
+                -- pass flg_antipilling for TENIDO so cost-matched row is used;
+                -- NULL for other ops (wildcard — no antipilling dimension)
+                CASE WHEN op.codigo = 'TENIDO' THEN pt.flg_antipilling ELSE NULL END
+            )                                       AS precio_kg
         FROM partidas pt
         JOIN LATERAL unnest(pt.operacion_ids) AS oid ON true
         JOIN mes.operacion op ON op.id = oid
 
         UNION ALL
 
-        -- Antipilling surcharge line (TENIDO only, when flag is set)
+        -- Antipilling service charge line: billed when TENIDO completed + partida has flag.
+        -- Client-level only — only tercero_id matters (Urban vs others).
         SELECT
             pt.partida_id,
-            op.id::smallint,
+            antipil_op.id::smallint,
             'Antipilling',
             true,
-            (doc.fn_get_precio(
-                op.id::smallint,
-                pt.color_x_cliente_id,
+            doc.fn_get_precio(
+                antipil_op.id::smallint,
+                NULL,
                 pt.tercero_id,
-                pt.articulo_tipo_id,
-                pt.tenido_id,
-                pt.fibra
-            )).precio_antipilling
+                NULL, NULL, NULL, NULL
+            )
         FROM partidas pt
-        JOIN mes.operacion op ON op.codigo = 'TENIDO'
+        JOIN mes.operacion antipil_op ON antipil_op.codigo = 'ANTIPILLING'
+        JOIN mes.operacion tenido_op  ON tenido_op.codigo  = 'TENIDO'
         WHERE pt.flg_antipilling = true
-          AND op.id = ANY(pt.operacion_ids)
+          AND tenido_op.id = ANY(pt.operacion_ids)
     )
     SELECT
         l.partida_id,
@@ -390,10 +402,14 @@ $$;
 
 
 -- ── doc.vw_precios_pendientes ─────────────────────────────────
--- Distinct (operacion, color_x_cliente, articulo_tipo, tenido, fibra)
--- combinations from active partidas that have no active catalog entry.
+-- Combinations from active partidas that have no active catalog entry.
 -- Drives the pricing workflow: operator sees what needs a rate set.
 -- Equivalent to legacy vw_recetas_precio_pendiente.
+--
+-- For TENIDO: emits one row per flg_antipilling variant (false + true when
+-- partida.flg_antipilling=true). Both variants must be priced independently
+-- because costo_kg differs between base and antipilling recipes.
+-- ANTIPILLING wildcard rows are client onboarding — not surfaced here.
 CREATE OR REPLACE VIEW doc.vw_precios_pendientes AS
 SELECT DISTINCT
     op.id                   AS operacion_id,
@@ -407,17 +423,27 @@ SELECT DISTINCT
     aty.nombre              AS articulo_tipo,
     CASE WHEN op.codigo = 'TENIDO' THEN p.tenido_id ELSE NULL END AS tenido_id,
     ten.tenido,
-    ar.fibra
+    ar.fibra,
+    -- For TENIDO: which variant is missing. NULL for non-TENIDO ops.
+    CASE WHEN op.codigo = 'TENIDO' THEN v.flg_antipilling ELSE NULL END AS flg_antipilling
 FROM doc.partida p
 JOIN color_x_cliente cxc           ON cxc.id = p.color_x_cliente_id
 JOIN public.color c                ON c.id   = cxc.color_id
 JOIN tercero t                     ON t.id   = cxc.tercero_id
--- ALL OPs for this partida — covers reproceso operations too
 JOIN mes.orden_produccion op_h     ON op_h.partida_id = p.id AND op_h.flg_elm = false
 JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op_h.id
                                    AND opp.estado = 'COMPLETADO'
 JOIN mes.operacion op              ON op.id = opp.operacion_id
--- fibra from articulo (articulo_tipo_id now directly on partida)
+-- For TENIDO: expand into variants needing pricing (false always; true when partida has antipilling)
+-- For other ops: single NULL variant
+CROSS JOIN LATERAL (
+    SELECT unnest(
+        CASE WHEN op.codigo = 'TENIDO' AND p.flg_antipilling THEN ARRAY[false, true]
+             WHEN op.codigo = 'TENIDO'                       THEN ARRAY[false]
+             ELSE                                                 ARRAY[NULL::boolean]
+        END
+    ) AS flg_antipilling
+) v
 CROSS JOIN LATERAL (
     SELECT ar2.fibra::smallint AS fibra
     FROM mes.orden_produccion_item opi2
@@ -431,7 +457,6 @@ LEFT JOIN tenido ten             ON ten.id = p.tenido_id AND op.codigo = 'TENIDO
 WHERE
     p.flg_elm = false
     AND p.estado_facturacion <> 'facturado'
-    -- No active catalog row exists for this combination
     AND NOT EXISTS (
         SELECT 1 FROM doc.catalogo_precios cp
         WHERE cp.operacion_id = op.id
@@ -440,6 +465,7 @@ WHERE
           AND (cp.articulo_tipo_id   IS NULL OR cp.articulo_tipo_id   = p.articulo_tipo_id)
           AND (cp.tenido_id          IS NULL OR cp.tenido_id          = p.tenido_id)
           AND (cp.fibra              IS NULL OR cp.fibra              = ar.fibra)
+          AND (cp.flg_antipilling    IS NULL OR cp.flg_antipilling    = v.flg_antipilling)
           AND cp.fyh_elm IS NULL
     );
 
@@ -465,7 +491,7 @@ GRANT SELECT ON doc.vw_precios_pendientes TO authenticated;
 --   "observacion":       "...",           -- nullable
 --   "lineas": [
 --     {
---       "guia_remision_id":   456,        -- dispatch guia (nullable for ad-hoc)
+--       "guia_remision_id":   456,        -- ingress guia CLIENTE_ENVIO_PROCESO (nullable for ad-hoc/MLR rolls)
 --       "partida_id":         123,        -- traceability (nullable)
 --       "operacion_id":       1,          -- service billed (nullable for ad-hoc)
 --       "es_antipilling":     false,
@@ -572,72 +598,89 @@ $$;
 
 
 -- ── doc.vw_pendientes_facturacion ─────────────────────────────
--- Live view of billable lines not yet invoiced.
--- One row per (dispatch guia × operacion × billing dimensions × antipilling).
+-- Live view of billable lines with remaining unbilled weight.
+-- One row per (ingress guia × partida × operacion × billing dimensions × antipilling).
 --
--- Unbilled = no matching factura_detalle row for that exact
--- (guia_remision_id, operacion_id, articulo_tipo_id,
---  color_x_cliente_id, tenido_id, es_antipilling) key.
--- Partial billing is handled naturally: if TENIDO is billed but
--- PLANCHADO isn't, the PLANCHADO row still appears here.
+-- guia_remision_id = the CLIENTE_ENVIO_PROCESO guia (client's own reference,
+-- appears on invoice description as "Ref. [serie]-[correlativo]").
+-- Weight is aggregated across ALL dispatch events that trace back to the same
+-- ingress guia + partida combination.
+--
+-- Quantity-based tracking (SAP/Odoo approach):
+--   peso_total     = total kg dispatched for this (guia × partida × service)
+--   peso_facturado = kg already billed in factura_detalle for same key
+--   peso_pendiente = peso_total - peso_facturado  (> 0 → row visible)
+-- This supports partial billing: one partida can be billed across multiple
+-- invoices, and one invoice can cover multiple partidas.
+-- The key for matching is (guia_remision_id, partida_id, operacion_id,
+-- articulo_tipo_id, color_x_cliente_id, tenido_id, es_antipilling).
 --
 -- Usage:
 --   - Guia list screen:
 --       SELECT DISTINCT guia_remision_id, serie, correlativo, cliente, ...
---       GROUP BY guia to show pending kg per guia
+--       GROUP BY ingress guia to show pending kg per guia
 --   - Invoice creation preview:
 --       WHERE guia_remision_id = ANY(selected_ids)
 --   - sin_precio = true: rate missing, operator must set before billing
 --
 -- Join path:
---   dispatch guia → guia_detalle.lote_id
---   → orden_produccion_item.lote_id → orden_produccion → partida
+--   DESPACHO_CLIENTE guia → grd.lote_id (dyed output lote)
+--   → lote_rollo_detalle.guia_remision_id (ingress guia, carried by registrar_produccion)
+--   → output lote.documento_id → orden_produccion_paso → orden_produccion → partida
 --   → completed orden_produccion_paso → operacion
---   → item_rollo_detalle → articulo (articulo_tipo_id, fibra)
+--   → item_rollo_detalle → articulo (fibra)
 CREATE OR REPLACE VIEW doc.vw_pendientes_facturacion AS
 WITH lineas AS (
     SELECT
-        gr.id                               AS guia_remision_id,
-        gr.serie,
-        gr.correlativo,
-        gr.fecha_emision::DATE              AS fecha_emision,
-        gr.tercero_id,
-        t.nombre                            AS cliente,
-        p.id                                AS partida_id,
-        o.id::SMALLINT                      AS operacion_id,
-        o.nombre                            AS operacion,
-        o.codigo                            AS op_codigo,
-        false                               AS es_antipilling,
-        p.articulo_tipo_id::SMALLINT        AS articulo_tipo_id,
-        atn.nombre                          AS articulo_tipo,
+        lrd.guia_remision_id,              -- ingress guia (material origin, client-recognizable)
+        gr_ing.serie,
+        gr_ing.correlativo,
+        gr_ing.fecha_emision::DATE         AS fecha_emision,
+        p.tercero_id,
+        t.nombre                           AS cliente,
+        p.id                               AS partida_id,
+        o.id::SMALLINT                     AS operacion_id,
+        o.nombre                           AS operacion,
+        o.codigo                           AS op_codigo,
+        false                              AS es_antipilling,
+        p.articulo_tipo_id::SMALLINT       AS articulo_tipo_id,
+        atn.nombre                         AS articulo_tipo,
         p.color_x_cliente_id,
         c.color,
         p.tenido_id,
         ten.tenido,
-        ar.fibra::SMALLINT                  AS fibra,
-        p.tercero_id                        AS partida_tercero_id,
+        ar.fibra::SMALLINT                 AS fibra,
+        p.tercero_id                       AS partida_tercero_id,
         p.flg_antipilling,
-        SUM(grd.cantidad)                   AS peso_kg
-    FROM doc.guia_remision gr
+        -- Billing weight: source_lote.cantidad = pre-production input weight (authoritative).
+        -- Falls back to dispatch grd.cantidad for lotes predating origen_lote_id
+        -- (historical data or MLR-confectioned rolls with no source lote).
+        SUM(COALESCE(source_l.cantidad, grd.cantidad)) AS peso_kg
+    FROM doc.guia_remision gr              -- DESPACHO_CLIENTE: billing trigger
     JOIN doc.guia_remision_tipo grt    ON grt.id = gr.guia_remision_tipo_id
                                       AND grt.codigo = 'DESPACHO_CLIENTE'
-    JOIN tercero t                     ON t.id = gr.tercero_id
     JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
     -- Dispatched lote is always a dyed OUTPUT lote (documento_tipo = 'ORDEN_PRODUCCION_PASO')
     JOIN inventario.lote l             ON l.id = grd.lote_id
                                       AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
-    -- Trace: dyed output lote → OPP → OP → partida
+    -- Ingress guia + source lote carried forward in lote_rollo_detalle by registrar_produccion
+    LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+    LEFT JOIN doc.guia_remision gr_ing          ON gr_ing.id = lrd.guia_remision_id
+    -- Source lote: input lote before dyeing — used for billing weight (input weight)
+    LEFT JOIN inventario.lote source_l          ON source_l.id = lrd.origen_lote_id
+    -- Trace: output lote → OPP → OP → partida
     JOIN mes.orden_produccion_paso opp_out ON opp_out.id = l.documento_id
     JOIN mes.orden_produccion op_out       ON op_out.id  = opp_out.orden_produccion_id
                                           AND op_out.flg_elm = false
     JOIN doc.partida p                     ON p.id = op_out.partida_id
                                           AND p.flg_elm = false
+    JOIN tercero t                         ON t.id = p.tercero_id
     -- Only completed operations from the SAME OP that produced this output lote.
     -- A reproceso roll is billed separately when its own output is dispatched.
     JOIN mes.orden_produccion_paso opp     ON opp.orden_produccion_id = op_out.id
                                           AND opp.estado = 'COMPLETADO'
     JOIN mes.operacion o                   ON o.id = opp.operacion_id
-    -- fibra still needs articulo join; articulo_tipo_id now comes directly from partida
+    -- fibra needs articulo join; articulo_tipo_id comes directly from partida
     JOIN LATERAL (
         SELECT ar2.fibra
         FROM item_rollo_detalle ird2
@@ -652,19 +695,24 @@ WITH lineas AS (
                                       AND o.codigo = 'TENIDO'
     WHERE gr.flg_elm = false
     GROUP BY
-        gr.id, gr.serie, gr.correlativo, gr.fecha_emision, gr.tercero_id, t.nombre,
+        lrd.guia_remision_id,
+        gr_ing.serie, gr_ing.correlativo, gr_ing.fecha_emision,
+        p.tercero_id, t.nombre,
         p.id, o.id, o.nombre, o.codigo,
         p.articulo_tipo_id, atn.nombre,
         p.color_x_cliente_id, c.color,
         p.tenido_id, ten.tenido,
-        ar.fibra, p.tercero_id, p.flg_antipilling
+        ar.fibra, p.flg_antipilling
 ),
--- Antipilling surcharge lines: same grouping, different price column
+-- Antipilling surcharge lines: one per TENIDO-completed+dispatched row where flag is set.
+-- operacion_id is the ANTIPILLING ghost op — distinct from TENIDO for factura_detalle keying.
 antipilling AS (
     SELECT
         l.guia_remision_id, l.serie, l.correlativo, l.fecha_emision,
         l.tercero_id, l.cliente, l.partida_id,
-        l.operacion_id, l.operacion, l.op_codigo,
+        (SELECT o.id FROM mes.operacion o WHERE o.codigo = 'ANTIPILLING')::SMALLINT AS operacion_id,
+        'Antipilling'::TEXT AS operacion,
+        'ANTIPILLING'::TEXT AS op_codigo,
         true                AS es_antipilling,
         l.articulo_tipo_id, l.articulo_tipo,
         l.color_x_cliente_id, l.color,
@@ -697,40 +745,53 @@ SELECT
     l.color,
     l.tenido_id,
     l.tenido,
-    l.peso_kg,
+    l.peso_kg                               AS peso_total,
+    billed.peso_facturado,
+    l.peso_kg - billed.peso_facturado       AS peso_pendiente,
     px.precio_kg,
-    ROUND(l.peso_kg * px.precio_kg, 2)      AS subtotal,
+    ROUND((l.peso_kg - billed.peso_facturado) * px.precio_kg, 2) AS subtotal,
     (px.precio_kg IS NULL)                  AS sin_precio,
-    -- Auto-generated description; operator may override at invoice time
+    -- "[tenido|operacion] [articulo_tipo] [color] - Ref. [ingress_serie]-[ingress_correlativo]"
+    -- tenido name replaces operation name for TENIDO lines (client-facing, not internal op label)
     CASE WHEN l.es_antipilling
-         THEN 'Antipilling ' || l.articulo_tipo || ' ' || l.color
-         ELSE l.operacion   || ' ' || l.articulo_tipo || ' ' || l.color
-    END                                     AS descripcion
+         THEN 'Antipilling'
+         ELSE COALESCE(l.tenido, l.operacion)
+    END
+    || ' ' || l.articulo_tipo || ' ' || l.color
+    || COALESCE(' - Ref. ' || l.serie || '-' || l.correlativo, '')
+                                            AS descripcion
 FROM all_lineas l
 LEFT JOIN LATERAL (
     SELECT
         CASE WHEN l.es_antipilling
-             THEN (doc.fn_get_precio(
-                     l.operacion_id, l.color_x_cliente_id, l.partida_tercero_id,
-                     l.articulo_tipo_id, l.tenido_id, l.fibra
-                  )).precio_antipilling
-             ELSE (doc.fn_get_precio(
+             -- ANTIPILLING op: client-level only — only tercero_id matters (Urban vs others)
+             THEN doc.fn_get_precio(
+                     l.operacion_id, NULL, l.partida_tercero_id,
+                     NULL, NULL, NULL, NULL
+                  )
+             -- Base operacion: pass flg_antipilling for TENIDO cost-matched row
+             ELSE doc.fn_get_precio(
                      l.operacion_id, l.color_x_cliente_id, l.partida_tercero_id,
                      l.articulo_tipo_id,
                      CASE WHEN l.op_codigo = 'TENIDO' THEN l.tenido_id ELSE NULL END,
-                     l.fibra
-                  )).precio_kg
+                     l.fibra,
+                     CASE WHEN l.op_codigo = 'TENIDO' THEN l.flg_antipilling ELSE NULL END
+                  )
         END AS precio_kg
 ) px ON true
--- Unbilled: no matching factura_detalle row
-WHERE NOT EXISTS (
-    SELECT 1 FROM doc.factura_detalle fd
-    WHERE fd.guia_remision_id    = l.guia_remision_id
-      AND fd.operacion_id        = l.operacion_id
-      AND fd.articulo_tipo_id    = l.articulo_tipo_id
-      AND fd.color_x_cliente_id  = l.color_x_cliente_id
+-- Quantity-based: row stays visible until all dispatched kg are invoiced.
+-- Key: (ingress_guia × partida × service dimensions) — supports partial billing.
+LEFT JOIN LATERAL (
+    SELECT COALESCE(SUM(fd.cantidad), 0) AS peso_facturado
+    FROM doc.factura_detalle fd
+    WHERE fd.guia_remision_id  IS NOT DISTINCT FROM l.guia_remision_id
+      AND fd.partida_id         = l.partida_id
+      AND fd.operacion_id       = l.operacion_id
+      AND fd.articulo_tipo_id   = l.articulo_tipo_id
+      AND fd.color_x_cliente_id = l.color_x_cliente_id
       AND fd.tenido_id IS NOT DISTINCT FROM l.tenido_id
-      AND fd.es_antipilling      = l.es_antipilling
-);
+      AND fd.es_antipilling     = l.es_antipilling
+) billed ON true
+WHERE l.peso_kg - billed.peso_facturado > 0.001;
 
 GRANT SELECT ON doc.vw_pendientes_facturacion TO authenticated;

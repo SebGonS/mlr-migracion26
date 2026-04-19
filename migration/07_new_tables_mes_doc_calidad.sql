@@ -163,8 +163,7 @@ INSERT INTO mes.operacion (codigo, nombre, requiere_receta) VALUES
     ('PLANCHADO',    'Planchado',    false),
     ('PERCHADO',     'Perchado',     false),
     ('COMPACTADO',   'Compactado',   false),
-    ('VOLTEADO',     'Volteado',     false),
-    ('MATIZADO',     'Matizado',     true)
+    ('VOLTEADO',     'Volteado',     false)
 ON CONFLICT (codigo) DO NOTHING;
 
 -- ── mes.maquina_tipo ──────────────────────────────────────────
@@ -318,6 +317,10 @@ CREATE TABLE inventario.pesaje (
 -- Physical attributes (ancho, malla, rendimiento): set from partida at production time
 -- Dyeing attributes: color_x_cliente_id, tenido_id, flg_tenido, flg_antipilling
 --   set when dyeing step completes (registrar_produccion)
+-- origen_lote_id: SAP parent-batch pattern — output lote → input lote.
+--   NULL for original input lotes (no parent).
+--   Set by registrar_produccion. Enables O(1) billing weight lookup:
+--   source_lote.cantidad = pre-production input weight (authoritative for billing).
 --
 -- Replaces lote.detalles JSONB for roll-specific attributes.
 CREATE TABLE inventario.lote_rollo_detalle (
@@ -325,6 +328,10 @@ CREATE TABLE inventario.lote_rollo_detalle (
 
     -- Billing anchor — set at ingress, carried forward through production
     guia_remision_id    BIGINT REFERENCES doc.guia_remision(id),
+
+    -- Parent-batch link: output lote → input lote it was produced from.
+    -- NULL for original input lotes. Set by registrar_produccion.
+    origen_lote_id      INT REFERENCES inventario.lote(id),
 
     -- Physical attributes — set at ingress (from partida) or on first weighing
     ancho               TEXT,
@@ -362,6 +369,9 @@ CREATE TABLE mes.orden_produccion_paso (
     fyh_fin timestamptz,
     -- Free-text field for backfill attribution when registering production retroactively
     observacion_backfill TEXT,
+    -- Set to true when any mid-step colour correction (matizado) was applied.
+    -- Zero-compute signal: no need to scan item_movimientos.observacion for reporting.
+    flg_matizado         BOOLEAN NOT NULL DEFAULT false,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
@@ -594,9 +604,13 @@ CREATE TABLE doc.compra_guia_remision (
 -- and insert a new row. This preserves pricing history for invoice
 -- reconstruction without a separate history table.
 --
--- Antipilling: stored as precio_antipilling on the TENIDO row.
--- The billing query emits a second line when
--- partida.flg_antipilling = true AND precio_antipilling IS NOT NULL.
+-- Antipilling — two separate concerns, two separate rows:
+--   1. TENIDO rows carry flg_antipilling=false/true to track costo_kg per recipe variant.
+--      Both variants may share the same precio_kg (negotiated at base level) but differ
+--      in costo_kg because the antipilling recipe uses different/more chemicals.
+--   2. ANTIPILLING ghost operation row (client-level wildcard, tercero_id only):
+--      the service charge billed as a second invoice line when partida.flg_antipilling=true.
+--      Rate: 0.15/kg Urban, 0.10/kg others (maintained via upsert_catalogo_precio).
 --
 -- costo_kg: chemical cost per kg snapshot at time of price-setting (ex-IGV).
 -- NULL for legacy rows and non-dyeing operations.
@@ -612,16 +626,19 @@ CREATE TABLE IF NOT EXISTS doc.catalogo_precios (
     id                  BIGINT   GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 
     -- Lookup dimensions (NULL = wildcard)
+    -- flg_antipilling: distinguishes base recipe cost from antipilling variant cost on TENIDO rows.
+    --   NULL = wildcard (applies to both). Only set when recipe cost differs (TENIDO op).
+    --   ANTIPILLING operation rows always have flg_antipilling = NULL.
     operacion_id        SMALLINT NOT NULL REFERENCES mes.operacion(id),
     color_x_cliente_id  INT      REFERENCES color_x_cliente(id),
     tercero_id          INT      REFERENCES tercero(id),
     articulo_tipo_id    SMALLINT REFERENCES articulo_tipo(id),
     tenido_id           INT      REFERENCES tenido(id),
     fibra               SMALLINT,
+    flg_antipilling     BOOLEAN,
 
     -- Prices (USD/kg)
     precio_kg           NUMERIC(10,4) NOT NULL CHECK (precio_kg >= 0),
-    precio_antipilling  NUMERIC(10,4)           CHECK (precio_antipilling >= 0),
 
     -- Cost snapshot (ex-IGV, from recipe at time of price-setting)
     costo_kg            NUMERIC(10,4)           CHECK (costo_kg IS NULL OR costo_kg >= 0),
@@ -647,10 +664,10 @@ GRANT SELECT, INSERT, UPDATE ON doc.catalogo_precios TO authenticated;
 --   partida ─────────────────────── hub (service order)
 --     ├── partida_guia_remision ──→ guia_remision CLIENTE_ENVIO_PROCESO (ingress)
 --     └── factura ────────────────→ financial document
---           └── factura_detalle ─── one line per (dispatch guia × service × dimensions)
+--           └── factura_detalle ─── one line per (ingress guia × service × dimensions)
 --
--- Unbilled coverage: DESPACHO_CLIENTE guias whose id does not appear in any
--- factura_detalle.guia_remision_id row — no junction table needed for that.
+-- Unbilled coverage: DESPACHO_CLIENTE dispatch events traced back to ingress guia
+-- via lote_rollo_detalle.guia_remision_id — see vw_pendientes_facturacion.
 CREATE TABLE doc.partida_guia_remision (
     partida_id        BIGINT NOT NULL REFERENCES doc.partida(id),
     guia_remision_id  BIGINT NOT NULL REFERENCES doc.guia_remision(id),
@@ -737,13 +754,14 @@ CREATE TABLE doc.factura (
 );
 
 -- ── doc.factura_detalle ────────────────────────────────────────
--- One row per (dispatch guia × operacion × billing dimensions).
+-- One row per (ingress guia × operacion × billing dimensions).
 -- partida_id links back to the sales order for billing-to-order reconciliation.
 -- igv_porcentaje allows 0% for IGV-exempt items (e.g. exported goods).
 --
--- guia_remision_id: dispatch guia this line traces to (justified denorm —
---   natural display grouping unit, expensive to re-derive through movements).
---   NULL for ad-hoc lines.
+-- guia_remision_id: ingress guia (CLIENTE_ENVIO_PROCESO) — the material-origin
+--   anchor the client recognizes on their invoice. Carried forward from the input
+--   lote via lote_rollo_detalle.guia_remision_id when registrar_produccion runs.
+--   NULL for ad-hoc lines or MLR-confectioned rolls without an ingress guia.
 -- operacion_id: which billable service (TENIDO, PLANCHADO...). NULL for ad-hoc.
 -- es_antipilling: true for the antipilling surcharge line on TENIDO.
 -- Billing dimensions denormalized at invoice time — financial document is

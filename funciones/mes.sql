@@ -649,6 +649,73 @@ END;
 $function$;
 
 
+-- ═══════════════════════════════════════════════════════════════
+-- 24. REGISTRAR MATIZADO EN PASO
+-- Thin wrapper over registrar_consumo_paso for mid-step colour
+-- corrections (matizado). The machine is never emptied — rolls
+-- remain in the bath; operator adds extra chemicals to adjust tone.
+--
+-- Differences from registrar_consumo_paso:
+--   - Injects observacion = 'Matizado' on each consumo line that
+--     lacks one (frontend dropdown may override with a more specific
+--     reason: 'Matizado', 'Corrección pH', 'Ajuste auxiliar', etc.)
+--   - Sets flg_matizado = true on the paso (zero-compute signal).
+--
+-- Per-item detail is queryable from item_movimientos.observacion.
+-- Paso-level reporting uses flg_matizado directly — no scan needed.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.registrar_matizado_paso(p_paso_id BIGINT, p_consumos JSONB)
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'inventario', 'mes'
+AS $$
+DECLARE
+    v_usr_id           INT := get_user_id();
+    v_consumos_con_obs JSONB;
+BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM mes.orden_produccion_paso
+        WHERE id = p_paso_id AND estado = 'EN_PROCESO'
+    ) THEN
+        RAISE EXCEPTION 'Paso % no encontrado o no está EN_PROCESO.', p_paso_id;
+    END IF;
+
+    IF p_consumos IS NULL OR jsonb_array_length(p_consumos) = 0 THEN
+        RAISE EXCEPTION 'Se requiere al menos un ítem en p_consumos para registrar matizado.';
+    END IF;
+
+    -- Inject observacion = 'Matizado' on lines that don't already carry one.
+    -- Frontend dropdown may supply a more specific label; that takes precedence.
+    SELECT jsonb_agg(
+        item || CASE WHEN item->>'observacion' IS NULL
+                     THEN '{"observacion":"Matizado"}'::jsonb
+                     ELSE '{}'::jsonb
+                END
+    )
+    INTO v_consumos_con_obs
+    FROM jsonb_array_elements(p_consumos) item;
+
+    PERFORM mes.registrar_consumo_paso(p_paso_id, v_consumos_con_obs);
+
+    UPDATE mes.orden_produccion_paso
+    SET flg_matizado = true,
+        usr_mod      = v_usr_id,
+        fyh_mod      = NOW()
+    WHERE id = p_paso_id;
+
+    RETURN format('Matizado registrado para paso #%s.', p_paso_id);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION mes.registrar_matizado_paso(BIGINT, JSONB) TO authenticated;
+
+
 CREATE OR REPLACE FUNCTION mes.calcular_fifo(p_items jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -776,12 +843,12 @@ BEGIN
         JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
     ),
     pesajes AS (
-        INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, usr_cre)
-        SELECT p_orden_id, ld.lote_id, ld.peso_nuevo, v_usr_id
+        INSERT INTO inventario.pesaje (lote_id, tipo, peso_real, usr_cre)
+        SELECT ld.lote_id, 'CORRECCION', ld.peso_nuevo, v_usr_id
         FROM lotes_data ld
         ON CONFLICT (lote_id) DO UPDATE
             SET peso_real = EXCLUDED.peso_real,
-                orden_produccion_id = EXCLUDED.orden_produccion_id
+                tipo      = EXCLUDED.tipo
         RETURNING id, lote_id
     ),
     movimientos AS (
@@ -1177,9 +1244,14 @@ BEGIN
         RAISE EXCEPTION 'Solo se puede finalizar un paso EN_PROCESO. Estado actual: %', v_estado;
     END IF;
 
-    -- Process consumptions (recipe + manual) if provided
+    -- Process recipe consumptions if provided
     IF p_datos->'consumos' IS NOT NULL AND jsonb_array_length(p_datos->'consumos') > 0 THEN
         PERFORM mes.registrar_consumo_paso(p_paso_id, p_datos->'consumos');
+    END IF;
+
+    -- Process matizado corrections if provided (sets flg_matizado on paso)
+    IF p_datos->'matizados' IS NOT NULL AND jsonb_array_length(p_datos->'matizados') > 0 THEN
+        PERFORM mes.registrar_matizado_paso(p_paso_id, p_datos->'matizados');
     END IF;
 
     -- Register production output atomically (final step only)
@@ -1432,7 +1504,8 @@ $function$;
 --     fyh_fin            TIMESTAMPTZ (required)
 --     empleado_id        SMALLINT (optional — who performed the step)
 --     maquina_asignada_id INT    (optional — pre-assign machine before iniciar)
---     consumos           ARRAY   (optional — same shape as finalizar_paso expects)
+--     consumos           ARRAY   (optional — recipe chemicals, same shape as finalizar_paso expects)
+--     matizados          ARRAY   (optional — mid-step correction chemicals, sets flg_matizado on paso)
 --     produccion         ARRAY   (optional — same shape as finalizar_paso expects)
 --     observacion_backfill TEXT  (optional)
 -- ═══════════════════════════════════════════════════════════════

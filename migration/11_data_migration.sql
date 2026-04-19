@@ -1394,6 +1394,13 @@ INSERT INTO mes.operacion (codigo, nombre, requiere_receta)
 VALUES ('COMPACTADO', 'Compactado', false)
 ON CONFLICT (codigo) DO NOTHING;
 
+-- Billing-only operation: never assigned to an orden_produccion_paso.
+-- Generates a separate invoice line when partida.flg_antipilling = true.
+-- Rate maintained as a client-level wildcard row in doc.catalogo_precios.
+INSERT INTO mes.operacion (codigo, nombre, requiere_receta)
+VALUES ('ANTIPILLING', 'Antipilling', false)
+ON CONFLICT (codigo) DO NOTHING;
+
 -- ============================================================================
 -- MIGRAR LOTES Y MOVIMIENTOS INICIALES DE INSUMOS
 -- ============================================================================
@@ -1458,6 +1465,45 @@ SELECT setval(
 );
 
 
+-- ============================================================================
+-- SEED ITEM_VALORACION  →  inventario.item_valoracion
+-- ============================================================================
+-- Source: public.inventario (ingress ledger — cantidad = original ingress qty, never decremented)
+--   precio_promedio : WAC of ingress lots using cost at ingress time, priority:
+--                     1. inventario.costo_bruto_kg  (recorded at receipt)
+--                     2. insumo_x_proveedor.precio_x_kg_usd  (supplier price)
+--                     3. insumo.precio_prom_kg_usd  (catalog fallback)
+--                     Weighted by cantidad so larger lots have proportional influence.
+--   stock_qty       : SUM of all ingress quantities per item (matches migrated lote sum)
+--   stock_valorado  : precio_promedio × stock_qty
+-- Items with no resolvable cost across all three sources are excluded.
+-- WAC trigger (fn_trg_actualizar_map) is bypassed here — movements have NULL
+-- precio_unitario. Going forward the trigger handles new COMPRA_ING movements.
+-- ============================================================================
+INSERT INTO inventario.item_valoracion (item_id, precio_promedio, stock_qty, stock_valorado, fyh_mod)
+SELECT it.id,
+       SUM(COALESCE(i.costo_bruto_kg, ixp.precio_x_kg_usd,ins.precio_prom_kg_usd) * i.cantidad) / NULLIF(SUM(i.cantidad), 0),
+       SUM(i.cantidad),
+       SUM(COALESCE(i.costo_bruto_kg, ixp.precio_x_kg_usd,ins.precio_prom_kg_usd) * i.cantidad),
+       NOW()
+FROM inventario i
+LEFT JOIN insumo_x_proveedor ixp ON ixp.id = i.insumo_x_proveedor_id
+JOIN item it ON it.id = COALESCE(ixp.insumo_id, i.insumo_id)
+LEFT JOIN insumo ins ON ins.id = COALESCE(ixp.insumo_id, i.insumo_id)
+WHERE COALESCE(i.costo_bruto_kg, ixp.precio_x_kg_usd,ins.precio_prom_kg_usd) IS NOT NULL
+GROUP BY it.id
+ON CONFLICT (item_id) DO UPDATE
+    SET precio_promedio = EXCLUDED.precio_promedio,
+        stock_qty       = EXCLUDED.stock_qty,
+        stock_valorado  = EXCLUDED.stock_valorado,
+        fyh_mod         = EXCLUDED.fyh_mod;
+
+-- ============================================================================
+-- mes.tiempos_estandar_tenido  ←  public.tiempos_estandar_tenido
+-- tipo_receta_id dropped (was used inconsistently across legacy functions).
+-- adicional_id replaced by flg_antipilling boolean.
+-- DISTINCT ON new key resolves any duplicates that tipo_receta_id created.
+-- ============================================================================
 
 -- SELECT * FROM inventario.lote WHERE id NOT IN (SELECT id FROM inventario)
 
@@ -1608,62 +1654,54 @@ WHERE cxi.compra_id IN (SELECT id FROM doc.compra);
 -- Step 4: doc.letra + doc.letra_factura  (from public.letra_compra)
 -- New model: letra is a standalone payment instrument (tercero_id from proveedor).
 -- Clearing to factura_proveedor is done via letra_factura junction.
--- Migration path: letra_compra → letra (header) + letra_factura (clearing line).
--- Letras on compras with no linked factura_proveedor get a letra row but no clearing line;
--- run the unmigrated check below to quantify.
--- Insert letras header rows, tag each with its legacy lc.id via observacion temp column
--- then insert clearing rows by joining back on the legacy id stored in a temp table.
-CREATE TEMP TABLE _letra_map (lc_id INT, letra_id BIGINT, factura_proveedor_id BIGINT, monto NUMERIC);
+-- IDs preserved (OVERRIDING SYSTEM VALUE) so letra.id = letra_compra.id — no temp
+-- table or ROW_NUMBER correlation needed; clearing INSERT joins directly on lc.id.
+-- Letras on compras with no linked factura_proveedor get a letra row but no clearing line.
+INSERT INTO doc.letra (id, tercero_id, numero, monto, fecha_giro, fecha_vencimiento,
+                       estado, fecha_pago, observacion, fyh_cre)
+OVERRIDING SYSTEM VALUE
+SELECT
+    lc.id,
+    dc.tercero_id,
+    lc.numero_letra,
+    lc.monto_usd,
+    lc.fecha_emision,
+    lc.fecha_vencimiento,
+    CASE lc.estado
+        WHEN 'emitida'    THEN 'emitida'::letra_estado_enum
+        WHEN 'pagada'     THEN 'pagada'::letra_estado_enum
+        WHEN 'vencida'    THEN 'vencida'::letra_estado_enum
+        WHEN 'protestada' THEN 'protestada'::letra_estado_enum
+        WHEN 'anulada'    THEN 'anulada'::letra_estado_enum
+        ELSE                   'emitida'::letra_estado_enum
+    END,
+    lc.fecha_pago,
+    lc.observaciones,
+    COALESCE(lc.fyh_cre_tz, lc.fyh_cre::TIMESTAMPTZ)
+FROM public.letra_compra lc
+JOIN doc.compra dc ON dc.id = lc.compra_id;
 
-WITH src AS (
-    SELECT
-        lc.id                    AS lc_id,
-        dc.tercero_id,
-        lc.numero_letra,
-        lc.monto_usd,
-        lc.fecha_emision         AS fecha_giro,
-        lc.fecha_vencimiento,
-        CASE lc.estado
-            WHEN 'emitida'    THEN 'emitida'::letra_estado_enum
-            WHEN 'pagada'     THEN 'pagada'::letra_estado_enum
-            WHEN 'vencida'    THEN 'vencida'::letra_estado_enum
-            WHEN 'protestada' THEN 'protestada'::letra_estado_enum
-            WHEN 'anulada'    THEN 'anulada'::letra_estado_enum
-            ELSE                   'emitida'::letra_estado_enum
-        END                      AS estado,
-        lc.fecha_pago,
-        lc.observaciones,
-        COALESCE(lc.fyh_cre_tz, lc.fyh_cre::TIMESTAMPTZ) AS fyh_cre,
-        dc.factura_proveedor_id
-    FROM public.letra_compra lc
-    JOIN doc.compra dc ON dc.id = lc.compra_id
-),
-ins AS (
-    INSERT INTO doc.letra (tercero_id, numero, monto, fecha_giro, fecha_vencimiento,
-                           estado, fecha_pago, observacion, fyh_cre)
-    SELECT tercero_id, numero_letra, monto_usd, fecha_giro, fecha_vencimiento,
-           estado, fecha_pago, observaciones, fyh_cre
-    FROM src
-    RETURNING id
-)
-INSERT INTO _letra_map (lc_id, letra_id, factura_proveedor_id, monto)
-SELECT s.lc_id, i.id, s.factura_proveedor_id, s.monto_usd
-FROM (SELECT *, ROW_NUMBER() OVER () AS rn FROM src) s
-JOIN (SELECT id, ROW_NUMBER() OVER () AS rn FROM ins) i USING (rn);
+SELECT setval(
+    pg_get_serial_sequence('doc.letra', 'id'),
+    (SELECT MAX(id) FROM doc.letra)
+);
 
--- Clearing: one letra_factura row per letra (1:1 in legacy — full amount applied)
+-- Clearing: one letra_factura row per letra where a factura_proveedor was linked
 INSERT INTO doc.letra_factura (letra_id, factura_proveedor_id, monto_aplicado, fyh_cre)
-SELECT letra_id, factura_proveedor_id, monto, NOW()
-FROM _letra_map
-WHERE factura_proveedor_id IS NOT NULL;
+SELECT
+    lc.id,
+    cfp.factura_proveedor_id,
+    lc.monto_usd,
+    NOW()
+FROM public.letra_compra lc
+JOIN doc.compra_factura_proveedor cfp ON cfp.compra_id = lc.compra_id
+ON CONFLICT (letra_id, factura_proveedor_id) DO NOTHING;
 
-DROP TABLE _letra_map;
-
--- Unmigrated letras: compras that had letras but no linked factura
+-- Unmigrated letras: compras that had no parseable factura → no clearing line created
 -- SELECT lc.id, lc.compra_id, lc.numero_letra, lc.monto_usd
 -- FROM public.letra_compra lc
--- JOIN doc.compra dc ON dc.id = lc.compra_id
--- WHERE dc.factura_proveedor_id IS NULL;
+-- LEFT JOIN doc.compra_factura_proveedor cfp ON cfp.compra_id = lc.compra_id
+-- WHERE cfp.factura_proveedor_id IS NULL;
 
 -- ============================================================================
 
@@ -2012,9 +2050,14 @@ JOIN doc_posting dp
 --                         (pxr.id mapped → pt.id via pxr_to_opp CTE)
 --   all other:          documento_tipo / documento_id = NULL
 -- ============================================================================
+-- INSUMO EGRESS MOVEMENTS — SKIPPED (snapshot migration)
+-- ============================================================================
+-- This block was designed for full transaction-history migration. 
+
+-- ============================================================================
+
+
 WITH pxr_to_opp AS (
-    -- Maps legacy pxr.id → new opp.id (= pt.id) for PROD_CONSUMO documento_id resolution.
-    -- salida_inventario.partida_x_recetas_id references pxr.id; opp.id is now pt.id.
     SELECT DISTINCT ON (pxr.id)
         pxr.id AS pxr_id,
         pt.id  AS opp_id
@@ -2023,7 +2066,7 @@ WITH pxr_to_opp AS (
         ON pt.partida_id   = pxr.partida_id
        AND pt.maquina::int = pxr.maquina_id
     WHERE pxr.receta_id IS NOT NULL AND pxr.flg_elm = false
-    ORDER BY pxr.id, ABS(EXTRACT(EPOCH FROM (pt.fecha::date - pxr.fecha::date)))
+    ORDER BY pxr.id, ABS(pt.fecha::date - pxr.fecha::date)
 ),
 motivo_map (motivo, codigo) AS (
     VALUES
@@ -2036,14 +2079,11 @@ motivo_map (motivo, codigo) AS (
         ('ajuste',        'AJUSTE_NEG'),
         ('reconteo',      'AJUSTE_NEG'),
         ('merma',         'AJUSTE_NEG'),
-        ('muestra',       'MUESTRA_EGR'), -- dedicated type, not valorizable
+        ('muestra',       'MUESTRA_EGR'),
         ('mantenimiento', 'AJUSTE_NEG'),
         ('otros',         'AJUSTE_NEG')
 ),
 doc_posting AS (
-    -- Cuadre-linked salidas (ajuste/reconteo matching a cuadre by timestamp) reuse the
-    -- doc_movimiento_id already created for that cuadre's ingress movements — same event.
-    -- All other salidas get a fresh nextval().
     SELECT
         si.id AS salida_inventario_id,
         ci.id AS cuadre_id,
@@ -2080,7 +2120,6 @@ SELECT
         WHEN dp.cuadre_id IS NOT NULL  THEN dp.cuadre_id
         WHEN mm.codigo = 'PROD_CONSUMO' AND si.partida_x_recetas_id IS NOT NULL THEN pto.opp_id
     END,
-
     si.observacion,
     si.usr_solicita,
     COALESCE(si.fyh_salida_real, si.fyh_solicitud_tz)
@@ -2091,7 +2130,8 @@ JOIN inventario.lote l ON l.id = sdxs.inventario_id
 JOIN motivo_map mm ON mm.motivo = si.motivo::text
 JOIN doc_posting dp ON dp.salida_inventario_id = si.id
 LEFT JOIN pxr_to_opp pto ON pto.pxr_id = si.partida_x_recetas_id
-WHERE si.motivo IS NOT NULL;
+WHERE si.motivo IS NOT NULL
+  AND sdxs.cantidad::numeric(12,4) > 0;  -- excludes sub-0.0001 quantities that truncate to 0
 
 -- SELECT COUNT(*) FROM termofijado;
 -- SELECT COUNT(*) FROM produccion_tenido;
@@ -2473,9 +2513,11 @@ JOIN egress_posting ep ON ep.paso_id = opp.id;
 -- Without this, those lotes show as permanently in-stock (open balance).
 --
 -- Movement type: SERV_EGR — material dispatched back to client.
--- Date:          partida.fecha_entrega (best proxy for delivery; fallback to fyh_cre).
+-- Scope:         only CERRADA partidas (estado_produccion = 'CERRADA') — in-progress rolls stay in stock.
+-- Date:          partida.fyh_mod (last state change) → fyh_cre_tz → fyh_cre as fallback.
 -- One doc_movimiento_id per partida — same grouping as ingress (Step 1–4).
 -- ============================================================================
+
 WITH ghost_source AS (
     -- Catches ALL roll lotes with no completed paso assignment:
     --   • lotes with opi but no oppi (assigned to op, paso link missing)
@@ -2487,14 +2529,14 @@ WITH ghost_source AS (
         l.cantidad,
         l.documento_id                                                              AS partida_id,
         l.usr_cre,
-        COALESCE(p.fecha_entrega::TIMESTAMP + INTERVAL '5 hours', p.fyh_cre)       AS fyh_egr
+        p.fyh_cre                                                                   AS fyh_egr
     FROM inventario.lote l
     LEFT JOIN mes.orden_produccion_item      opi  ON opi.lote_id                   = l.id
     LEFT JOIN mes.orden_produccion_paso_item oppi ON oppi.orden_produccion_item_id = opi.id
-    JOIN public.partida p ON p.id = l.documento_id
+    JOIN doc.partida p ON p.id = l.documento_id
     WHERE l.documento_tipo = 'PARTIDA'
       AND oppi.id IS NULL          -- no completed paso assignment (covers no-opi AND opi-without-oppi)
-      AND p.fecha_entrega IS NOT NULL  -- only finished partidas: in-progress rolls stay in stock
+      AND p.estado IN ('ENTREGADA','DEVUELTA_PARCIAL','DEVUELTA_TOTAL','FACTURADA','CERRADA','CANCELADA')
 ),
 ghost_posting AS (
     SELECT partida_id, nextval('inventario.mov_doc_seq') AS doc_movimiento_id
@@ -2550,7 +2592,7 @@ dyed_source AS (
         l.usr_cre,
         l.item_id                                                                  AS dyed_item_id,
         lpp.paso_id,
-        COALESCE(p.fecha_entrega::TIMESTAMP + INTERVAL '5 hours', opp.fyh_fin, l.fyh_cre) AS fyh_out
+        COALESCE(opp.fyh_fin, p.fyh_cre)                                           AS fyh_out
     FROM inventario.lote l
     JOIN mes.orden_produccion_item       opi  ON opi.lote_id                      = l.id
     JOIN mes.orden_produccion_paso_item  oppi ON oppi.orden_produccion_item_id    = opi.id
@@ -2558,7 +2600,7 @@ dyed_source AS (
     -- Only the last paso for this partida
     JOIN last_paso_per_partida           lpp  ON lpp.partida_id                   = l.documento_id
                                              AND lpp.paso_id                      = opp.id
-    JOIN public.partida p ON p.id = l.documento_id
+    JOIN doc.partida p ON p.id = l.documento_id
     WHERE l.documento_tipo = 'PARTIDA'
 ),
 posting AS (
@@ -2623,54 +2665,17 @@ JOIN posting po ON po.paso_id = dl.paso_id;
 -- historical lotes so they can be processed through the new system without
 -- being blocked as "unweighed".
 -- ============================================================================
-INSERT INTO inventario.pesaje (orden_produccion_id, lote_id, peso_real, observacion, usr_cre, fyh_cre)
+INSERT INTO inventario.pesaje (lote_id, tipo, peso_real, observacion, usr_cre, fyh_cre)
 SELECT
-    opi.orden_produccion_id,
     l.id,
+    'INGRESO',
     l.cantidad,
     'Migración — peso promedio calculado de partida',
     l.usr_cre,
     l.fyh_cre
 FROM inventario.lote l
-JOIN mes.orden_produccion_item opi ON opi.lote_id = l.id
 WHERE l.documento_tipo = 'PARTIDA';
 
--- ============================================================================
--- SEED ITEM_VALORACION  →  inventario.item_valoracion
--- ============================================================================
--- The MAP trigger (fn_trg_actualizar_map) skipped all migration inserts because
--- precio_unitario was NULL. We seed the table directly from:
---   precio_promedio : weighted average of compra_x_insumo.precio_x_kg_usd
---                     weighted by cantidad across all historical purchases.
---   stock_qty       : current total lote.cantidad for the item (cantidad > 0 lotes only).
---   stock_valorado  : precio_promedio * stock_qty
--- Only insumo items are valorizable; roll items are excluded (no purchase price).
--- ============================================================================
-INSERT INTO inventario.item_valoracion (item_id, precio_promedio, stock_qty, stock_valorado, fyh_mod)
-SELECT
-    i.id                                                                  AS item_id,
-    SUM(cxi.precio_x_kg_usd * cxi.cantidad) / NULLIF(SUM(cxi.cantidad), 0) AS precio_promedio,
-    COALESCE((SELECT SUM(l.cantidad) FROM inventario.lote l WHERE l.item_id = i.id), 0) AS stock_qty,
-    (SUM(cxi.precio_x_kg_usd * cxi.cantidad) / NULLIF(SUM(cxi.cantidad), 0))
-        * COALESCE((SELECT SUM(l.cantidad) FROM inventario.lote l WHERE l.item_id = i.id), 0) AS stock_valorado,
-    NOW()
-FROM public.compra_x_insumo cxi
-JOIN item i ON i.id = cxi.insumo_id
-WHERE cxi.precio_x_kg_usd IS NOT NULL
-  AND cxi.precio_x_kg_usd > 0
-GROUP BY i.id
-ON CONFLICT (item_id) DO UPDATE
-    SET precio_promedio = EXCLUDED.precio_promedio,
-        stock_qty       = EXCLUDED.stock_qty,
-        stock_valorado  = EXCLUDED.stock_valorado,
-        fyh_mod         = EXCLUDED.fyh_mod;
-
--- ============================================================================
--- mes.tiempos_estandar_tenido  ←  public.tiempos_estandar_tenido
--- tipo_receta_id dropped (was used inconsistently across legacy functions).
--- adicional_id replaced by flg_antipilling boolean.
--- DISTINCT ON new key resolves any duplicates that tipo_receta_id created.
--- ============================================================================
 INSERT INTO mes.tiempos_estandar_tenido (valor_id, tenido_id, flg_antipilling, duracion, flg_activo)
 SELECT DISTINCT ON (valor_id, tenido_id, adicional_id IS NOT NULL)
     valor_id,
@@ -2788,18 +2793,22 @@ ON CONFLICT (lote_id) DO NOTHING;
 -- ============================================================================
 -- Mapping:
 --   tipo_articulo_id  → articulo_tipo_id  (table renamed in step 4)
---   adicional_id rows → skipped (shadow rows never used in billing;
---                        antipilling goes on base TENIDO row as precio_antipilling)
---   activo = 0        → fyh_elm = fyh_fin
---   activo = 1        → fyh_elm = NULL (active)
---   operacion_id      → always TENIDO (legacy catalog was dyeing-only)
---   costo_kg          → NULL (no historical cost data)
+-- Legacy adicional_id mapping:
+--   adicional_id = 0 → TENIDO row, flg_antipilling = false (base recipe)
+--   adicional_id > 0 → TENIDO row, flg_antipilling = true  (antipilling recipe, different costo_kg)
+-- Both rows may have the same precio_kg (price negotiated at base level),
+-- but costo_kg will differ once recipes are approved.
+--   activo = 0 → fyh_elm = fyh_fin
+--   activo = 1 → fyh_elm = NULL (active)
+--   costo_kg   → NULL (no historical cost data in legacy)
 --
--- After running: set precio_antipilling on active TENIDO rows per client agreement,
--- and manually add PLANCHADO/PERCHADO rates.
+-- ANTIPILLING wildcard rows: client-level service charge.
+-- Urban = 0.15/kg, all others = 0.10/kg (hardcoded per legacy get_partidas_despacho).
 DO $$
 DECLARE
-    v_tenido_op_id SMALLINT;
+    v_tenido_op_id    SMALLINT;
+    v_antipil_op_id   SMALLINT;
+    v_urban_tercero_id INT;
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_tables
@@ -2808,16 +2817,19 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT id INTO v_tenido_op_id FROM mes.operacion WHERE codigo = 'TENIDO';
+    SELECT id INTO v_tenido_op_id  FROM mes.operacion WHERE codigo = 'TENIDO';
+    SELECT id INTO v_antipil_op_id FROM mes.operacion WHERE codigo = 'ANTIPILLING';
+    SELECT id INTO v_urban_tercero_id FROM tercero WHERE codigo = 'URBAN';
 
+    -- TENIDO rows: base (adicional_id=0) and antipilling variant (adicional_id>0)
     INSERT INTO doc.catalogo_precios (
         operacion_id,
         color_x_cliente_id,
         articulo_tipo_id,
         tenido_id,
         fibra,
+        flg_antipilling,
         precio_kg,
-        precio_antipilling,
         fyh_elm,
         fyh_cre
     )
@@ -2827,12 +2839,21 @@ BEGIN
         cp.tipo_articulo_id::smallint,
         cp.tenido_id,
         cp.fibra::smallint,
+        (cp.adicional_id > 0),
         cp.precio_tenido,
-        NULL,
         CASE WHEN cp.activo = 0 THEN cp.fyh_fin ELSE NULL END,
         cp.fyh_cre
     FROM public.catalogo_precios cp
-    WHERE cp.adicional_id IS NULL OR cp.adicional_id = 0
+    ON CONFLICT DO NOTHING;
+
+    -- ANTIPILLING wildcard rows: one per client tier (Urban, everyone else)
+    -- These are the service charge rows — never tied to a specific color/recipe.
+    INSERT INTO doc.catalogo_precios (
+        operacion_id, tercero_id, precio_kg, fyh_cre
+    )
+    VALUES
+        (v_antipil_op_id, v_urban_tercero_id, 0.15, NOW()),
+        (v_antipil_op_id, NULL,               0.10, NOW())
     ON CONFLICT DO NOTHING;
 END $$;
 

@@ -357,6 +357,32 @@ CREATE TABLE inventario.lote_secuencia_anual (
     ultimo_valor INT NOT NULL DEFAULT 0
 );
 
+-- Auto-generates lote.secuencia on INSERT using a per-year counter.
+-- Fires BEFORE INSERT so NEW.secuencia is set before the row lands.
+-- WHEN (NEW.secuencia IS NULL) allows migration scripts to override by
+-- supplying an explicit value (e.g. OVERRIDING SYSTEM VALUE inserts that
+-- need to preserve a legacy secuencia).
+CREATE OR REPLACE FUNCTION inventario.trfn_generar_secuencia_lote()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_ano INT;
+BEGIN
+    v_ano := date_part('year', COALESCE(NEW.fyh_cre, NOW()));
+    INSERT INTO inventario.lote_secuencia_anual (ano, ultimo_valor)
+    VALUES (v_ano, 1)
+    ON CONFLICT (ano)
+    DO UPDATE SET ultimo_valor = inventario.lote_secuencia_anual.ultimo_valor + 1
+    RETURNING ultimo_valor INTO NEW.secuencia;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_bi_lote_secuencia
+BEFORE INSERT ON inventario.lote
+FOR EACH ROW
+WHEN (NEW.secuencia IS NULL)
+EXECUTE FUNCTION inventario.trfn_generar_secuencia_lote();
+
 -- ── inventario.item_movimientos ───────────────────────────────
 CREATE SEQUENCE IF NOT EXISTS inventario.mov_doc_seq START 1;
 

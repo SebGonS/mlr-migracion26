@@ -121,28 +121,6 @@ BEGIN
 END;
 $$;
 
--- ── Lote sequence trigger ─────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION inventario.trfn_generar_secuencia_lote()
-RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE
-    v_ano INT;
-BEGIN
-    v_ano := date_part('year', COALESCE(NEW.fyh_cre, NOW()));
-    INSERT INTO inventario.lote_secuencia_anual (ano, ultimo_valor)
-    VALUES (v_ano, 1)
-    ON CONFLICT (ano)
-    DO UPDATE SET ultimo_valor = inventario.lote_secuencia_anual.ultimo_valor + 1
-    RETURNING ultimo_valor INTO NEW.secuencia;
-    RETURN NEW;
-END;
-$$;
-
-CREATE TRIGGER trg_bi_lote_secuencia
-BEFORE INSERT ON inventario.lote
-FOR EACH ROW
-WHEN (NEW.secuencia IS NULL)
-EXECUTE FUNCTION inventario.trfn_generar_secuencia_lote();
-
 -- ── Per-table REVOKEs (audit/cre/mod/elm triggers are in step 12, after data migration) ───
 
 -----TERCERO
