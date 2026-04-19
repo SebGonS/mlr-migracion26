@@ -125,14 +125,13 @@ CREATE TABLE IF NOT EXISTS doc.guia_remision_detalle (
     item_id INT NOT NULL REFERENCES item(id),
     lote_id int REFERENCES inventario.lote(id),
     ubicacion_id int REFERENCES inventario.ubicacion(id),
-    cantidad NUMERIC(12,2) NOT NULL CHECK (cantidad > 0),
+    cantidad NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
     UNIQUE (guia_remision_id, item_id, lote_id, ubicacion_id)
 );
 
 -- ── inventario.pesaje ─────────────────────────────────────────
--- Placed here (after mes.orden_produccion will be defined) — forward ref OK
--- because it's only a FK and mes schema created in step 1.
--- Actually pesaje references mes.orden_produccion — must come after.
+-- Placed here (after mes.orden_produccion) so the table ordering is clear,
+-- though pesaje no longer holds FKs to any mes table.
 -- → Defined after mes.orden_produccion below.
 
 -- ── mes.operacion ─────────────────────────────────────────────
@@ -290,18 +289,19 @@ CREATE TABLE mes.orden_produccion (
 );
 
 -- ── inventario.pesaje ─────────────────────────────────────────
+-- One row per lote. tipo discriminates when/why the weight was recorded:
+--   'INGRESO'    — roll weighed at receival (primary flow, registrar_pesaje_produccion)
+--   'CORRECCION' — post-assignment weight fix (rare, corregir_pesaje_produccion / actualizar_pesos_individuales_orden)
+--   'SALIDA'     — output roll weighed at production time (registrar_produccion)
+-- Context is derivable via item_movimientos but tipo avoids the join for simple checks.
 CREATE TABLE inventario.pesaje (
-    id                  INT  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    lote_id             INT  NOT NULL REFERENCES inventario.lote(id),
-    -- Context: one of these is populated depending on when weighing occurred.
-    -- partida_id: ingress weighing before production (primary flow).
-    -- orden_produccion_id: post-assignment correction (rare).
-    partida_id          BIGINT REFERENCES doc.partida(id),
-    orden_produccion_id BIGINT REFERENCES mes.orden_produccion(id),
-    peso_real           NUMERIC(10,2),
-    observacion         TEXT,
-    usr_cre             INT,
-    fyh_cre             TIMESTAMPTZ DEFAULT NOW()
+    id          INT  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    lote_id     INT  NOT NULL REFERENCES inventario.lote(id),
+    tipo        TEXT NOT NULL CHECK (tipo IN ('INGRESO', 'SALIDA', 'CORRECCION')),
+    peso_real   NUMERIC(12,4),
+    observacion TEXT,
+    usr_cre     INT,
+    fyh_cre     TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ── inventario.lote_rollo_detalle ────────────────────────────

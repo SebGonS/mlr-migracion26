@@ -1012,6 +1012,8 @@ DECLARE
     v_count_rib             INT;
     v_peso_por_regular      NUMERIC;
     v_peso_por_rib          NUMERIC;
+    -- True when peso_salida came from a physical measurement (per-roll), not prorated
+    v_peso_salida_is_medido BOOLEAN;
     -- Partida attributes copied to each output lrd row
     v_partida_ancho             TEXT;
     v_partida_malla             TEXT;
@@ -1149,12 +1151,20 @@ FOR UPDATE;
         JOIN item_rollo_detalle ird             ON ird.item_id = l.item_id
         WHERE l.id = v_input_lote_id;
 
-        -- Resolve output weight: totals param takes precedence over per-roll peso_salida
-        v_peso_salida := CASE
-            WHEN v_flg_rib AND v_peso_por_rib     IS NOT NULL THEN v_peso_por_rib
-            WHEN NOT v_flg_rib AND v_peso_por_regular IS NOT NULL THEN v_peso_por_regular
-            ELSE (v_elem->>'peso_salida')::NUMERIC
-        END;
+        -- Resolve output weight.
+        -- Totals param (prorated) takes precedence over per-roll peso_salida.
+        -- v_peso_salida_is_medido: true only when weight is a physical measurement,
+        -- not a prorated calculation — drives whether a pesaje audit record is created.
+        IF v_flg_rib AND v_peso_por_rib IS NOT NULL THEN
+            v_peso_salida         := v_peso_por_rib;
+            v_peso_salida_is_medido := false;
+        ELSIF NOT v_flg_rib AND v_peso_por_regular IS NOT NULL THEN
+            v_peso_salida         := v_peso_por_regular;
+            v_peso_salida_is_medido := false;
+        ELSE
+            v_peso_salida         := (v_elem->>'peso_salida')::NUMERIC;
+            v_peso_salida_is_medido := true;
+        END IF;
 
         IF v_peso_salida IS NULL THEN
             RAISE EXCEPTION 'Falta peso_salida para el lote de entrada #%. Proporcione peso_salida en el array o use p_peso_rollos/p_peso_rib.', v_input_lote_id;
@@ -1171,19 +1181,27 @@ FOR UPDATE;
         VALUES (v_doc_movimiento_id, v_out_item_id, v_new_lote_id, v_ing_tipo_id,
                 p_ubicacion_id, v_peso_salida, 'ORDEN_PRODUCCION_PASO', p_orden_paso_id);
 
-        -- Batch classification: carry ingress guia forward; populate all roll identity attributes
+        -- Batch classification: carry ingress guia + parent-batch link forward;
+        -- populate dyeing identity from partida.
         INSERT INTO inventario.lote_rollo_detalle(
-            lote_id, guia_remision_id,
+            lote_id, guia_remision_id, origen_lote_id,
             ancho, malla, rendimiento,
             color_x_cliente_id, tenido_id,
             flg_tenido, flg_antipilling
         )
         VALUES (
-            v_new_lote_id, v_guia_remision_id,
+            v_new_lote_id, v_guia_remision_id, v_input_lote_id,
             v_partida_ancho, v_partida_malla, v_partida_rendimiento,
             v_partida_color_x_cliente, v_partida_tenido_id,
             true, v_partida_flg_antipilling
         );
+
+        -- Output weighing audit: only when weight was physically measured per-roll,
+        -- not when prorated from p_peso_rollos/p_peso_rib totals.
+        IF v_peso_salida_is_medido THEN
+            INSERT INTO inventario.pesaje(lote_id, tipo, peso_real, usr_cre)
+            VALUES (v_new_lote_id, 'SALIDA', v_peso_salida, v_usr_id);
+        END IF;
     END LOOP;
 
     -- 5. Notifications
