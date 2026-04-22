@@ -34,6 +34,14 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
+    -- Cancel any pending cuadres (borrador/preparado) before opening a new one.
+    -- Only one active cuadre makes sense at a time.
+    UPDATE inventario.cuadre
+    SET estado  = 'cancelado',
+        usr_mod = get_user_id(),
+        fyh_mod = now()
+    WHERE estado IN ('borrador', 'preparado');
+
     INSERT INTO inventario.cuadre (usr_cre)
     VALUES (get_user_id())
     RETURNING id INTO v_cuadre_id;
@@ -561,8 +569,48 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_produccion(BIGINT, NUMERIC, NUMERIC) TO authenticated;
+-- Table-level grants (may not have been applied if migration ran out of order)
+GRANT SELECT ON inventario.cuadre         TO authenticated;
+GRANT SELECT ON inventario.cuadre_detalle TO authenticated;
 
+-- Function execute grants (missing from funciones/inventario.sql)
+GRANT EXECUTE ON FUNCTION inventario.crear_cuadre()                           TO authenticated;
+GRANT EXECUTE ON FUNCTION inventario.get_cuadre(BIGINT)                       TO authenticated;
+GRANT EXECUTE ON FUNCTION inventario.update_cuadre_detalles(JSONB)            TO authenticated;
+GRANT EXECUTE ON FUNCTION inventario.finalizar_cuadre(BIGINT)                 TO authenticated;
+GRANT EXECUTE ON FUNCTION inventario.get_item_movimientos_cuadre(INT, BIGINT) TO authenticated;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- inventario.marcar_cuadre_preparado
+-- Transitions a cuadre from borrador → preparado.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION inventario.marcar_cuadre_preparado(p_cuadre_id BIGINT)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'public','inventario'
+AS $$
+BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    UPDATE inventario.cuadre
+    SET estado   = 'preparado',
+        usr_mod  = get_user_id(),
+        fyh_mod  = now()
+    WHERE id = p_cuadre_id
+      AND estado = 'borrador';
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Cuadre % no existe o no está en estado borrador', p_cuadre_id;
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION inventario.marcar_cuadre_preparado(BIGINT) TO authenticated;
 
 -- ═══════════════════════════════════════════════════════════════
 -- inventario.corregir_pesaje_produccion

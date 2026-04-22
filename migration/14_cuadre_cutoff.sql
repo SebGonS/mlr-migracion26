@@ -6,7 +6,10 @@
 -- ═══════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE FUNCTION inventario.fn_trg_check_corte_cuadre()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
+RETURNS TRIGGER LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'inventario', 'public'
+AS $$
 DECLARE
     v_corte TIMESTAMPTZ;
 BEGIN
