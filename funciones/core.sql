@@ -490,17 +490,21 @@ BEGIN
     IF (p_partida->>'articulo_tipo_id') IS NULL THEN
         RAISE EXCEPTION 'articulo_tipo_id es requerido' USING ERRCODE = 'not_null_violation';
     END IF;
+    IF (p_partida->>'fibra') IS NULL THEN
+        RAISE EXCEPTION 'fibra es requerido' USING ERRCODE = 'not_null_violation';
+    END IF;
 
  INSERT INTO logs_api(function_name, user_id, params)
         VALUES ('crear_partida', v_usr_id, p_partida);
 
 -------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,tercero_id,tenido_id,articulo_tipo_id,malla,rendimiento,ancho,color_x_cliente_id,flg_antipilling,fecha_acordada)
+    INSERT INTO doc.partida (prioridad_id,tercero_id,tenido_id,articulo_tipo_id,fibra,malla,rendimiento,ancho,color_x_cliente_id,flg_antipilling,fecha_acordada)
     VALUES (
-       ( p_partida->>'prioridad_id')::INT,
+        (p_partida->>'prioridad_id')::INT,
         (p_partida->>'tercero_id')::INT,
         (p_partida->>'tenido_id')::INT,
         (p_partida->>'articulo_tipo_id')::SMALLINT,
+        (p_partida->>'fibra')::SMALLINT,
         (p_partida->>'malla')::TEXT,
         p_partida->>'rendimiento',
         (p_partida->>'ancho')::TEXT,
@@ -593,15 +597,16 @@ BEGIN
     END IF;
 
     -------------------------------------------------------------------------
-    -- CREADA only: identity fields — tercero, tenido, color, articulo_tipo, antipilling
+    -- CREADA only: identity fields — tercero, tenido, color, articulo_tipo, fibra, antipilling
     -------------------------------------------------------------------------
     IF v_estado = 'CREADA' THEN
         UPDATE doc.partida
-        SET tercero_id          = COALESCE((p_partida->>'tercero_id')::INT,          tercero_id),
-            tenido_id           = COALESCE((p_partida->>'tenido_id')::INT,           tenido_id),
+        SET tercero_id          = COALESCE((p_partida->>'tercero_id')::INT,           tercero_id),
+            tenido_id           = COALESCE((p_partida->>'tenido_id')::INT,            tenido_id),
             color_x_cliente_id  = COALESCE((p_partida->>'color_x_cliente_id')::INT,  color_x_cliente_id),
             articulo_tipo_id    = COALESCE((p_partida->>'articulo_tipo_id')::SMALLINT, articulo_tipo_id),
-            flg_antipilling     = COALESCE((p_partida->>'flg_antipilling')::BOOLEAN, flg_antipilling),
+            fibra               = COALESCE((p_partida->>'fibra')::SMALLINT,           fibra),
+            flg_antipilling     = COALESCE((p_partida->>'flg_antipilling')::BOOLEAN,  flg_antipilling),
             fecha_acordada      = (p_partida->>'fecha_acordada')::DATE
         WHERE id = p_partida_id;
 

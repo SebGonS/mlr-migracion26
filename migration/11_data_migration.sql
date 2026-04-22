@@ -808,6 +808,7 @@ SELECT
     p.color_x_cliente_id,
     p.tenido_id,
     (SELECT a.articulo_tipo_id FROM articulo a WHERE a.id = p.articulo_id),
+    (SELECT a.fibra            FROM articulo a WHERE a.id = p.articulo_id),
     p.malla,
     p.rendimiento,
     p.ancho,

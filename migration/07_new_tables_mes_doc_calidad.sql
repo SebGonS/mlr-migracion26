@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS doc.partida (
     tenido_id int NOT NULL REFERENCES tenido(id),
     color_x_cliente_id int NOT NULL REFERENCES color_x_cliente(id),
     articulo_tipo_id SMALLINT NOT NULL REFERENCES articulo_tipo(id),  -- fabric type for this batch (billing key); restricts assignable rolls
+    fibra            SMALLINT NOT NULL,                                -- fiber count; with articulo_tipo_id forms the recipe lookup key
     malla text,
     rendimiento text,
     ancho text,
