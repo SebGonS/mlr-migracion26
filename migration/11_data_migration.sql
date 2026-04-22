@@ -366,15 +366,9 @@ SET hex=c.hex
 FROM color c
 WHERE color_x_cliente.color_id = c.id;
 
-UPDATE color_x_cliente cxc
-SET tercero_id = t.id
-FROM tercero t
-WHERE t.cliente_id = cxc.cliente_id
-   OR t.cliente_id2 = cxc.cliente_id;
-
 END;
 
-BEGIN;
+
 -- ============================================================================
 -- 1. MASTER DATA MIGRATION - Public Schema
 -- ============================================================================
@@ -703,6 +697,13 @@ ORDER BY w.primary_id;
 -- Bridge MLR's legacy cliente_id so the roll backfill JOIN resolves propietario_id = 1
 -- for all partidas owned by MLR (public.cliente.id = 13 = 'MLR').
 UPDATE tercero SET cliente_id = 13 WHERE id = 1;
+
+-- Populate color_x_cliente.tercero_id now that tercero has its cliente_id bridges set.
+UPDATE color_x_cliente cxc
+SET tercero_id = t.id
+FROM tercero t
+WHERE t.cliente_id = cxc.cliente_id
+   OR t.cliente_id2 = cxc.cliente_id;
 ---CHECK 
 
 SELECT p.id, p.cliente_id FROM public.partida p
@@ -788,6 +789,7 @@ LEFT JOIN estado e ON ue.estado_id = e.id)
     color_x_cliente_id,
     tenido_id,
     articulo_tipo_id,
+    fibra,
     malla,
     rendimiento,
     ancho,
@@ -2001,7 +2003,7 @@ doc_posting AS (
     ) t
 )
 INSERT INTO inventario.item_movimientos(
-    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id, destino_ubicacion_id, cantidad, documento_tipo, documento_id, observacion, usr_cre, fyh_cre
+    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id, destino_ubicacion_id, cantidad, documento_tipo, documento_id, observacion, usr_cre, fyh_cre, fecha_hora
 )
 SELECT
     dp.doc_movimiento_id,
@@ -2021,6 +2023,7 @@ SELECT
     ls.documento_id,
     'Migración Inicial',
     ls.usr_cre,
+    ls.fyh_cre,
     ls.fyh_cre
 FROM lote_source ls
 JOIN doc_posting dp
@@ -2104,7 +2107,7 @@ doc_posting AS (
 INSERT INTO inventario.item_movimientos (
     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
     origen_ubicacion_id, cantidad, documento_tipo, documento_id,
-    observacion, usr_cre, fyh_cre
+    observacion, usr_cre, fyh_cre, fecha_hora
 )
 SELECT
     dp.doc_movimiento_id,
@@ -2123,6 +2126,7 @@ SELECT
     END,
     si.observacion,
     si.usr_solicita,
+    COALESCE(si.fyh_salida_real, si.fyh_solicitud_tz),
     COALESCE(si.fyh_salida_real, si.fyh_solicitud_tz)
 FROM public.salida_inventario si
 JOIN public.salida_inventario_detalle sid ON sid.salida_inventario_id = si.id
@@ -2367,7 +2371,7 @@ lrd_insert AS ( -- Step 1b: lote_rollo_detalle for each raw roll lote
 INSERT INTO inventario.item_movimientos (
     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
     destino_ubicacion_id, cantidad, documento_tipo, documento_id,
-    usr_cre, fyh_cre
+    usr_cre, fyh_cre, fecha_hora
 )
 SELECT
     ip.doc_movimiento_id,
@@ -2379,6 +2383,7 @@ SELECT
     'PARTIDA',
     li.partida_id,
     li.usr_cre,
+    li.fyh_cre,
     li.fyh_cre
 FROM lote_insert li
 JOIN ingress_posting ip ON ip.partida_id = li.partida_id; 
@@ -2485,7 +2490,7 @@ WITH egress_posting AS (
 INSERT INTO inventario.item_movimientos (
     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
     origen_ubicacion_id, cantidad, documento_tipo, documento_id,
-    usr_cre, fyh_cre
+    usr_cre, fyh_cre, fecha_hora
 )
 SELECT
     ep.doc_movimiento_id,
@@ -2497,6 +2502,7 @@ SELECT
     'ORDEN_PRODUCCION_PASO',
     opp.id,
     l.usr_cre,
+    l.fyh_cre,
     l.fyh_cre
 FROM mes.orden_produccion_paso opp
 JOIN mes.orden_produccion       op   ON op.id  = opp.orden_produccion_id AND op.tipo = 'NORMAL'
@@ -2546,7 +2552,7 @@ ghost_posting AS (
 INSERT INTO inventario.item_movimientos (
     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
     origen_ubicacion_id, cantidad, documento_tipo, documento_id,
-    usr_cre, fyh_cre
+    usr_cre, fyh_cre,fecha_hora
 )
 SELECT
     gp.doc_movimiento_id,
@@ -2558,10 +2564,16 @@ SELECT
     'PARTIDA',
     gs.partida_id,
     gs.usr_cre,
+    gs.fyh_egr,
     gs.fyh_egr
 FROM ghost_source gs
 JOIN ghost_posting gp ON gp.partida_id = gs.partida_id;
 
+COMMIT;
+-- SELECT * FROM inventario.item_movimientos
+-- WHERE documento_tipo IN ('ORDEN_PRODUCCION_PASO')
+-- and item_movimiento_tipo_id IN ((SELECT id FROM inventario.item_movimiento_tipo
+--      WHERE codigo IN ('VENTA_EGR' , 'SERV_EGR')))
 -- ============================================================================
 -- Steps 7–8: Dyed roll output + dispatch
 -- ============================================================================
@@ -2618,7 +2630,7 @@ prod_ing_insert AS (
     INSERT INTO inventario.item_movimientos (
         doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
         destino_ubicacion_id, cantidad, documento_tipo, documento_id,
-        usr_cre, fyh_cre
+        usr_cre, fyh_cre, fecha_hora
     )
     SELECT
         po.doc_movimiento_id,
@@ -2630,6 +2642,7 @@ prod_ing_insert AS (
         'ORDEN_PRODUCCION_PASO',
         dl.paso_id,
         dl.usr_cre,
+        dl.fyh_cre,
         dl.fyh_cre
     FROM dyed_lote_insert dl
     JOIN posting po ON po.paso_id = dl.paso_id
@@ -2637,7 +2650,7 @@ prod_ing_insert AS (
 INSERT INTO inventario.item_movimientos (
     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
     origen_ubicacion_id, cantidad, documento_tipo, documento_id,
-    usr_cre, fyh_cre
+    usr_cre, fyh_cre, fecha_hora
 )
 SELECT
     po.doc_movimiento_id,
@@ -2652,6 +2665,7 @@ SELECT
     'ORDEN_PRODUCCION_PASO',
     dl.paso_id,
     dl.usr_cre,
+    dl.fyh_cre,
     dl.fyh_cre
 FROM dyed_lote_insert dl
 JOIN posting po ON po.paso_id = dl.paso_id;
@@ -2718,6 +2732,8 @@ WHERE duracion IS NOT NULL
 --   GUIA_REMISION  → new-flow ingress rolls: billing anchor only, spec fields NULL
 --   ORDEN_PRODUCCION_PASO → dyed rolls: full identity from doc.partida
 --   CUADRE         → surplus rolls from stock count: no guia, no spec fields
+
+
 INSERT INTO inventario.lote_rollo_detalle (
     lote_id,
     guia_remision_id,
@@ -2845,6 +2861,8 @@ BEGIN
         CASE WHEN cp.activo = 0 THEN cp.fyh_fin ELSE NULL END,
         cp.fyh_cre
     FROM public.catalogo_precios cp
+    WHERE cp.color_x_cliente_id IS NULL
+       OR EXISTS (SELECT 1 FROM color_x_cliente cxc WHERE cxc.id = cp.color_x_cliente_id)
     ON CONFLICT DO NOTHING;
 
     -- ANTIPILLING wildcard rows: one per client tier (Urban, everyone else)
@@ -2856,6 +2874,5 @@ BEGIN
         (v_antipil_op_id, v_urban_tercero_id, 0.15, NOW()),
         (v_antipil_op_id, NULL,               0.10, NOW())
     ON CONFLICT DO NOTHING;
-END $$;
-
-COMMIT;
+END;
+$$;

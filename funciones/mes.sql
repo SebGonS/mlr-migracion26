@@ -85,6 +85,7 @@ FROM (
                                          FROM mes.orden_produccion) numbered
                                    WHERE numbered.id = op.id),
         'articulo_tipo_id',   p.articulo_tipo_id,
+        'fibra',              p.fibra,
         'cliente',            c.nombre,
         'color',              vc.color,
         'color_hex',          vc.color_hex,
