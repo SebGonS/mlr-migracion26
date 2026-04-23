@@ -509,35 +509,36 @@ GROUP BY
 ORDER BY art.nombre, i.nombre;
 
 -- ── inventario.vw_stock_insumos ───────────────────────────────
+-- Insumos are fungible (no lote tracking), so we aggregate directly from
+-- item_movimientos with the item_tipo filter applied before the GROUP BY.
+-- Avoids vw_stock_actual whose HAVING clause blocks predicate pushdown.
+-- Index on item_movimientos(item_id) will be used after idx_im_item_id is added.
 CREATE OR REPLACE VIEW inventario.vw_stock_insumos AS
-WITH insumos AS (
-    SELECT
-        sa.item_id,
-        vi.item_codigo,
-        vi.item_nombre,
-        SUM(sa.cantidad_disponible) AS cantidad_total,
-        vi.unidad_codigo
-    FROM inventario.vw_stock_actual sa
-    JOIN vw_items vi ON vi.item_id = sa.item_id
-    WHERE vi.item_tipo_codigo = 'INSUMO'
-    GROUP BY sa.item_id, vi.item_codigo, vi.item_nombre, vi.unidad_codigo
-)
 SELECT
-    i.item_id,
-    i.item_codigo,
-    i.item_nombre,
-    i.cantidad_total,
-    i.unidad_codigo,
+    im.item_id,
+    i.codigo            AS item_codigo,
+    i.nombre            AS item_nombre,
+    SUM(im.cantidad * imt.factor) AS cantidad_total,
+    un.codigo           AS unidad_codigo,
     iid.insumo_tipo_id,
-    it.codigo AS insumo_tipo_codigo,
-    it.nombre AS insumo_tipo_nombre,
+    intp.codigo         AS insumo_tipo_codigo,
+    intp.nombre         AS insumo_tipo_nombre,
     iid.colorante_tipo_id,
-    ct.codigo AS colorante_tipo_codigo,
-    ct.nombre AS colorante_tipo_nombre
-FROM insumos i
-LEFT JOIN item_insumo_detalle iid ON iid.item_id = i.item_id
-LEFT JOIN insumo_tipo it ON it.id = iid.insumo_tipo_id
-LEFT JOIN colorante_tipo ct ON ct.id = iid.colorante_tipo_id;
+    ct.codigo           AS colorante_tipo_codigo,
+    ct.nombre           AS colorante_tipo_nombre
+FROM inventario.item_movimientos im
+JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+JOIN item i   ON i.id = im.item_id
+JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
+JOIN unidad un ON un.id = i.unidad_id
+LEFT JOIN item_insumo_detalle iid  ON iid.item_id = im.item_id
+LEFT JOIN insumo_tipo intp         ON intp.id = iid.insumo_tipo_id
+LEFT JOIN colorante_tipo ct        ON ct.id = iid.colorante_tipo_id
+GROUP BY
+    im.item_id, i.codigo, i.nombre, un.codigo,
+    iid.insumo_tipo_id, intp.codigo, intp.nombre,
+    iid.colorante_tipo_id, ct.codigo, ct.nombre
+HAVING SUM(im.cantidad * imt.factor) > 0;
 
 -- ── inventario.vw_precio_promedio_insumos ────────────────────
 -- Weighted average cost per insumo item.
