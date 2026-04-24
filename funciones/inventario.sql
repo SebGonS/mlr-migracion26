@@ -770,3 +770,53 @@ $function$;
 
 GRANT EXECUTE ON FUNCTION inventario.corregir_pesaje_produccion(BIGINT, NUMERIC, NUMERIC) TO authenticated;
 
+CREATE OR REPLACE FUNCTION inventario.get_cuadre(p_cuadre_id BIGINT)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'public','inventario','mes'
+AS $$
+DECLARE
+    result JSONB;
+BEGIN
+    SELECT jsonb_build_object(
+        'cuadre_id',    c.id,
+        'fecha_cuadre', c.fecha_cuadre,
+        'fecha_cierre', c.fecha_cierre,
+        'estado',       c.estado,
+        'usr_cre',      c.usr_cre,
+        'fyh_cre',      c.fyh_cre,
+        'detalle', COALESCE(
+            jsonb_agg(
+                jsonb_build_object(
+                    'id',                      cd.id,
+                    'item_id',                 cd.item_id,
+                    'item_codigo',             i.codigo,
+                    'item_nombre',             i.nombre,
+                    'cantidad_sistema',        cd.cantidad_sistema,
+                    'cantidad_contada',        cd.cantidad_contada,
+                    'precio_promedio_sistema', cd.precio_promedio_sistema,
+                    'stock_valorado_sistema',  cd.stock_valorado_sistema,
+                    'ult_precio_compra',       cd.ult_precio_compra
+                ) ORDER BY i.nombre
+            ) FILTER (WHERE cd.id IS NOT NULL),
+            '[]'::jsonb
+        )
+    )
+    INTO result
+    FROM inventario.cuadre c
+    LEFT JOIN inventario.cuadre_detalle cd ON cd.cuadre_id = c.id
+    LEFT JOIN item i ON i.id = cd.item_id
+    WHERE c.id = p_cuadre_id
+    GROUP BY c.id;
+
+    IF result IS NULL THEN
+        RAISE EXCEPTION 'Cuadre % no existe', p_cuadre_id;
+    END IF;
+
+    RETURN result;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION inventario.get_cuadre(BIGINT) TO authenticated;
