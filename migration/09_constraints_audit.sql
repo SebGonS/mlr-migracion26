@@ -1,4 +1,4 @@
--- ═══════════════════════════════════════════════════════════════
+﻿-- ═══════════════════════════════════════════════════════════════
 -- Step 9: Code immutability, audit schema, triggers, REVOKEs
 -- Run AFTER all tables exist (steps 1–8).
 -- Depends on: get_user_id(), fn_trg_set_*_fields (step 3).
@@ -41,10 +41,10 @@ END $$;
 -- Core business documents must never be hard-deleted — use flg_elm = true instead.
 DO $$ DECLARE t TEXT; BEGIN
     FOREACH t IN ARRAY ARRAY[
-        'doc.partida',
+        'mes.partida',
         'doc.guia_remision',
         'inventario.lote',
-        'mes.orden_produccion'
+        'mes.proceso'
     ] LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS trg_bd_prevent_hard_delete ON %s;
@@ -177,15 +177,15 @@ REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON inventario.ubicacion FROM 
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON inventario.ubicacion FROM anon, authenticated;
 
 ----PARTIDA
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.partida FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.partida FROM anon, authenticated;
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.partida FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.partida FROM anon, authenticated;
 -- Identity fields are CREADA-only via actualizar_partida; block direct UPDATE to enforce the state gate
 REVOKE UPDATE (tercero_id, color_x_cliente_id, tenido_id, articulo_tipo_id, fibra, flg_antipilling)
-    ON doc.partida FROM anon, authenticated;
+    ON mes.partida FROM anon, authenticated;
 
 -----PARTIDA DETALLE
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.partida_detalle FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.partida_detalle FROM anon, authenticated;
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.partida_detalle FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.partida_detalle FROM anon, authenticated;
 
 -----GUIA REMISION TIPO
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.guia_remision_tipo FROM anon, authenticated;
@@ -208,8 +208,8 @@ REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.operacion FROM anon, a
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.operacion FROM anon, authenticated;
 
 -----ORDEN PRODUCCION ITEM
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.orden_produccion_item FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.orden_produccion_item FROM anon, authenticated;
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.proceso_componente FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.proceso_componente FROM anon, authenticated;
 
 -----MAQUINA TIPO
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.maquina_tipo FROM anon, authenticated;
@@ -232,16 +232,16 @@ REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod, usr_elm, fyh_elm) ON mes.ruta
 REVOKE UPDATE (usr_cre, fyh_cre)                                      ON mes.ruta_plantilla FROM anon, authenticated;
 
 -----ORDEN DE PRODUCCION
-REVOKE INSERT (usr_cre, fyh_cre) ON mes.orden_produccion FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre) ON mes.orden_produccion FROM anon, authenticated;
+REVOKE INSERT (usr_cre, fyh_cre) ON mes.proceso FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre) ON mes.proceso FROM anon, authenticated;
 
 -----ORDEN PRODUCCION PASO
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.orden_produccion_paso FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.orden_produccion_paso FROM anon, authenticated;
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.proceso_paso FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.proceso_paso FROM anon, authenticated;
 
 -----ORDEN PRODUCCION PASO ITEM
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.orden_produccion_paso_item FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.orden_produccion_paso_item FROM anon, authenticated;
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.proceso_paso_item FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.proceso_paso_item FROM anon, authenticated;
 
 ---PROGRAMACION
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.programacion FROM anon, authenticated;
@@ -280,7 +280,7 @@ REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.factura_proveedor FROM
 REVOKE INSERT (usr_cre, fyh_cre) ON doc.factura_proveedor_detalle FROM anon, authenticated;
 
 -----PARTIDA GUIA REMISION
-REVOKE INSERT (usr_cre, fyh_cre) ON doc.partida_guia_remision FROM anon, authenticated;
+REVOKE INSERT (usr_cre, fyh_cre) ON mes.partida_guia_remision FROM anon, authenticated;
 
 -----COMPRA
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod, usr_elm, fyh_elm) ON doc.compra FROM anon, authenticated;
@@ -307,11 +307,12 @@ REVOKE UPDATE (usr_cre, fyh_cre)                                      ON doc.fac
 REVOKE INSERT (usr_cre, fyh_cre) ON doc.factura_detalle FROM anon, authenticated;
 
 -- ── Performance indexes ───────────────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_opp_orden_id ON mes.orden_produccion_paso(orden_produccion_id);
-CREATE INDEX IF NOT EXISTS idx_opi_orden_id ON mes.orden_produccion_item(orden_produccion_id);
+CREATE INDEX IF NOT EXISTS idx_opp_orden_id ON mes.proceso_paso(proceso_id);
+CREATE INDEX IF NOT EXISTS idx_opi_orden_id ON mes.proceso_componente(proceso_id);
 CREATE INDEX IF NOT EXISTS idx_lote_doc             ON inventario.lote(documento_tipo, documento_id);
 CREATE INDEX IF NOT EXISTS idx_im_lote_id           ON inventario.item_movimientos(lote_id);
 CREATE INDEX IF NOT EXISTS idx_im_item_id           ON inventario.item_movimientos(item_id);
+CREATE INDEX IF NOT EXISTS idx_im_fecha_hora        ON inventario.item_movimientos(fecha_hora);
 CREATE INDEX IF NOT EXISTS idx_letra_factura_factura     ON doc.letra_factura(factura_proveedor_id);
 CREATE INDEX IF NOT EXISTS idx_compra_factura_factura_id ON doc.compra_factura_proveedor(factura_proveedor_id);
 

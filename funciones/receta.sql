@@ -1,4 +1,4 @@
--- ═══════════════════════════════════════════════════════════════
+﻿-- ═══════════════════════════════════════════════════════════════
 -- receta SCHEMA — lifecycle functions
 --
 -- Dyeing recipes (receta.tenido):
@@ -152,7 +152,7 @@ BEGIN
     -- Those pasos hold a FK to this recipe — reverting it would corrupt traceability.
     -- Correct action: create a new version via crear_tenido.
     IF v_receta.flg_produccion = true AND p_estado_id != v_historico_id THEN
-        IF EXISTS (SELECT 1 FROM mes.orden_produccion_paso WHERE receta_id = p_receta_id) THEN
+        IF EXISTS (SELECT 1 FROM mes.proceso_paso WHERE receta_id = p_receta_id) THEN
             RAISE EXCEPTION
                 'Receta % está asignada a pasos de producción — crear una nueva versión en lugar de revertir.',
                 p_receta_id;
@@ -608,9 +608,9 @@ $$;
 -- resolver_tenido_id
 -- Resolves the approved receta.tenido for a (partida, tipo_receta) pair.
 --
--- 4 keys come from doc.partida directly:
+-- 4 keys come from mes.partida directly:
 --   color_x_cliente_id, tenido_id
--- 2 keys come from doc.partida_detalle → item_rollo_detalle → articulo:
+-- 2 keys come from mes.partida_detalle → item_rollo_detalle → articulo:
 --   articulo_tipo_id, fibra
 -- flg_antipilling is context-sensitive:
 --   NORMAL tipo_receta  → use partida.flg_antipilling
@@ -636,11 +636,11 @@ DECLARE
     v_receta_id    INT;
     v_combos       INT;
     v_flg_antipill BOOLEAN;
-    v_op_tipo      orden_produccion_tipo_enum;
+    v_op_tipo      proceso_tipo_enum;
 BEGIN
     -- Guard: all items in a dyeing partida must share one articulo_tipo + fibra
     SELECT COUNT(DISTINCT (a.articulo_tipo_id, a.fibra)) INTO v_combos
-    FROM doc.partida_detalle pd
+    FROM mes.partida_detalle pd
     JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
     JOIN articulo a ON a.id = ird.articulo_id
     WHERE pd.partida_id = p_partida_id;
@@ -651,19 +651,19 @@ BEGIN
             p_partida_id;
     END IF;
 
-    SELECT flg_antipilling INTO v_flg_antipill FROM doc.partida WHERE id = p_partida_id;
+    SELECT flg_antipilling INTO v_flg_antipill FROM mes.partida WHERE id = p_partida_id;
 
     -- REPROCESO: antipilling already applied on first dyeing — always match false
     IF p_tipo_receta_id IS NOT NULL THEN
-        SELECT orden_produccion_tipo INTO v_op_tipo FROM tipo_receta WHERE id = p_tipo_receta_id;
+        SELECT proceso_tipo INTO v_op_tipo FROM tipo_receta WHERE id = p_tipo_receta_id;
         IF v_op_tipo = 'REPROCESO' THEN
             v_flg_antipill := false;
         END IF;
     END IF;
 
     SELECT rt.id INTO v_receta_id
-    FROM doc.partida p
-    JOIN doc.partida_detalle pd ON pd.partida_id = p.id
+    FROM mes.partida p
+    JOIN mes.partida_detalle pd ON pd.partida_id = p.id
     JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
     JOIN articulo a ON a.id = ird.articulo_id
     JOIN receta.tenido rt
@@ -703,7 +703,7 @@ $$;
 
 -- ───────────────────────────────────────
 -- solicitar_si_ausente
--- Called from doc.crear_partida after partida_detalle is inserted.
+-- Called from mes.crear_partida after partida_detalle is inserted.
 -- Creates a receta.tenido in INGRESADO state if no live recipe exists for
 -- the partida's spec (color × articulo_tipo × fibra × tenido × antipilling).
 -- Returns the new receta.tenido.id, or NULL if skipped.
@@ -726,7 +726,7 @@ DECLARE
 BEGIN
     -- Only proceed if all detalle items resolve to exactly one articulo_tipo + fibra
     SELECT COUNT(DISTINCT (a.articulo_tipo_id, a.fibra)) INTO v_combos
-    FROM doc.partida_detalle pd
+    FROM mes.partida_detalle pd
     JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
     JOIN articulo a ON a.id = ird.articulo_id
     WHERE pd.partida_id = p_partida_id;
@@ -742,8 +742,8 @@ BEGIN
         p.tenido_id,
         p.flg_antipilling
     INTO v_key
-    FROM doc.partida p
-    JOIN doc.partida_detalle pd ON pd.partida_id = p.id
+    FROM mes.partida p
+    JOIN mes.partida_detalle pd ON pd.partida_id = p.id
     JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
     JOIN articulo a ON a.id = ird.articulo_id
     WHERE p.id = p_partida_id
@@ -788,41 +788,6 @@ END;$$;
 
 
 -- ───────────────────────────────────────
--- get_tenido_versiones
--- Returns all recipes that share the same spec
--- (color_x_cliente_id, articulo_tipo_id, fibra, tenido_id, flg_antipilling)
--- as the given recipe, ordered newest first.
--- Used to browse the version history and to populate a version picker for diff.
--- ───────────────────────────────────────
-
-CREATE OR REPLACE FUNCTION receta.get_tenido_versiones(p_receta_id INT)
-RETURNS JSONB
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path TO 'iam', 'public', 'receta'
-AS $$
-    SELECT COALESCE(jsonb_agg(
-        jsonb_build_object(
-            'id',             v.id,
-            'estado_codigo',  v.estado_codigo,
-            'estado_nombre',  v.estado_nombre,
-            'flg_produccion', v.flg_produccion,
-            'fyh_cre',        v.fyh_cre,
-            'fyh_produccion', v.fyh_produccion,
-            'fyh_mod',        v.fyh_mod
-        ) ORDER BY v.fyh_cre DESC
-    ), '[]'::jsonb)
-    FROM receta.vw_tenido v
-    WHERE (v.color_x_cliente_id, v.articulo_tipo_id, v.fibra, v.tenido_id, v.flg_antipilling) = (
-        SELECT t.color_x_cliente_id, t.articulo_tipo_id, t.fibra, t.tenido_id, t.flg_antipilling
-        FROM receta.tenido t
-        WHERE t.id = p_receta_id
-    );
-$$;
-
-
--- ───────────────────────────────────────
 -- vw_tenido
 -- All recipes, all states — enriched with display names.
 -- Frontend applies tab filters:
@@ -860,6 +825,41 @@ LEFT JOIN public.tipo_receta         tr ON tr.id = t.tipo_receta_id;
 
 
 -- ───────────────────────────────────────
+-- get_tenido_versiones
+-- Returns all recipes that share the same spec
+-- (color_x_cliente_id, articulo_tipo_id, fibra, tenido_id, flg_antipilling)
+-- as the given recipe, ordered newest first.
+-- Used to browse the version history and to populate a version picker for diff.
+-- ───────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION receta.get_tenido_versiones(p_receta_id INT)
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'receta'
+AS $$
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'id',             v.id,
+            'estado_codigo',  v.estado_codigo,
+            'estado_nombre',  v.estado_nombre,
+            'flg_produccion', v.flg_produccion,
+            'fyh_cre',        v.fyh_cre,
+            'fyh_produccion', v.fyh_produccion,
+            'fyh_mod',        v.fyh_mod
+        ) ORDER BY v.fyh_cre DESC
+    ), '[]'::jsonb)
+    FROM receta.vw_tenido v
+    WHERE (v.color_x_cliente_id, v.articulo_tipo_id, v.fibra, v.tenido_id, v.flg_antipilling) = (
+        SELECT t.color_x_cliente_id, t.articulo_tipo_id, t.fibra, t.tenido_id, t.flg_antipilling
+        FROM receta.tenido t
+        WHERE t.id = p_receta_id
+    );
+$$;
+
+
+-- ───────────────────────────────────────
 -- GRANTS
 -- ───────────────────────────────────────
 
@@ -875,8 +875,7 @@ GRANT EXECUTE ON FUNCTION receta.get_lavado_maquina          TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.resolver_tenido_id          TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.get_tenido_para_partida     TO authenticated;
 GRANT EXECUTE ON FUNCTION receta.get_tenido_versiones        TO authenticated;
-GRANT EXECUTE ON FUNCTION receta.diff_tenido                 TO authenticated;
--- solicitar_si_ausente: internal only — called from doc.crear_partida (SECURITY DEFINER).
+-- solicitar_si_ausente: internal only — called from mes.crear_partida (SECURITY DEFINER).
 -- No grant to authenticated; the owner context propagates through crear_partida.
 GRANT SELECT  ON receta.vw_tenido                            TO authenticated;
 GRANT SELECT  ON estado_desarrollo_color                     TO authenticated;

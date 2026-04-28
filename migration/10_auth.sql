@@ -1,4 +1,4 @@
--- =============================================================================
+﻿-- =============================================================================
 -- Step 10: Authorization — JWT hook and RLS policies
 -- get_user_id() is defined in step 3 (migration/03_base_functions.sql).
 -- Re-running is safe (CREATE OR REPLACE / IF NOT EXISTS).
@@ -155,8 +155,8 @@ CREATE POLICY "inventario_ver" ON inventario.pesaje                  FOR SELECT 
 CREATE POLICY "ver_lote_rollo"  ON inventario.lote_rollo_detalle     FOR SELECT TO authenticated USING (true);
 
 -- ── Comercial ─────────────────────────────────────────────────────────────────
-ALTER TABLE doc.partida                ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.partida_detalle        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.partida                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.partida_detalle        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.guia_remision          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.guia_remision_detalle  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.catalogo_precios              ENABLE ROW LEVEL SECURITY;
@@ -169,11 +169,11 @@ ALTER TABLE doc.letra                         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.letra_factura                 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.factura                       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.factura_detalle               ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.partida_guia_remision         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.partida_guia_remision         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.compra_factura_proveedor      ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "comercial_ver" ON doc.partida                    FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.partida_detalle            FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON mes.partida                    FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON mes.partida_detalle            FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.guia_remision              FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.guia_remision_detalle      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.catalogo_precios           FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
@@ -186,7 +186,7 @@ CREATE POLICY "comercial_ver" ON doc.letra                      FOR SELECT TO au
 CREATE POLICY "comercial_ver" ON doc.letra_factura              FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.factura                    FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.factura_detalle            FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.partida_guia_remision      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON mes.partida_guia_remision      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.compra_factura_proveedor   FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 
 -- ── Producción ────────────────────────────────────────────────────────────────
@@ -194,10 +194,10 @@ ALTER TABLE mes.maquina                      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.empleado                     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.ruta_plantilla               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.ruta_plantilla_detalle       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.orden_produccion             ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.orden_produccion_paso        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.orden_produccion_item        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.orden_produccion_paso_item   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.proceso             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.proceso_paso        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.proceso_componente        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.proceso_paso_item   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.programacion                 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.lavado_maquina               ENABLE ROW LEVEL SECURITY;
 
@@ -205,10 +205,10 @@ CREATE POLICY "produccion_ver" ON mes.maquina                    FOR SELECT TO a
 CREATE POLICY "produccion_ver" ON mes.empleado                   FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.ruta_plantilla             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.ruta_plantilla_detalle     FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.orden_produccion           FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.orden_produccion_paso      FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.orden_produccion_item      FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.orden_produccion_paso_item FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.proceso           FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.proceso_paso      FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.proceso_componente      FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.proceso_paso_item FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.programacion               FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.lavado_maquina             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 
@@ -272,7 +272,7 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- │  actualizar_pesos_*                          │ inventario.editar          │
 -- ├─────────────────────────────────────────────┼────────────────────────────┤
 -- │ PRODUCCIÓN                                                               │
--- │  crear_orden_produccion                      │ produccion.crear           │
+-- │  crear_proceso                      │ produccion.crear           │
 -- │  actualizar_pasos_orden                      │ produccion.editar          │
 -- │  iniciar_paso, finalizar_paso                │ produccion.ejecutar        │
 -- │  registrar_consumo_paso                      │ produccion.ejecutar        │

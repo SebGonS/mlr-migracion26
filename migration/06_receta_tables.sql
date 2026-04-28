@@ -1,6 +1,6 @@
--- ═══════════════════════════════════════════════════════════════
+﻿-- ═══════════════════════════════════════════════════════════════
 -- Step 6: receta schema tables
--- Must come BEFORE mes.orden_produccion_paso and mes.lavado_maquina
+-- Must come BEFORE mes.proceso_paso and mes.lavado_maquina
 -- which have FK → receta.tenido and receta.lavado_maquina.
 --
 -- NOTE: receta.tenido uses articulo_tipo_id + fibra (not a specific articulo_id).

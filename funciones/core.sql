@@ -1,4 +1,4 @@
-
+﻿
 CREATE OR REPLACE FUNCTION public.get_item(p_item_id int)
 RETURNS jsonb
 LANGUAGE sql
@@ -455,7 +455,7 @@ $function$;
 
 
 
-CREATE OR REPLACE FUNCTION doc.crear_partida(p_partida jsonb)
+CREATE OR REPLACE FUNCTION mes.crear_partida(p_partida jsonb)
  RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -498,7 +498,7 @@ BEGIN
         VALUES ('crear_partida', v_usr_id, p_partida);
 
 -------------------------------------------------------------------------
-    INSERT INTO doc.partida (prioridad_id,tercero_id,tenido_id,articulo_tipo_id,fibra,malla,rendimiento,ancho,color_x_cliente_id,flg_antipilling,fecha_acordada)
+    INSERT INTO mes.partida (prioridad_id,tercero_id,tenido_id,articulo_tipo_id,fibra,malla,rendimiento,ancho,color_x_cliente_id,flg_antipilling,fecha_acordada)
     VALUES (
         (p_partida->>'prioridad_id')::INT,
         (p_partida->>'tercero_id')::INT,
@@ -513,7 +513,7 @@ BEGIN
         (p_partida->>'fecha_acordada')::DATE
     )
     RETURNING id INTO v_partida_id;
-     INSERT INTO doc.partida_detalle(partida_id, item_id,cantidad,unidad_id)
+     INSERT INTO mes.partida_detalle(partida_id, item_id,cantidad,unidad_id)
      SELECT v_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT, (u->>'unidad_id')::INT
      FROM jsonb_array_elements(p_partida->'partida_detalles') AS u;
 
@@ -541,7 +541,7 @@ WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
 END;
 $function$;
 
-CREATE OR REPLACE FUNCTION doc.actualizar_partida(p_partida_id INT, p_partida jsonb)
+CREATE OR REPLACE FUNCTION mes.actualizar_partida(p_partida_id INT, p_partida jsonb)
  RETURNS text
  LANGUAGE plpgsql
  SECURITY DEFINER
@@ -566,7 +566,7 @@ BEGIN
 
     -- Get current state
     SELECT estado INTO v_estado
-    FROM doc.partida
+    FROM mes.partida
     WHERE id = p_partida_id;
 
     IF NOT FOUND THEN
@@ -581,7 +581,7 @@ BEGIN
     -------------------------------------------------------------------------
     -- Always editable: prioridad_id
     -------------------------------------------------------------------------
-    UPDATE doc.partida
+    UPDATE mes.partida
     SET prioridad_id = (p_partida->>'prioridad_id')::INT
     WHERE id = p_partida_id;
 
@@ -589,7 +589,7 @@ BEGIN
     -- CREADA or CONFIRMADA: also malla, rendimiento
     -------------------------------------------------------------------------
     IF v_estado IN ('CREADA', 'CONFIRMADA') THEN
-        UPDATE doc.partida
+        UPDATE mes.partida
         SET malla          = (p_partida->>'malla')::TEXT,
             rendimiento    = p_partida->>'rendimiento',
             fecha_acordada = (p_partida->>'fecha_acordada')::DATE
@@ -600,7 +600,7 @@ BEGIN
     -- CREADA only: identity fields — tercero, tenido, color, articulo_tipo, fibra, antipilling
     -------------------------------------------------------------------------
     IF v_estado = 'CREADA' THEN
-        UPDATE doc.partida
+        UPDATE mes.partida
         SET tercero_id          = COALESCE((p_partida->>'tercero_id')::INT,           tercero_id),
             tenido_id           = COALESCE((p_partida->>'tenido_id')::INT,            tenido_id),
             color_x_cliente_id  = COALESCE((p_partida->>'color_x_cliente_id')::INT,  color_x_cliente_id),
@@ -612,7 +612,7 @@ BEGIN
 
         -- Full replace of detail rows
        -- Remove rows no longer in the incoming array
-DELETE FROM doc.partida_detalle pd
+DELETE FROM mes.partida_detalle pd
 WHERE pd.partida_id = p_partida_id
   AND NOT EXISTS (
       SELECT 1
@@ -621,7 +621,7 @@ WHERE pd.partida_id = p_partida_id
   );
 
 -- Upsert the rest
-INSERT INTO doc.partida_detalle(partida_id, item_id, cantidad,unidad_id)
+INSERT INTO mes.partida_detalle(partida_id, item_id, cantidad,unidad_id)
 SELECT p_partida_id, (u->>'item_id')::INT, (u->>'cantidad')::INT, (u->>'unidad_id')::INT
 FROM jsonb_array_elements(p_partida->'partida_detalles') u
 ON CONFLICT (partida_id, item_id) DO UPDATE
@@ -668,7 +668,7 @@ $function$;
 
 
 
-CREATE OR REPLACE FUNCTION doc.get_partida(p_partida_id BIGINT)
+CREATE OR REPLACE FUNCTION mes.get_partida(p_partida_id BIGINT)
 RETURNS jsonb
 LANGUAGE plpgsql  -- ✅ FIXED
 SECURITY DEFINER
@@ -724,24 +724,24 @@ BEGIN
                 'unidad', u.codigo,
                 'unidad_id',u.id
             ) ORDER BY pd.id)
-            FROM doc.partida_detalle pd
+            FROM mes.partida_detalle pd
             LEFT JOIN vw_items vi ON vi.item_id = pd.item_id  -- ✅ FIXED
             LEFT JOIN unidad u ON u.id = pd.unidad_id
             WHERE pd.partida_id = p.id
         ), '[]'::jsonb),
         'resumen_progreso', jsonb_build_object(
-    'total_ordenes', (SELECT COUNT(*) FROM mes.orden_produccion WHERE partida_id = p.id),
-    'ordenes_completadas', (SELECT COUNT(*) FROM mes.orden_produccion WHERE partida_id = p.id AND estado IN ('FINALIZADA', 'TECO', 'CERRADA')),
+    'total_ordenes', (SELECT COUNT(*) FROM mes.proceso WHERE partida_id = p.id),
+    'ordenes_completadas', (SELECT COUNT(*) FROM mes.proceso WHERE partida_id = p.id AND estado IN ('FINALIZADA', 'TECO', 'CERRADA')),
     'total_pasos', (
         SELECT COUNT(*) 
-        FROM mes.orden_produccion_paso opp
-        JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+        FROM mes.proceso_paso opp
+        JOIN mes.proceso op ON op.id = opp.proceso_id
         WHERE op.partida_id = p.id
     ),
     'pasos_completados', (
         SELECT COUNT(*) 
-        FROM mes.orden_produccion_paso opp
-        JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+        FROM mes.proceso_paso opp
+        JOIN mes.proceso op ON op.id = opp.proceso_id
         WHERE op.partida_id = p.id AND opp.estado = 'COMPLETADO'
     ),
     'porcentaje_completado', (
@@ -750,8 +750,8 @@ BEGIN
             NULLIF(COUNT(*), 0) * 100, 
             2
         )
-        FROM mes.orden_produccion_paso opp
-        JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+        FROM mes.proceso_paso opp
+        JOIN mes.proceso op ON op.id = opp.proceso_id
         WHERE op.partida_id = p.id
     )
 ),
@@ -774,11 +774,11 @@ BEGIN
             SUM(m.cantidad) as cantidad_total
         FROM inventario.item_movimientos m
         JOIN vw_items vi ON vi.item_id = m.item_id
-        WHERE m.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+        WHERE m.documento_tipo = 'proceso_paso'
         AND m.documento_id IN (
             SELECT opp.id 
-            FROM mes.orden_produccion_paso opp
-            JOIN mes.orden_produccion op ON op.id = opp.orden_produccion_id
+            FROM mes.proceso_paso opp
+            JOIN mes.proceso op ON op.id = opp.proceso_id
             WHERE op.partida_id = p.id
         )
         GROUP BY m.item_id, vi.item_codigo, vi.item_nombre, vi.unidad_codigo
@@ -793,14 +793,14 @@ BEGIN
                     'id', op.id,
                     'tipo', op.tipo,
                     'estado', op.estado,
-                    'orden_origen_id', op.orden_origen_id,
+                    'proceso_origen_id', op.proceso_origen_id,
                     'fyh_cre', op.fyh_cre,
                     'fyh_inicio', op.fyh_inicio,
                     'fyh_fin', op.fyh_fin,
                     'op_codigo', EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' ||
                         (SELECT numbered.rn::TEXT
                          FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS rn
-                               FROM mes.orden_produccion) numbered
+                               FROM mes.proceso) numbered
                          WHERE numbered.id = op.id),
                     
                     -- ───────────────────────────────────
@@ -857,7 +857,7 @@ BEGIN
                                     LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
                                     LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
                                     LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
-                                    WHERE m.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+                                    WHERE m.documento_tipo = 'proceso_paso'
                                     AND m.documento_id = opp.id
                                 ), '[]'::jsonb),
                                 
@@ -868,19 +868,19 @@ BEGIN
                                     SELECT jsonb_agg(
                                         jsonb_build_object(
                                             'id', oppi.id,
-                                            'orden_produccion_item_id', oppi.orden_produccion_item_id
+                                            'proceso_componente_id', oppi.proceso_componente_id
                                         ) ORDER BY oppi.id
                                     )
-                                    FROM mes.orden_produccion_paso_item oppi
-                                    WHERE oppi.orden_produccion_paso_id = opp.id
+                                    FROM mes.proceso_paso_item oppi
+                                    WHERE oppi.proceso_paso_id = opp.id
                                 ), '[]'::jsonb)
                                 
                             ) ORDER BY opp.secuencia
                         )
-                        FROM mes.orden_produccion_paso opp
+                        FROM mes.proceso_paso opp
                         LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
                         LEFT JOIN mes.maquina ON maquina.id = opp.maquina_asignada_id
-                        WHERE opp.orden_produccion_id = op.id
+                        WHERE opp.proceso_id = op.id
                     ), '[]'::jsonb),
                     
                     -- ───────────────────────────────────
@@ -907,11 +907,11 @@ BEGIN
                                 'tenido_id',          lrd_in.tenido_id
                             ) ORDER BY opi.id
                         )
-                        FROM mes.orden_produccion_item opi
+                        FROM mes.proceso_componente opi
                         LEFT JOIN inventario.lote l                          ON l.id = opi.lote_id
                         LEFT JOIN vw_items vi_mat                            ON vi_mat.item_id = l.item_id
                         LEFT JOIN inventario.lote_rollo_detalle lrd_in       ON lrd_in.lote_id = l.id
-                        WHERE opi.orden_produccion_id = op.id
+                        WHERE opi.proceso_id = op.id
                     ), '[]'::jsonb),
 
                     -- ───────────────────────────────────
@@ -959,20 +959,20 @@ BEGIN
                             ) ORDER BY l.fyh_cre
                         )
                         FROM inventario.lote l
-                        JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id AND opp.id = l.documento_id AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+                        JOIN mes.proceso_paso opp ON opp.proceso_id = op.id AND opp.id = l.documento_id AND l.documento_tipo = 'proceso_paso'
                         LEFT JOIN vw_items vi_prod                       ON vi_prod.item_id = l.item_id
                         LEFT JOIN inventario.lote_rollo_detalle lrd_out  ON lrd_out.lote_id = l.id
-                        WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+                        WHERE l.documento_tipo = 'proceso_paso'
                     ), '[]'::jsonb)
                     
                 ) ORDER BY op.id
             )
-            FROM mes.orden_produccion op
+            FROM mes.proceso op
             WHERE op.partida_id = p.id
         ), '[]'::jsonb)
         
     ) INTO v_result
-    FROM doc.partida p
+    FROM mes.partida p
     LEFT JOIN prioridad pri       ON pri.id = p.prioridad_id
     LEFT JOIN tercero c           ON c.id = p.tercero_id
     LEFT JOIN tenido              ON tenido.id = p.tenido_id
@@ -1005,7 +1005,7 @@ BENEFITS OF INCLUDING INSPECTIONS:
 - Debugging: Understand reproceso flow
 */
 
-CREATE OR REPLACE FUNCTION mes.crear_orden_produccion(p_orden jsonb)
+CREATE OR REPLACE FUNCTION mes.crear_proceso(p_orden jsonb)
  RETURNS text
  LANGUAGE plpgsql
  SECURITY DEFINER
@@ -1035,7 +1035,7 @@ WITH orden_rollos AS (
             (i->>'lote_id')::int        AS lote_id,
             (i->>'ubicacion_id')::int  AS ubicacion_id,
             SUM((i->>'cantidad')::numeric)  AS cantidad
-        FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
+        FROM jsonb_array_elements(p_orden->'proceso_componente') i
         GROUP BY 1,2,3
     ),errores as(  SELECT
             im.item_id,
@@ -1070,7 +1070,7 @@ WITH orden_rollos AS (
     -- VALIDAR QUE LA PARTIDA NO ESTÉ CERRADA
     -- --------------------------------------------------
     IF EXISTS (
-        SELECT 1 FROM doc.partida
+        SELECT 1 FROM mes.partida
         WHERE id = (p_orden->>'partida_id')::BIGINT
           AND estado IN ('ENTREGADA','DEVUELTA_TOTAL','FACTURADA','CERRADA','CANCELADA')
     ) THEN
@@ -1078,7 +1078,7 @@ WITH orden_rollos AS (
             'No se puede crear una orden de producción para una partida con estado cerrado'
             USING DETAIL = (
                 SELECT format('Partida %s tiene estado: %s', id, estado)
-                FROM doc.partida
+                FROM mes.partida
                 WHERE id = (p_orden->>'partida_id')::BIGINT
             );
     END IF;
@@ -1088,11 +1088,11 @@ WITH orden_rollos AS (
     -- --------------------------------------------------
     IF EXISTS (
         SELECT 1
-        FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
-        JOIN inventario.lote l       ON l.id = (i->>'lote_id')::INT
-        JOIN item it                 ON it.id = l.item_id
-        JOIN articulo a              ON a.id = it.articulo_id
-        JOIN doc.partida p           ON p.id = (p_orden->>'partida_id')::BIGINT
+        FROM jsonb_array_elements(p_orden->'proceso_componente') i
+        JOIN inventario.lote l           ON l.id = (i->>'lote_id')::INT
+        JOIN item_rollo_detalle ird      ON ird.item_id = l.item_id
+        JOIN articulo a                  ON a.id = ird.articulo_id
+        JOIN mes.partida p               ON p.id = (p_orden->>'partida_id')::BIGINT
         WHERE a.articulo_tipo_id IS DISTINCT FROM p.articulo_tipo_id
     ) THEN
         RAISE EXCEPTION
@@ -1100,64 +1100,31 @@ WITH orden_rollos AS (
             USING ERRCODE = 'check_violation';
     END IF;
 
-    -- --------------------------------------------------
-    -- VALIDAR QUE LAS GUÍAS DE LOS ROLLOS ESTÉN REGISTRADAS EN LA PARTIDA
-    -- Rolls sin guia (confeccionados por MLR) se omiten del chequeo.
-    -- --------------------------------------------------
-    IF EXISTS (
-        SELECT 1
-        FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
-        JOIN inventario.lote l                 ON l.id = (i->>'lote_id')::INT
-        JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-        WHERE lrd.guia_remision_id IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM doc.partida_guia_remision pgr
-              WHERE pgr.partida_id      = (p_orden->>'partida_id')::BIGINT
-                AND pgr.guia_remision_id = lrd.guia_remision_id
-          )
-    ) THEN
-        RAISE EXCEPTION
-            'Uno o más rollos provienen de guías no registradas en la partida. Registre las guías antes de asignar estos rollos.'
-            USING ERRCODE = 'check_violation',
-                  DETAIL  = (
-                      SELECT string_agg(DISTINCT gr.numero::text, ', ' ORDER BY gr.numero::text)
-                      FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
-                      JOIN inventario.lote l                 ON l.id = (i->>'lote_id')::INT
-                      JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-                      JOIN doc.guia_remision gr              ON gr.id = lrd.guia_remision_id
-                      WHERE lrd.guia_remision_id IS NOT NULL
-                        AND NOT EXISTS (
-                            SELECT 1 FROM doc.partida_guia_remision pgr
-                            WHERE pgr.partida_id      = (p_orden->>'partida_id')::BIGINT
-                              AND pgr.guia_remision_id = lrd.guia_remision_id
-                        )
-                  );
-    END IF;
 
     INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('crear_orden_produccion', v_usr_id, p_orden);
+    VALUES ('crear_proceso', v_usr_id, p_orden);
 
-    INSERT INTO mes.orden_produccion(partida_id, tipo, orden_origen_id)
+    INSERT INTO mes.proceso(partida_id, tipo, proceso_origen_id)
     VALUES (
         (p_orden->>'partida_id')::BIGINT,
-        (p_orden->>'tipo')::orden_produccion_tipo_enum,
-        (p_orden->>'orden_origen_id')::BIGINT
+        (p_orden->>'tipo')::proceso_tipo_enum,
+        (p_orden->>'proceso_origen_id')::BIGINT
     )
     RETURNING id INTO v_orden_id;
 
-    INSERT INTO mes.orden_produccion_item(
-        orden_produccion_id, item_id, lote_id,ubicacion_id
+    INSERT INTO mes.proceso_componente(
+        proceso_id, item_id, lote_id,ubicacion_id
     )
     SELECT v_orden_id,
            (i->>'item_id')::INT,
            (i->>'lote_id')::INT,
            (i->>'ubicacion_id')::INT
-    FROM jsonb_array_elements(p_orden->'orden_produccion_item') i
+    FROM jsonb_array_elements(p_orden->'proceso_componente') i
     LEFT JOIN inventario.lote l ON l.id = (i->>'lote_id')::INT
     ;
 
-    INSERT INTO mes.orden_produccion_paso(
-        orden_produccion_id, secuencia, operacion_id,
+    INSERT INTO mes.proceso_paso(
+        proceso_id, secuencia, operacion_id,
         maquina_asignada_id, receta_id, ph,
         temperatura, tiempo_estandar, relacion_bano,flg_genera_produccion
     )
@@ -1184,7 +1151,7 @@ WITH orden_rollos AS (
                'sistema'
            ) || ' creó la orden de producción #' || v_orden_id,
            'info',
-           jsonb_build_object('objeto_tipo', 'orden_produccion', 'orden_produccion_id', v_orden_id)
+           jsonb_build_object('objeto_tipo', 'proceso', 'proceso_id', v_orden_id)
     FROM iam.user_rol ur
     LEFT JOIN usuario p ON p.id = ur.user_id
     LEFT JOIN iam.rol r ON ur.rol_id = r.id
@@ -1202,7 +1169,7 @@ EXCEPTION
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        RAISE LOG 'Error en crear_orden_produccion - User: %, Params: %, Error: %, Detail: %',
+        RAISE LOG 'Error en crear_proceso - User: %, Params: %, Error: %, Detail: %',
                   v_usr_id, p_orden::TEXT, v_message, v_detail;
         RAISE;
 END;
@@ -1221,7 +1188,7 @@ AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id    int := get_user_id();
-    v_estado    orden_produccion_estado_enum;
+    v_estado    proceso_estado_enum;
     v_count     int;
 BEGIN
     IF NOT jwt_has_permission('produccion.editar') THEN
@@ -1231,7 +1198,7 @@ BEGIN
 
     -- Validar que la orden existe y no está en estado terminal
     SELECT estado INTO v_estado
-    FROM mes.orden_produccion
+    FROM mes.proceso
     WHERE id = p_orden_id;
 
     IF NOT FOUND THEN
@@ -1262,8 +1229,8 @@ BEGIN
         FROM jsonb_array_elements(p_pasos) p
         LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT
     )
-    INSERT INTO mes.orden_produccion_paso(
-        orden_produccion_id, secuencia, operacion_id,
+    INSERT INTO mes.proceso_paso(
+        proceso_id, secuencia, operacion_id,
         maquina_asignada_id, empleado_id, receta_id,
         ph, temperatura, tiempo_estandar, relacion_bano,
         flg_genera_produccion, usr_cre
@@ -1273,7 +1240,7 @@ BEGIN
            d.ph, d.temperatura, d.tiempo_estandar, d.relacion_bano,
            COALESCE(d.flg_genera_produccion, false), v_usr_id
     FROM datos d
-    ON CONFLICT (orden_produccion_id, secuencia)
+    ON CONFLICT (proceso_id, secuencia)
     DO UPDATE SET
         operacion_id       = EXCLUDED.operacion_id,
         maquina_asignada_id = EXCLUDED.maquina_asignada_id,
@@ -1286,13 +1253,13 @@ BEGIN
         flg_genera_produccion          = EXCLUDED.flg_genera_produccion,
         usr_mod            = v_usr_id,
         fyh_mod            = NOW()
-        WHERE mes.orden_produccion_paso.estado = 'PENDIENTE';
+        WHERE mes.proceso_paso.estado = 'PENDIENTE';
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
 
     -- Eliminar pasos que ya no están en la lista (solo si están PENDIENTE)
-    DELETE FROM mes.orden_produccion_paso
-    WHERE orden_produccion_id = p_orden_id
+    DELETE FROM mes.proceso_paso
+    WHERE proceso_id = p_orden_id
       AND estado = 'PENDIENTE'
       AND secuencia NOT IN (
           SELECT (p->>'secuencia')::SMALLINT
@@ -1313,7 +1280,7 @@ $function$;
 
 
 
-CREATE OR REPLACE FUNCTION mes.get_orden_produccion(p_orden_produccion_id BIGINT)
+CREATE OR REPLACE FUNCTION mes.get_proceso(p_proceso_id BIGINT)
 RETURNS jsonb
 LANGUAGE plpgsql
 STABLE
@@ -1330,7 +1297,7 @@ BEGIN
         'id',              op.id,
         'tipo',            op.tipo,
         'estado',          op.estado,
-        'orden_origen_id', op.orden_origen_id,
+        'proceso_origen_id', op.proceso_origen_id,
         'fyh_cre',         op.fyh_cre,
         'fyh_inicio',      op.fyh_inicio,
         'fyh_fin',         op.fyh_fin,
@@ -1338,7 +1305,7 @@ BEGIN
         'op_codigo', EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' ||
             (SELECT numbered.rn::TEXT
              FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS rn
-                   FROM mes.orden_produccion) numbered
+                   FROM mes.proceso) numbered
              WHERE numbered.id = op.id),
 
         -- ═══════════════════════════════════════
@@ -1377,7 +1344,7 @@ BEGIN
                     'unidad_id',    pd.unidad_id,
                     'unidad_codigo', u.codigo
                 ) ORDER BY pd.id)
-                FROM doc.partida_detalle pd
+                FROM mes.partida_detalle pd
                 LEFT JOIN vw_items vi ON vi.item_id = pd.item_id
                 LEFT JOIN unidad u ON u.id = pd.unidad_id
                 WHERE pd.partida_id = p.id
@@ -1427,7 +1394,7 @@ BEGIN
                             'nota',      prog.nota
                         )
                         FROM mes.programacion prog
-                        WHERE prog.actividad_tipo = 'ORDEN_PRODUCCION_PASO' AND prog.actividad_id = opp.id
+                        WHERE prog.actividad_tipo = 'proceso_paso' AND prog.actividad_id = opp.id
                         LIMIT 1
                     ),
 
@@ -1451,7 +1418,7 @@ BEGIN
                         LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
                         LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
                         LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
-                        WHERE m.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+                        WHERE m.documento_tipo = 'proceso_paso'
                           AND m.documento_id = opp.id
                     ), '[]'::jsonb),
 
@@ -1460,20 +1427,20 @@ BEGIN
                         SELECT jsonb_agg(
                             jsonb_build_object(
                                 'id',                        oppi.id,
-                                'orden_produccion_item_id',  oppi.orden_produccion_item_id
+                                'proceso_componente_id',  oppi.proceso_componente_id
                             ) ORDER BY oppi.id
                         )
-                        FROM mes.orden_produccion_paso_item oppi
-                        WHERE oppi.orden_produccion_paso_id = opp.id
+                        FROM mes.proceso_paso_item oppi
+                        WHERE oppi.proceso_paso_id = opp.id
                     ), '[]'::jsonb)
 
                 ) ORDER BY opp.secuencia
             )
-            FROM mes.orden_produccion_paso opp
+            FROM mes.proceso_paso opp
             LEFT JOIN mes.operacion o     ON o.id   = opp.operacion_id
             LEFT JOIN mes.maquina maq     ON maq.id = opp.maquina_asignada_id
             LEFT JOIN mes.empleado emp    ON emp.id = opp.empleado_id
-            WHERE opp.orden_produccion_id = op.id
+            WHERE opp.proceso_id = op.id
         ), '[]'::jsonb),
 
         -- ═══════════════════════════════════════
@@ -1505,13 +1472,13 @@ BEGIN
                     'tenido_id',           lrd_in.tenido_id
                 ) ORDER BY opi.id
             )
-            FROM mes.orden_produccion_item opi
+            FROM mes.proceso_componente opi
             LEFT JOIN inventario.lote l                          ON l.id = opi.lote_id
             LEFT JOIN vw_items vi_mat                            ON vi_mat.item_id = l.item_id
             LEFT JOIN inventario.ubicacion ubic                  ON ubic.id = opi.ubicacion_id
             LEFT JOIN inventario.almacen alm                     ON alm.id = ubic.almacen_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_in       ON lrd_in.lote_id = l.id
-            WHERE opi.orden_produccion_id = op.id
+            WHERE opi.proceso_id = op.id
         ), '[]'::jsonb),
 
         -- ═══════════════════════════════════════
@@ -1558,20 +1525,20 @@ BEGIN
                 ) ORDER BY l.fyh_cre
             )
             FROM inventario.lote l
-            JOIN mes.orden_produccion_paso opp ON opp.orden_produccion_id = op.id AND opp.id = l.documento_id AND l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+            JOIN mes.proceso_paso opp ON opp.proceso_id = op.id AND opp.id = l.documento_id AND l.documento_tipo = 'proceso_paso'
             LEFT JOIN vw_items vi_prod                       ON vi_prod.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_out  ON lrd_out.lote_id = l.id
-            WHERE l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+            WHERE l.documento_tipo = 'proceso_paso'
         ), '[]'::jsonb)
 
     ) INTO v_result
-    FROM mes.orden_produccion op
-    JOIN doc.partida p        ON p.id = op.partida_id
+    FROM mes.proceso op
+    JOIN mes.partida p        ON p.id = op.partida_id
     LEFT JOIN tercero c       ON c.id = p.tercero_id
     LEFT JOIN tenido          ON tenido.id = p.tenido_id
     LEFT JOIN vw_colores vc   ON vc.color_x_cliente_id = p.color_x_cliente_id
     LEFT JOIN articulo_tipo at ON at.id = p.articulo_tipo_id
-    WHERE op.id = p_orden_produccion_id;
+    WHERE op.id = p_proceso_id;
 
     RETURN v_result;
 END;

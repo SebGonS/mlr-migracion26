@@ -1,4 +1,4 @@
--- ═══════════════════════════════════════════════════════════════
+﻿-- ═══════════════════════════════════════════════════════════════
 -- Step 2: ENUM / TYPE definitions
 -- Must come before any table that uses these types.
 -- FIX: removed bare DROP TYPE (without CASCADE) — replaced with safe idiom.
@@ -28,7 +28,7 @@ CREATE TYPE item_movimiento_tipo_categoria_enum AS ENUM (
 -- Use safe CREATE with duplicate guard instead.
 DO $$
 BEGIN
-    CREATE TYPE orden_produccion_estado_enum AS ENUM (
+    CREATE TYPE proceso_estado_enum AS ENUM (
       'CREADA',
       'PLANIFICADA',
       'PROGRAMADA',
@@ -62,7 +62,7 @@ END $$;
 
 DO $$
 BEGIN
-    CREATE TYPE orden_produccion_tipo_enum AS ENUM (
+    CREATE TYPE proceso_tipo_enum AS ENUM (
         'NORMAL', 'REPROCESO', 'AJUSTE'
     );
 EXCEPTION WHEN duplicate_object THEN NULL;
@@ -70,7 +70,7 @@ END $$;
 
 DO $$
 BEGIN
-    CREATE TYPE orden_produccion_paso_estado_enum AS ENUM (
+    CREATE TYPE proceso_paso_estado_enum AS ENUM (
         'PENDIENTE', 'EN_PROCESO', 'COMPLETADO', 'OMITIDO'
     );
 EXCEPTION WHEN duplicate_object THEN NULL;

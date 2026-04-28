@@ -1,4 +1,4 @@
--- ═══════════════════════════════════════════════════════════════
+﻿-- ═══════════════════════════════════════════════════════════════
 -- Step 4: ALTER pre-existing legacy tables
 -- All operations use DO $$ guards / ADD COLUMN IF NOT EXISTS
 -- so the script is idempotent and safe to re-run.
@@ -53,7 +53,7 @@ ALTER TABLE estado
     DROP COLUMN IF EXISTS estado_produccion,
     DROP COLUMN IF EXISTS estado_comercial;
 ALTER TABLE estado
-    ADD COLUMN IF NOT EXISTS estado_produccion orden_produccion_estado_enum,
+    ADD COLUMN IF NOT EXISTS estado_produccion proceso_estado_enum,
     ADD COLUMN IF NOT EXISTS estado_comercial  partida_estado_enum;
 
 -- ═══════════════════════════════════════════════════════════════
@@ -179,6 +179,12 @@ FOR EACH ROW EXECUTE FUNCTION fn_trg_set_codigo_canon();
 -- ── item_rollo_detalle.fibra ────────────────────────────────────
 -- Drop fibra from item_rollo_detalle AFTER backfill above completes.
 ALTER TABLE IF EXISTS item_rollo_detalle DROP COLUMN IF EXISTS fibra;
+
+-- ── item.stock_minimo ────────────────────────────────────────────
+-- Optional per-item minimum stock threshold for low-stock alerts.
+-- NULL = use dynamic 7-day consumption buffer instead.
+-- Management sets this on strategic/bulk items; JIT items leave it NULL.
+ALTER TABLE item ADD COLUMN IF NOT EXISTS stock_minimo NUMERIC(12,4);
 
 -- ── profiles → usuario ───────────────────────────────────────────
 -- Rename legacy Supabase profiles table and its columns to Spanish conventions.

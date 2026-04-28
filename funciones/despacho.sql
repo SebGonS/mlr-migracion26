@@ -1,4 +1,4 @@
--- ============================================================================
+﻿-- ============================================================================
 -- DISPATCH MODULE
 -- ============================================================================
 -- doc.vw_despacho_pendiente  — listing view: partidas with dyed stock pending dispatch
@@ -45,13 +45,13 @@ SELECT
     BOOL_OR(l.propietario_id IS DISTINCT FROM 1)                                    AS tiene_rolls_cliente,
     (BOOL_OR(l.propietario_id = 1)
      AND BOOL_OR(l.propietario_id IS DISTINCT FROM 1))                              AS tiene_mixto
-FROM doc.partida p
+FROM mes.partida p
 JOIN tercero t                      ON t.id                    = p.tercero_id
 LEFT JOIN vw_colores vc             ON vc.color_x_cliente_id   = p.color_x_cliente_id
-JOIN mes.orden_produccion op        ON op.partida_id           = p.id
-JOIN mes.orden_produccion_paso opp  ON opp.orden_produccion_id = op.id
+JOIN mes.proceso op        ON op.partida_id           = p.id
+JOIN mes.proceso_paso opp  ON opp.proceso_id = op.id
 JOIN inventario.lote l
-    ON  l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+    ON  l.documento_tipo = 'proceso_paso'
     AND l.documento_id   = opp.id
 JOIN inventario.lote_rollo_detalle lrd
     ON  lrd.lote_id    = l.id
@@ -110,7 +110,7 @@ BEGIN
         'guias',      COALESCE(guias_agg.guias, '[]'::jsonb)
     )
     INTO v_result
-    FROM doc.partida p
+    FROM mes.partida p
     JOIN tercero t ON t.id = p.tercero_id
     LEFT JOIN LATERAL (
         SELECT jsonb_agg(
@@ -144,11 +144,11 @@ BEGIN
                     )
                     ORDER BY l.id
                 )                               AS items
-            FROM mes.orden_produccion op
-            JOIN mes.orden_produccion_paso opp
-                ON  opp.orden_produccion_id = op.id
+            FROM mes.proceso op
+            JOIN mes.proceso_paso opp
+                ON  opp.proceso_id = op.id
             JOIN inventario.lote l
-                ON  l.documento_tipo = 'ORDEN_PRODUCCION_PASO'
+                ON  l.documento_tipo = 'proceso_paso'
                 AND l.documento_id   = opp.id
             JOIN inventario.lote_rollo_detalle lrd
                 ON  lrd.lote_id    = l.id
