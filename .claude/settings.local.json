@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(grep:*)",
-      "Bash(node -e \":*)",
-      "Bash(wc -l \"d:\\\\Documentos\\\\Sebas\\\\Trabajo\\\\Manufacturas la Real\\\\Aplicación\\\\mlr-migracion26/funciones/\"*.sql)"
-    ]
-  }
-}
