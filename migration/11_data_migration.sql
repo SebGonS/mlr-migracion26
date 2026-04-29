@@ -1359,7 +1359,7 @@ WITH op_insert AS (
              ELSE 'EN_PROCESO'::proceso_estado_enum
         END,
         (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours',
-        (pt.fecha + pt.hora_fin  )::TIMESTAMP + INTERVAL '5 hours',
+        (pt.fecha + pt.duracion  )::TIMESTAMP + INTERVAL '5 hours',
         (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours'
     FROM produccion_tenido pt
     LEFT JOIN tipo_receta tr ON tr.tipo_receta = pt.tipo
@@ -1378,7 +1378,7 @@ SELECT
     COALESCE(tr.operacion_id, (SELECT id FROM mes.operacion WHERE codigo = 'TENIDO')),
     pt.maquina::int,
     (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours',
-    (pt.fecha + pt.hora_fin  )::TIMESTAMP + INTERVAL '5 hours',
+    (pt.fecha + pt.duracion  )::TIMESTAMP + INTERVAL '5 hours',
     (pt.fecha + pt.hora_inicio)::TIMESTAMP + INTERVAL '5 hours',
     'COMPLETADO'
 -- Only completed runs get a paso — EN PROCESO runs have no hora_fin to close on.
