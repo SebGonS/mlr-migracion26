@@ -1,6 +1,6 @@
 ﻿-- ═══════════════════════════════════════════════════════════════
 -- Step 6: receta schema tables
--- Must come BEFORE mes.proceso_paso and mes.lavado_maquina
+-- Must come BEFORE mes.partida_paso and mes.lavado_maquina
 -- which have FK → receta.tenido and receta.lavado_maquina.
 --
 -- NOTE: receta.tenido uses articulo_tipo_id + fibra (not a specific articulo_id).
@@ -125,6 +125,7 @@ CREATE TABLE receta.tenido_paso_insumo (
     paso_id  INT           NOT NULL REFERENCES receta.tenido_paso(id) ON DELETE CASCADE,
     item_id  INT           NOT NULL REFERENCES item(id),
     cantidad NUMERIC(8,4)  NOT NULL,
+    medida   TEXT          NOT NULL DEFAULT 'g_kg' CHECK (medida IN ('g_kg', 'pct')),
     orden    SMALLINT      NOT NULL,
     UNIQUE(paso_id, orden)
 );

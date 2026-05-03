@@ -44,7 +44,7 @@ MLR is a textile dyeing/finishing service company. The database models:
 CLIENT SENDS ROLLS
       │
       ▼
-doc.guia_remision (CLIENTE_ENVIO_PROCESO)
+doc.guia_remision (CLIENTE_ENVIO_partida)
       │  creates inventario.lote per roll
       ▼
 doc.partida  ←── partida_detalle (what to process: item × qty)
@@ -261,7 +261,7 @@ A **lot** is the minimum unit of stock identity. For rolls, **1 lot = 1 physical
 | `documento_tipo` / `documento_id` | What document created this lot (polymorphic) |
 | `cantidad` | Weight in kg (must be > 0) |
 | `detalles` | JSONB for ad-hoc attributes (e.g. `color_x_cliente_id`, `ancho`) |
-| `estado_calidad` | QC state: PENDIENTE / APROBADO / RECHAZADO / REPROCESO / CUARENTENA |
+| `estado_calidad` | QC state: PENDIENTE / APROBADO / RECHAZADO / REpartida / CUARENTENA |
 | `propietario_id` | References `tercero.id` — the client who owns this material |
 
 The sequence is maintained in `lote_secuencia_anual` (one row per year), incremented by the `trfn_generar_secuencia_lote()` trigger on INSERT.
@@ -381,7 +381,7 @@ Physical transport documents (guias de remisión). Direction (inbound/outbound) 
 | Code | Direction | Meaning |
 |------|-----------|---------|
 | `COMPRA_INGRESO` | In | Inbound purchase of supplies |
-| `CLIENTE_ENVIO_PROCESO` | In | Client sends rolls for processing |
+| `CLIENTE_ENVIO_partida` | In | Client sends rolls for processing |
 | `DESPACHO_CLIENTE` | Out | Processed rolls returned to client |
 | `VENTA_EGRESO` | Out | Product sold to client |
 | `DEVOLUCION_CLIENTE_CRUDO` | Out | Raw rolls returned to client (unprocessed) |
@@ -467,7 +467,7 @@ Emitted customer invoices (SUNAT facturas, boletas, notas de crédito/débito).
 
 ```
 doc.partida
-    └── mes.orden_produccion  (one per job, can be NORMAL/REPROCESO/AJUSTE)
+    └── mes.orden_produccion  (one per job, can be NORMAL/REpartida/AJUSTE)
             ├── mes.orden_produccion_paso  (one per process step: TENIDO, LAVADO, etc.)
             │       └── mes.orden_produccion_paso_item  (which lot goes through this paso)
             └── mes.orden_produccion_item  (which physical lots are assigned to this order)
@@ -478,11 +478,11 @@ doc.partida
 | Column | Notes |
 |--------|-------|
 | `partida_id` | Parent sales order |
-| `tipo` | NORMAL / REPROCESO / AJUSTE |
-| `orden_origen_id` | Self-FK: for REPROCESO, which original order this reprocesses |
+| `tipo` | NORMAL / REpartida / AJUSTE |
+| `orden_origen_id` | Self-FK: for REpartida, which original order this reprocesses |
 | `estado` | Full lifecycle enum (see below) |
 
-States: `CREADA → PLANIFICADA → PROGRAMADA → LIBERADA → EN_PROCESO → PAUSADA → FINALIZADA → TECO → CERRADA` | `CANCELADA`
+States: `CREADA → PLANIFICADA → PROGRAMADA → LIBERADA → EN_partida → PAUSADA → FINALIZADA → TECO → CERRADA` | `CANCELADA`
 
 **`mes.orden_produccion_paso`** — one step in the production sequence.
 
@@ -492,7 +492,7 @@ States: `CREADA → PLANIFICADA → PROGRAMADA → LIBERADA → EN_PROCESO → P
 | `operacion_id` | What type of step this is |
 | `maquina_asignada_id` | Which machine runs this step |
 | `receta_id` | References `receta.tenido` (only when `operacion.requiere_receta = true`) |
-| `estado` | PENDIENTE → EN_PROCESO → COMPLETADO | OMITIDO |
+| `estado` | PENDIENTE → EN_partida → COMPLETADO | OMITIDO |
 | `flg_genera_produccion` | true = this paso generates output lots (inventory ingress) |
 | `fyh_inicio` / `fyh_fin` | Actual start/end timestamps |
 
@@ -524,7 +524,7 @@ Machine washes are **standalone activities** (not attached to a production order
 |--------|-------|
 | `receta_id` | References `receta.lavado_maquina` |
 | `maquina_id` | Which machine is being washed |
-| `estado` | PENDIENTE → EN_PROCESO → COMPLETADO | OMITIDO |
+| `estado` | PENDIENTE → EN_partida → COMPLETADO | OMITIDO |
 
 Chemical consumption during a wash is posted to `inventario.item_movimientos` with `documento_tipo = 'LAVADO_MAQUINA'`.
 
@@ -609,7 +609,7 @@ One inspection per roll per production step.
 |--------|-------|
 | `lote_id` | The roll being inspected |
 | `orden_produccion_paso_id` | Which step generated this roll |
-| `resultado` | calidad_estado_enum: PENDIENTE / APROBADO / RECHAZADO / REPROCESO / CUARENTENA |
+| `resultado` | calidad_estado_enum: PENDIENTE / APROBADO / RECHAZADO / REpartida / CUARENTENA |
 | `empleado_id` | Who performed the inspection |
 
 Creating an inspection also **updates `inventario.lote.estado_calidad`** to match the result.
@@ -699,7 +699,7 @@ The mes.sql file contains the core manufacturing execution functions:
 | `mes.get_actividades_sin_programar()` → JSONB | Returns all unscheduled activities (both production steps and wash jobs) in a unified list. |
 | `mes.get_pasos_sin_programar()` → JSONB | Backward-compat version returning only unscheduled production steps. |
 | `mes.calcular_fifo(p_items JSONB)` → JSONB | Internal FIFO resolver. Given `[{item_id, cantidad}, ...]`, resolves which specific lots to consume in FIFO order. Returns `[{item_id, lote_id, ubicacion_id, cantidad}, ...]`. Used by `finalizar_cuadre` and production consumption. |
-| `mes.iniciar_lavado(...)` | Starts a machine wash execution: sets estado = EN_PROCESO, records fyh_inicio. |
+| `mes.iniciar_lavado(...)` | Starts a machine wash execution: sets estado = EN_partida, records fyh_inicio. |
 | `mes.finalizar_lavado(...)` | Completes a machine wash: sets estado = COMPLETADO, records fyh_fin, posts chemical consumption movements. |
 
 ### 11.5 Recipe Functions
@@ -791,7 +791,7 @@ The mes.sql file contains the core manufacturing execution functions:
 ### Flow 1: Client Sends Rolls for Processing
 
 1. Client arrives with rolls.
-2. Create `doc.guia_remision` type `CLIENTE_ENVIO_PROCESO`.
+2. Create `doc.guia_remision` type `CLIENTE_ENVIO_partida`.
 3. Add one `doc.guia_remision_detalle` row per roll, each with a new `inventario.lote`.
 4. An `inventario.item_movimientos` row (type `SERV_ING`) is posted for each roll.
 5. Rolls are now in stock with `propietario_id = client's tercero.id`.
@@ -810,7 +810,7 @@ The mes.sql file contains the core manufacturing execution functions:
 4. Add `mes.orden_produccion_item` rows: which specific lots go into this order.
 5. Schedule: create `mes.programacion` rows mapping pasos to machines and dates.
 6. Weigh rolls: create `inventario.pesaje` rows (one per roll). This is the weighing gate.
-7. Execute each step (update `orden_produccion_paso.estado` to EN_PROCESO → COMPLETADO).
+7. Execute each step (update `orden_produccion_paso.estado` to EN_partida → COMPLETADO).
 8. For steps with `flg_genera_produccion = true`: create output lots and post `PROD_ING` movements.
 9. QC: call `calidad.crear_inspeccion()` for each roll after each relevant step.
 

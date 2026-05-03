@@ -43,8 +43,7 @@ DO $$ DECLARE t TEXT; BEGIN
     FOREACH t IN ARRAY ARRAY[
         'mes.partida',
         'doc.guia_remision',
-        'inventario.lote',
-        'mes.proceso'
+        'inventario.lote'
     ] LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS trg_bd_prevent_hard_delete ON %s;
@@ -207,9 +206,8 @@ REVOKE UPDATE (usr_cre, fyh_cre) ON inventario.item_movimientos FROM anon, authe
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.operacion FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.operacion FROM anon, authenticated;
 
------ORDEN PRODUCCION ITEM
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.proceso_componente FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.proceso_componente FROM anon, authenticated;
+-----PARTIDA COMPONENTE
+REVOKE INSERT (usr_cre, fyh_cre) ON mes.partida_componente FROM anon, authenticated;
 
 -----MAQUINA TIPO
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.maquina_tipo FROM anon, authenticated;
@@ -231,17 +229,16 @@ REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.empleado FROM anon, au
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod, usr_elm, fyh_elm) ON mes.ruta_plantilla FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                                      ON mes.ruta_plantilla FROM anon, authenticated;
 
------ORDEN DE PRODUCCION
-REVOKE INSERT (usr_cre, fyh_cre) ON mes.proceso FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre) ON mes.proceso FROM anon, authenticated;
+-----PARTIDA PASO
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.partida_paso FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.partida_paso FROM anon, authenticated;
 
------ORDEN PRODUCCION PASO
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.proceso_paso FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.proceso_paso FROM anon, authenticated;
+-----PASO EJECUCION
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.paso_ejecucion FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.paso_ejecucion FROM anon, authenticated;
 
------ORDEN PRODUCCION PASO ITEM
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.proceso_paso_item FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.proceso_paso_item FROM anon, authenticated;
+-----EJECUCION COMPONENTE
+REVOKE INSERT (usr_cre, fyh_cre) ON mes.ejecucion_componente FROM anon, authenticated;
 
 ---PROGRAMACION
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.programacion FROM anon, authenticated;
@@ -279,9 +276,6 @@ REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.factura_proveedor FROM
 -----FACTURA PROVEEDOR DETALLE
 REVOKE INSERT (usr_cre, fyh_cre) ON doc.factura_proveedor_detalle FROM anon, authenticated;
 
------PARTIDA GUIA REMISION
-REVOKE INSERT (usr_cre, fyh_cre) ON mes.partida_guia_remision FROM anon, authenticated;
-
 -----COMPRA
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod, usr_elm, fyh_elm) ON doc.compra FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                                      ON doc.compra FROM anon, authenticated;
@@ -307,8 +301,11 @@ REVOKE UPDATE (usr_cre, fyh_cre)                                      ON doc.fac
 REVOKE INSERT (usr_cre, fyh_cre) ON doc.factura_detalle FROM anon, authenticated;
 
 -- ── Performance indexes ───────────────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_opp_orden_id ON mes.proceso_paso(proceso_id);
-CREATE INDEX IF NOT EXISTS idx_opi_orden_id ON mes.proceso_componente(proceso_id);
+CREATE INDEX IF NOT EXISTS idx_partida_paso_partida_id  ON mes.partida_paso(partida_id);
+CREATE INDEX IF NOT EXISTS idx_partida_comp_partida_id  ON mes.partida_componente(partida_id);
+CREATE INDEX IF NOT EXISTS idx_paso_ejec_paso_id        ON mes.paso_ejecucion(paso_id);
+CREATE INDEX IF NOT EXISTS idx_ejec_comp_ejecucion_id   ON mes.ejecucion_componente(ejecucion_id);
+CREATE INDEX IF NOT EXISTS idx_ejec_comp_componente_id  ON mes.ejecucion_componente(componente_id);
 CREATE INDEX IF NOT EXISTS idx_lote_doc             ON inventario.lote(documento_tipo, documento_id);
 CREATE INDEX IF NOT EXISTS idx_im_lote_id           ON inventario.item_movimientos(lote_id);
 CREATE INDEX IF NOT EXISTS idx_im_item_id           ON inventario.item_movimientos(item_id);

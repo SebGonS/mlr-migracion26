@@ -152,7 +152,7 @@ BEGIN
     -- Those pasos hold a FK to this recipe — reverting it would corrupt traceability.
     -- Correct action: create a new version via crear_tenido.
     IF v_receta.flg_produccion = true AND p_estado_id != v_historico_id THEN
-        IF EXISTS (SELECT 1 FROM mes.proceso_paso WHERE receta_id = p_receta_id) THEN
+        IF EXISTS (SELECT 1 FROM mes.partida_paso WHERE receta_id = p_receta_id) THEN
             RAISE EXCEPTION
                 'Receta % está asignada a pasos de producción — crear una nueva versión en lugar de revertir.',
                 p_receta_id;
@@ -614,7 +614,7 @@ $$;
 --   articulo_tipo_id, fibra
 -- flg_antipilling is context-sensitive:
 --   NORMAL tipo_receta  → use partida.flg_antipilling
---   REPROCESO tipo_receta → force false (antipilling is applied only on first dyeing)
+--   REpartida tipo_receta → force false (antipilling is applied only on first dyeing)
 --   p_tipo_receta_id NULL → use partida.flg_antipilling as-is (safe for existence checks)
 --
 -- Returns NULL when no approved recipe exists yet for the combination.
@@ -636,7 +636,7 @@ DECLARE
     v_receta_id    INT;
     v_combos       INT;
     v_flg_antipill BOOLEAN;
-    v_op_tipo      proceso_tipo_enum;
+    v_op_tipo      partida_tipo_enum;
 BEGIN
     -- Guard: all items in a dyeing partida must share one articulo_tipo + fibra
     SELECT COUNT(DISTINCT (a.articulo_tipo_id, a.fibra)) INTO v_combos
@@ -653,10 +653,10 @@ BEGIN
 
     SELECT flg_antipilling INTO v_flg_antipill FROM mes.partida WHERE id = p_partida_id;
 
-    -- REPROCESO: antipilling already applied on first dyeing — always match false
+    -- REpartida: antipilling already applied on first dyeing — always match false
     IF p_tipo_receta_id IS NOT NULL THEN
-        SELECT proceso_tipo INTO v_op_tipo FROM tipo_receta WHERE id = p_tipo_receta_id;
-        IF v_op_tipo = 'REPROCESO' THEN
+        SELECT partida_tipo INTO v_op_tipo FROM tipo_receta WHERE id = p_tipo_receta_id;
+        IF v_op_tipo = 'REpartida' THEN
             v_flg_antipill := false;
         END IF;
     END IF;

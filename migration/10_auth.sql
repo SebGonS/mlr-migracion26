@@ -128,6 +128,37 @@ CREATE POLICY "auth_read" ON mes.empleado_rol         FOR SELECT TO authenticate
 CREATE POLICY "auth_read" ON calidad.tipo_defecto     FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON inventario.item_movimiento_tipo FOR SELECT TO authenticated USING (true);
 
+-- -----------------------------------------------------------------------------
+-- TIER 1 (write): Catalog tables — two permission levels
+--
+-- catalogos.editar  → master data operational roles need (insumos, colores, etc.)
+--                     assigned to: admin, compras, inventario
+-- configuracion.admin → production/system config, admin only
+--                     (operaciones, tipos de máquina, roles de empleado)
+--
+-- INSERT + UPDATE only; SELECT remains open to all authenticated (above).
+-- -----------------------------------------------------------------------------
+
+-- Master data — catalogos.editar
+CREATE POLICY "catalogos_insert" ON public.unidad          FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('catalogos.editar'));
+CREATE POLICY "catalogos_update" ON public.unidad          FOR UPDATE TO authenticated USING (jwt_has_permission('catalogos.editar'));
+CREATE POLICY "catalogos_insert" ON public.insumo_tipo     FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('catalogos.editar'));
+CREATE POLICY "catalogos_update" ON public.insumo_tipo     FOR UPDATE TO authenticated USING (jwt_has_permission('catalogos.editar'));
+CREATE POLICY "catalogos_insert" ON public.colorante_tipo  FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('catalogos.editar'));
+CREATE POLICY "catalogos_update" ON public.colorante_tipo  FOR UPDATE TO authenticated USING (jwt_has_permission('catalogos.editar'));
+CREATE POLICY "catalogos_insert" ON public.color           FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('catalogos.editar'));
+CREATE POLICY "catalogos_update" ON public.color           FOR UPDATE TO authenticated USING (jwt_has_permission('catalogos.editar'));
+CREATE POLICY "catalogos_insert" ON calidad.tipo_defecto   FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('catalogos.editar'));
+CREATE POLICY "catalogos_update" ON calidad.tipo_defecto   FOR UPDATE TO authenticated USING (jwt_has_permission('catalogos.editar'));
+
+-- Production/system config — configuracion.admin only
+CREATE POLICY "catalogos_insert" ON mes.operacion          FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.admin'));
+CREATE POLICY "catalogos_update" ON mes.operacion          FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.admin'));
+CREATE POLICY "catalogos_insert" ON mes.maquina_tipo       FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.admin'));
+CREATE POLICY "catalogos_update" ON mes.maquina_tipo       FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.admin'));
+CREATE POLICY "catalogos_insert" ON mes.empleado_rol       FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.admin'));
+CREATE POLICY "catalogos_update" ON mes.empleado_rol       FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.admin'));
+
 
 -- -----------------------------------------------------------------------------
 -- TIER 2: Business tables — gated by domain permission
@@ -169,7 +200,6 @@ ALTER TABLE doc.letra                         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.letra_factura                 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.factura                       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.factura_detalle               ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.partida_guia_remision         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.compra_factura_proveedor      ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "comercial_ver" ON mes.partida                    FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
@@ -186,7 +216,6 @@ CREATE POLICY "comercial_ver" ON doc.letra                      FOR SELECT TO au
 CREATE POLICY "comercial_ver" ON doc.letra_factura              FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.factura                    FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.factura_detalle            FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON mes.partida_guia_remision      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.compra_factura_proveedor   FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 
 -- ── Producción ────────────────────────────────────────────────────────────────
@@ -194,10 +223,10 @@ ALTER TABLE mes.maquina                      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.empleado                     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.ruta_plantilla               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.ruta_plantilla_detalle       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.proceso             ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.proceso_paso        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.proceso_componente        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.proceso_paso_item   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.partida_componente           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.partida_paso                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.paso_ejecucion               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.ejecucion_componente         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.programacion                 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.lavado_maquina               ENABLE ROW LEVEL SECURITY;
 
@@ -205,10 +234,10 @@ CREATE POLICY "produccion_ver" ON mes.maquina                    FOR SELECT TO a
 CREATE POLICY "produccion_ver" ON mes.empleado                   FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.ruta_plantilla             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.ruta_plantilla_detalle     FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.proceso           FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.proceso_paso      FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.proceso_componente      FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.proceso_paso_item FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.partida_componente         FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.partida_paso               FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.paso_ejecucion             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.ejecucion_componente       FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.programacion               FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.lavado_maquina             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 
@@ -272,11 +301,11 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- │  actualizar_pesos_*                          │ inventario.editar          │
 -- ├─────────────────────────────────────────────┼────────────────────────────┤
 -- │ PRODUCCIÓN                                                               │
--- │  crear_proceso                      │ produccion.crear           │
--- │  actualizar_pasos_orden                      │ produccion.editar          │
--- │  iniciar_paso, finalizar_paso                │ produccion.ejecutar        │
--- │  registrar_consumo_paso                      │ produccion.ejecutar        │
--- │  registrar_items_procesados                  │ produccion.ejecutar        │
+-- │  iniciar_ejecucion                           │ produccion.crear           │
+-- │  actualizar_pasos_partida                    │ produccion.editar          │
+-- │  finalizar_ejecucion                         │ produccion.ejecutar        │
+-- │  registrar_consumo_ejecucion                 │ produccion.ejecutar        │
+-- │  registrar_produccion                        │ produccion.ejecutar        │
 -- │  guardar_programacion                        │ produccion.programar       │
 -- │  iniciar_lavado, finalizar_lavado            │ produccion.ejecutar        │
 -- ├─────────────────────────────────────────────┼────────────────────────────┤
@@ -339,7 +368,8 @@ INSERT INTO iam.permiso (code, descripcion) VALUES
     ('calidad.crear',        'Registrar inspecciones de calidad'),
     ('calidad.editar',       'Editar inspecciones existentes'),
     ('configuracion.ver',    'Ver usuarios, roles y configuración del sistema'),
-    ('configuracion.admin',  'Gestionar usuarios, roles, máquinas, operaciones y plantillas')
+    ('configuracion.admin',  'Gestionar usuarios, roles, máquinas, operaciones y plantillas'),
+    ('catalogos.editar',     'Crear y editar datos maestros: colores, tipos de insumo, unidades, defectos')
 ON CONFLICT (code) DO NOTHING;
 
 -- rol_permiso: resolved by code so IDs don't need to be hardcoded
@@ -363,6 +393,7 @@ FROM (VALUES
     ('admin', 'calidad.editar'),
     ('admin', 'configuracion.ver'),
     ('admin', 'configuracion.admin'),
+    ('admin', 'catalogos.editar'),
     -- ── jefe_planta: full operations, no user/config mgmt ────
     ('jefe_planta', 'comercial.ver'),
     ('jefe_planta', 'inventario.ver'),
@@ -401,6 +432,7 @@ FROM (VALUES
     ('inventario', 'inventario.ver'),
     ('inventario', 'inventario.crear'),
     ('inventario', 'inventario.editar'),
+    ('inventario', 'catalogos.editar'),
     ('inventario', 'produccion.ver'),
     ('inventario', 'comercial.ver'),
     -- ── compras ──────────────────────────────────────────────
@@ -409,6 +441,7 @@ FROM (VALUES
     ('compras', 'comercial.editar'),
     ('compras', 'inventario.ver'),
     ('compras', 'inventario.crear'),
+    ('compras', 'catalogos.editar'),
     -- ── sistema: automated processes, broad read + execute ───
     ('sistema', 'produccion.ver'),
     ('sistema', 'produccion.ejecutar'),

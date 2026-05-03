@@ -4,6 +4,7 @@
 -- ═══════════════════════════════════════════════════════════════
 
 CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE EXTENSION IF NOT EXISTS pg_cron;
 
 CREATE SCHEMA IF NOT EXISTS mes;
 CREATE SCHEMA IF NOT EXISTS inventario;    -- FIX: was CREATE SCHEMA (no IF NOT EXISTS) in tablas.sql

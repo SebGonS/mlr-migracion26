@@ -730,18 +730,18 @@ BEGIN
             WHERE pd.partida_id = p.id
         ), '[]'::jsonb),
         'resumen_progreso', jsonb_build_object(
-    'total_ordenes', (SELECT COUNT(*) FROM mes.proceso WHERE partida_id = p.id),
-    'ordenes_completadas', (SELECT COUNT(*) FROM mes.proceso WHERE partida_id = p.id AND estado IN ('FINALIZADA', 'TECO', 'CERRADA')),
+    'total_ordenes', (SELECT COUNT(*) FROM mes.partida WHERE partida_id = p.id),
+    'ordenes_completadas', (SELECT COUNT(*) FROM mes.partida WHERE partida_id = p.id AND estado IN ('FINALIZADA', 'TECO', 'CERRADA')),
     'total_pasos', (
         SELECT COUNT(*) 
-        FROM mes.proceso_paso opp
-        JOIN mes.proceso op ON op.id = opp.proceso_id
+        FROM mes.partida_paso opp
+        JOIN mes.partida op ON op.id = opp.partida_id
         WHERE op.partida_id = p.id
     ),
     'pasos_completados', (
         SELECT COUNT(*) 
-        FROM mes.proceso_paso opp
-        JOIN mes.proceso op ON op.id = opp.proceso_id
+        FROM mes.partida_paso opp
+        JOIN mes.partida op ON op.id = opp.partida_id
         WHERE op.partida_id = p.id AND opp.estado = 'COMPLETADO'
     ),
     'porcentaje_completado', (
@@ -750,8 +750,8 @@ BEGIN
             NULLIF(COUNT(*), 0) * 100, 
             2
         )
-        FROM mes.proceso_paso opp
-        JOIN mes.proceso op ON op.id = opp.proceso_id
+        FROM mes.partida_paso opp
+        JOIN mes.partida op ON op.id = opp.partida_id
         WHERE op.partida_id = p.id
     )
 ),
@@ -774,11 +774,11 @@ BEGIN
             SUM(m.cantidad) as cantidad_total
         FROM inventario.item_movimientos m
         JOIN vw_items vi ON vi.item_id = m.item_id
-        WHERE m.documento_tipo = 'proceso_paso'
+        WHERE m.documento_tipo = 'partida_paso'
         AND m.documento_id IN (
             SELECT opp.id 
-            FROM mes.proceso_paso opp
-            JOIN mes.proceso op ON op.id = opp.proceso_id
+            FROM mes.partida_paso opp
+            JOIN mes.partida op ON op.id = opp.partida_id
             WHERE op.partida_id = p.id
         )
         GROUP BY m.item_id, vi.item_codigo, vi.item_nombre, vi.unidad_codigo
@@ -793,14 +793,14 @@ BEGIN
                     'id', op.id,
                     'tipo', op.tipo,
                     'estado', op.estado,
-                    'proceso_origen_id', op.proceso_origen_id,
+                    'partida_origen_id', op.partida_origen_id,
                     'fyh_cre', op.fyh_cre,
                     'fyh_inicio', op.fyh_inicio,
                     'fyh_fin', op.fyh_fin,
                     'op_codigo', EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' ||
                         (SELECT numbered.rn::TEXT
                          FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS rn
-                               FROM mes.proceso) numbered
+                               FROM mes.partida) numbered
                          WHERE numbered.id = op.id),
                     
                     -- ───────────────────────────────────
@@ -857,7 +857,7 @@ BEGIN
                                     LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
                                     LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
                                     LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
-                                    WHERE m.documento_tipo = 'proceso_paso'
+                                    WHERE m.documento_tipo = 'partida_paso'
                                     AND m.documento_id = opp.id
                                 ), '[]'::jsonb),
                                 
@@ -868,19 +868,19 @@ BEGIN
                                     SELECT jsonb_agg(
                                         jsonb_build_object(
                                             'id', oppi.id,
-                                            'proceso_componente_id', oppi.proceso_componente_id
+                                            'partida_componente_id', oppi.partida_componente_id
                                         ) ORDER BY oppi.id
                                     )
-                                    FROM mes.proceso_paso_item oppi
-                                    WHERE oppi.proceso_paso_id = opp.id
+                                    FROM mes.partida_paso_item oppi
+                                    WHERE oppi.partida_paso_id = opp.id
                                 ), '[]'::jsonb)
                                 
                             ) ORDER BY opp.secuencia
                         )
-                        FROM mes.proceso_paso opp
+                        FROM mes.partida_paso opp
                         LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
                         LEFT JOIN mes.maquina ON maquina.id = opp.maquina_asignada_id
-                        WHERE opp.proceso_id = op.id
+                        WHERE opp.partida_id = op.id
                     ), '[]'::jsonb),
                     
                     -- ───────────────────────────────────
@@ -907,11 +907,11 @@ BEGIN
                                 'tenido_id',          lrd_in.tenido_id
                             ) ORDER BY opi.id
                         )
-                        FROM mes.proceso_componente opi
+                        FROM mes.partida_componente opi
                         LEFT JOIN inventario.lote l                          ON l.id = opi.lote_id
                         LEFT JOIN vw_items vi_mat                            ON vi_mat.item_id = l.item_id
                         LEFT JOIN inventario.lote_rollo_detalle lrd_in       ON lrd_in.lote_id = l.id
-                        WHERE opi.proceso_id = op.id
+                        WHERE opi.partida_id = op.id
                     ), '[]'::jsonb),
 
                     -- ───────────────────────────────────
@@ -959,15 +959,15 @@ BEGIN
                             ) ORDER BY l.fyh_cre
                         )
                         FROM inventario.lote l
-                        JOIN mes.proceso_paso opp ON opp.proceso_id = op.id AND opp.id = l.documento_id AND l.documento_tipo = 'proceso_paso'
+                        JOIN mes.partida_paso opp ON opp.partida_id = op.id AND opp.id = l.documento_id AND l.documento_tipo = 'partida_paso'
                         LEFT JOIN vw_items vi_prod                       ON vi_prod.item_id = l.item_id
                         LEFT JOIN inventario.lote_rollo_detalle lrd_out  ON lrd_out.lote_id = l.id
-                        WHERE l.documento_tipo = 'proceso_paso'
+                        WHERE l.documento_tipo = 'partida_paso'
                     ), '[]'::jsonb)
                     
                 ) ORDER BY op.id
             )
-            FROM mes.proceso op
+            FROM mes.partida op
             WHERE op.partida_id = p.id
         ), '[]'::jsonb)
         
@@ -1002,184 +1002,13 @@ BENEFITS OF INCLUDING INSPECTIONS:
 - Traceability: Know when/why/who rejected
 - Compliance: Required for ISO/quality audits
 - Analytics: Track inspector accuracy, rejection rates
-- Debugging: Understand reproceso flow
+- Debugging: Understand repartida flow
 */
-
-CREATE OR REPLACE FUNCTION mes.crear_proceso(p_orden jsonb)
- RETURNS text
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'iam', 'notification', 'public', 'doc', 'mes'
-AS $function$
-DECLARE
-    v_message   text;
-    v_detail    text;
-    v_hint      text;
-    v_context   text;
-    v_sqlstate  text;
-    v_orden_id  bigint;
-    v_usr_id    int := get_user_id();
-    v_error_payload jsonb;
-BEGIN
-    IF NOT jwt_has_permission('produccion.crear') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere produccion.crear'
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-
-    -- --------------------------------------------------
--- ---VALIDAR DISPONIBILIDAD DE ROLLOS RESERVADOS
--- --------------------------------------------------
-WITH orden_rollos AS (
-        SELECT
-            (i->>'item_id')::int        AS item_id,
-            (i->>'lote_id')::int        AS lote_id,
-            (i->>'ubicacion_id')::int  AS ubicacion_id,
-            SUM((i->>'cantidad')::numeric)  AS cantidad
-        FROM jsonb_array_elements(p_orden->'proceso_componente') i
-        GROUP BY 1,2,3
-    ),errores as(  SELECT
-            im.item_id,
-            im.lote_id,
-            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
-            items.cantidad,
-            SUM(im.cantidad*imt.factor) AS saldo
-        FROM inventario.item_movimientos im
-        JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
-        JOIN orden_rollos AS items ON items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
-        GROUP BY im.item_id, im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),items.cantidad
-        HAVING SUM(im.cantidad*imt.factor)< items.cantidad
-    ) SELECT jsonb_agg(
-        jsonb_build_object(
-            'item_id', item_id,
-            'lote_id', lote_id,
-            'ubicacion_id', ubicacion_id,
-            'saldo_disponible', saldo,
-            'cantidad_requerida', cantidad
-        )
-    )
-    INTO v_error_payload
-    FROM errores;
-    IF v_error_payload IS NOT NULL THEN
-        RAISE EXCEPTION
-            'Stock insuficiente para emitir la guía'
-            USING
-                DETAIL  = v_error_payload::text;
-    END IF;
-
-    -- --------------------------------------------------
-    -- VALIDAR QUE LA PARTIDA NO ESTÉ CERRADA
-    -- --------------------------------------------------
-    IF EXISTS (
-        SELECT 1 FROM mes.partida
-        WHERE id = (p_orden->>'partida_id')::BIGINT
-          AND estado IN ('ENTREGADA','DEVUELTA_TOTAL','FACTURADA','CERRADA','CANCELADA')
-    ) THEN
-        RAISE EXCEPTION
-            'No se puede crear una orden de producción para una partida con estado cerrado'
-            USING DETAIL = (
-                SELECT format('Partida %s tiene estado: %s', id, estado)
-                FROM mes.partida
-                WHERE id = (p_orden->>'partida_id')::BIGINT
-            );
-    END IF;
-
-    -- --------------------------------------------------
-    -- VALIDAR QUE LOS ROLLOS ASIGNADOS COINCIDEN CON articulo_tipo_id DE LA PARTIDA
-    -- --------------------------------------------------
-    IF EXISTS (
-        SELECT 1
-        FROM jsonb_array_elements(p_orden->'proceso_componente') i
-        JOIN inventario.lote l           ON l.id = (i->>'lote_id')::INT
-        JOIN item_rollo_detalle ird      ON ird.item_id = l.item_id
-        JOIN articulo a                  ON a.id = ird.articulo_id
-        JOIN mes.partida p               ON p.id = (p_orden->>'partida_id')::BIGINT
-        WHERE a.articulo_tipo_id IS DISTINCT FROM p.articulo_tipo_id
-    ) THEN
-        RAISE EXCEPTION
-            'Los rollos asignados no coinciden con el tipo de artículo de la partida (articulo_tipo_id)'
-            USING ERRCODE = 'check_violation';
-    END IF;
-
-
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('crear_proceso', v_usr_id, p_orden);
-
-    INSERT INTO mes.proceso(partida_id, tipo, proceso_origen_id)
-    VALUES (
-        (p_orden->>'partida_id')::BIGINT,
-        (p_orden->>'tipo')::proceso_tipo_enum,
-        (p_orden->>'proceso_origen_id')::BIGINT
-    )
-    RETURNING id INTO v_orden_id;
-
-    INSERT INTO mes.proceso_componente(
-        proceso_id, item_id, lote_id,ubicacion_id
-    )
-    SELECT v_orden_id,
-           (i->>'item_id')::INT,
-           (i->>'lote_id')::INT,
-           (i->>'ubicacion_id')::INT
-    FROM jsonb_array_elements(p_orden->'proceso_componente') i
-    LEFT JOIN inventario.lote l ON l.id = (i->>'lote_id')::INT
-    ;
-
-    INSERT INTO mes.proceso_paso(
-        proceso_id, secuencia, operacion_id,
-        maquina_asignada_id, receta_id, ph,
-        temperatura, tiempo_estandar, relacion_bano,flg_genera_produccion
-    )
-    SELECT v_orden_id,
-           (p->>'secuencia')::SMALLINT,
-           (p->>'operacion_id')::SMALLINT,
-           (p->>'maquina_asignada_id')::INT,
-           (p->>'receta_id')::INT,
-           (p->>'ph')::NUMERIC,
-           (p->>'temperatura')::NUMERIC,
-           (p->>'tiempo_estandar')::INT,
-           COALESCE((p->>'relacion_bano')::NUMERIC,m.relacion_bano),
-              (p->>'flg_genera_produccion')::BOOLEAN
-    FROM jsonb_array_elements(p_orden->'pasos') p
-    LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT;
-
-    -- Notification (before RETURN)
-    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
-    SELECT ur.user_id,
-           'Nueva Orden de Producción',
-           COALESCE(
-               (SELECT COALESCE(nombre, 'Usuario desconocido') || ' ' || apellido
-                FROM usuario WHERE id = v_usr_id),
-               'sistema'
-           ) || ' creó la orden de producción #' || v_orden_id,
-           'info',
-           jsonb_build_object('objeto_tipo', 'proceso', 'proceso_id', v_orden_id)
-    FROM iam.user_rol ur
-    LEFT JOIN usuario p ON p.id = ur.user_id
-    LEFT JOIN iam.rol r ON ur.rol_id = r.id
-    WHERE r.code IN ('jefe_planta', 'compras')
-      AND v_usr_id <> ur.user_id;
-
-    RETURN format('Orden de producción con ID %s creada correctamente.', v_orden_id);
-
-EXCEPTION
-    WHEN OTHERS THEN
-        GET STACKED DIAGNOSTICS
-            v_message  = MESSAGE_TEXT,
-            v_detail   = PG_EXCEPTION_DETAIL,
-            v_hint     = PG_EXCEPTION_HINT,
-            v_context  = PG_EXCEPTION_CONTEXT,
-            v_sqlstate = RETURNED_SQLSTATE;
-
-        RAISE LOG 'Error en crear_proceso - User: %, Params: %, Error: %, Detail: %',
-                  v_usr_id, p_orden::TEXT, v_message, v_detail;
-        RAISE;
-END;
-$function$;
-
 
 -- ═══════════════════════════════════════════════════════════════
 -- ACTUALIZAR PASOS DE ORDEN DE PRODUCCION (bulk)
 -- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION mes.actualizar_pasos_orden(p_orden_id BIGINT, p_pasos jsonb)
+CREATE OR REPLACE FUNCTION mes.actualizar_pasos_partida(p_partida_id BIGINT, p_pasos jsonb)
 RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1188,7 +1017,7 @@ AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id    int := get_user_id();
-    v_estado    proceso_estado_enum;
+    v_estado    partida_estado_enum;
     v_count     int;
 BEGIN
     IF NOT jwt_has_permission('produccion.editar') THEN
@@ -1198,11 +1027,11 @@ BEGIN
 
     -- Validar que la orden existe y no está en estado terminal
     SELECT estado INTO v_estado
-    FROM mes.proceso
-    WHERE id = p_orden_id;
+    FROM mes.partida
+    WHERE id = p_partida_id;
 
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_orden_id;
+        RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_partida_id;
     END IF;
 
     IF v_estado IN ('TECO','CERRADA','CANCELADA') THEN
@@ -1210,7 +1039,7 @@ BEGIN
     END IF;
 
     INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('actualizar_pasos_orden', v_usr_id, jsonb_build_object('orden_id', p_orden_id, 'pasos', p_pasos));
+    VALUES ('actualizar_pasos_partida', v_usr_id, jsonb_build_object('orden_id', p_partida_id, 'pasos', p_pasos));
 
     -- Bulk upsert: update existing, insert new
     WITH datos AS (
@@ -1229,18 +1058,18 @@ BEGIN
         FROM jsonb_array_elements(p_pasos) p
         LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_asignada_id')::INT
     )
-    INSERT INTO mes.proceso_paso(
-        proceso_id, secuencia, operacion_id,
+    INSERT INTO mes.partida_paso(
+        partida_id, secuencia, operacion_id,
         maquina_asignada_id, empleado_id, receta_id,
         ph, temperatura, tiempo_estandar, relacion_bano,
         flg_genera_produccion, usr_cre
     )
-    SELECT p_orden_id, d.secuencia, d.operacion_id,
+    SELECT p_partida_id, d.secuencia, d.operacion_id,
            d.maquina_asignada_id, d.empleado_id, d.receta_id,
            d.ph, d.temperatura, d.tiempo_estandar, d.relacion_bano,
            COALESCE(d.flg_genera_produccion, false), v_usr_id
     FROM datos d
-    ON CONFLICT (proceso_id, secuencia)
+    ON CONFLICT (partida_id, secuencia)
     DO UPDATE SET
         operacion_id       = EXCLUDED.operacion_id,
         maquina_asignada_id = EXCLUDED.maquina_asignada_id,
@@ -1253,294 +1082,182 @@ BEGIN
         flg_genera_produccion          = EXCLUDED.flg_genera_produccion,
         usr_mod            = v_usr_id,
         fyh_mod            = NOW()
-        WHERE mes.proceso_paso.estado = 'PENDIENTE';
+        WHERE mes.partida_paso.estado = 'PENDIENTE';
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
 
     -- Eliminar pasos que ya no están en la lista (solo si están PENDIENTE)
-    DELETE FROM mes.proceso_paso
-    WHERE proceso_id = p_orden_id
+    DELETE FROM mes.partida_paso
+    WHERE partida_id = p_partida_id
       AND estado = 'PENDIENTE'
       AND secuencia NOT IN (
           SELECT (p->>'secuencia')::SMALLINT
           FROM jsonb_array_elements(p_pasos) p
       );
 
-    RETURN format('%s pasos actualizados para orden #%s.', v_count, p_orden_id);
+    RETURN format('%s pasos actualizados para orden #%s.', v_count, p_partida_id);
 
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS
         v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in actualizar_pasos_orden - User: %, orden: %, Error: %, Detail: %',
-              v_usr_id, p_orden_id, v_message, v_detail;
+    RAISE LOG 'Error in actualizar_pasos_partida - User: %, orden: %, Error: %, Detail: %',
+              v_usr_id, p_partida_id, v_message, v_detail;
     RAISE;
 END;
 $function$;
 
 
-
-CREATE OR REPLACE FUNCTION mes.get_proceso(p_proceso_id BIGINT)
-RETURNS jsonb
+-- ═══════════════════════════════════════════════════════════════
+-- ACTUALIZAR COMPONENTES DE ORDEN DE PRODUCCION
+-- Guard: no paso in EN_partida or COMPLETADO.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.actualizar_componentes_partida(
+    p_partida_id  BIGINT,
+    p_componentes jsonb
+)
+RETURNS text
 LANGUAGE plpgsql
-STABLE
 SECURITY DEFINER
-SET search_path TO 'iam','public','inventario','doc','mes','calidad'
+SET search_path TO 'iam', 'notification', 'public', 'doc', 'mes', 'inventario'
 AS $function$
 DECLARE
-    v_result JSONB;
+    v_message  text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id     int  := get_user_id();
+    v_estado     partida_estado_enum;
+    v_partida_id bigint;
+    v_error_payload jsonb;
 BEGIN
-    SELECT jsonb_build_object(
-        -- ═══════════════════════════════════════
-        -- HEADER
-        -- ═══════════════════════════════════════
-        'id',              op.id,
-        'tipo',            op.tipo,
-        'estado',          op.estado,
-        'proceso_origen_id', op.proceso_origen_id,
-        'fyh_cre',         op.fyh_cre,
-        'fyh_inicio',      op.fyh_inicio,
-        'fyh_fin',         op.fyh_fin,
-        -- Human-readable run code: "2026-0017-2"
-        'op_codigo', EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' ||
-            (SELECT numbered.rn::TEXT
-             FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS rn
-                   FROM mes.proceso) numbered
-             WHERE numbered.id = op.id),
+    IF NOT jwt_has_permission('produccion.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
 
-        -- ═══════════════════════════════════════
-        -- PARTIDA CONTEXT (lightweight)
-        -- ═══════════════════════════════════════
-        'partida', jsonb_build_object(
-            'id',                   p.id,
-            'numero',               p.numero,
-            'codigo',               EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
-            'estado',               p.estado,
-            'tercero_id',           p.tercero_id,
-            'cliente',              c.nombre,
-            'articulo_tipo_id',     p.articulo_tipo_id,
-            'articulo_tipo',        at.nombre,
-            'color_x_cliente_id',   p.color_x_cliente_id,
-            'color',                vc.color,
-            'tono',                 vc.tono,
-            'flg_antipilling',      p.flg_antipilling,
-            'color_hex',            vc.color_hex,
-            'color_x_cliente_hex',  vc.color_x_cliente_hex,
-            'tenido_id',            p.tenido_id,
-            'tenido',               tenido.tenido,
-            'malla',                p.malla,
-            'rendimiento',          p.rendimiento,
-            'ancho',                p.ancho,
-            'fecha_acordada',       p.fecha_acordada,
+    SELECT estado, partida_id INTO v_estado, v_partida_id
+    FROM mes.partida
+    WHERE id = p_partida_id;
 
-            -- Partida detalles (needed for production output form on flg_genera_produccion steps)
-            'detalles', COALESCE((
-                SELECT jsonb_agg(jsonb_build_object(
-                    'id',           pd.id,
-                    'item_id',      pd.item_id,
-                    'item_codigo',  vi.item_codigo,
-                    'item_nombre',  vi.item_nombre,
-                    'cantidad',     pd.cantidad,
-                    'unidad_id',    pd.unidad_id,
-                    'unidad_codigo', u.codigo
-                ) ORDER BY pd.id)
-                FROM mes.partida_detalle pd
-                LEFT JOIN vw_items vi ON vi.item_id = pd.item_id
-                LEFT JOIN unidad u ON u.id = pd.unidad_id
-                WHERE pd.partida_id = p.id
-            ), '[]'::jsonb)
-        ),
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Orden de producción con ID % no encontrada.', p_partida_id;
+    END IF;
 
-        -- ═══════════════════════════════════════
-        -- PASOS DE PRODUCCION
-        -- ═══════════════════════════════════════
-        'pasos', COALESCE((
-            SELECT jsonb_agg(
-                jsonb_build_object(
-                    'id',                   opp.id,
-                    'secuencia',            opp.secuencia,
+    IF v_estado IN ('TECO','CERRADA','CANCELADA','FINALIZADA') THEN
+        RAISE EXCEPTION 'No se pueden modificar componentes de una orden en estado %.', v_estado;
+    END IF;
 
-                    -- Operación
-                    'operacion_id',         opp.operacion_id,
-                    'operacion_codigo',     o.codigo,
-                    'operacion_nombre',     o.nombre,
-                    'operacion_requiere_receta', o.requiere_receta,
-                    -- Recursos
-                    'maquina_asignada_id',  opp.maquina_asignada_id,
-                    'maquina_nombre',       maq.nombre,
-                    'empleado_id',          opp.empleado_id,
-                    'empleado_nombre',      CONCAT(emp.nombre, ' ', emp.apellido),
+    IF EXISTS (
+        SELECT 1 FROM mes.partida_paso
+        WHERE partida_id = p_partida_id
+          AND estado IN ('EN_partida','COMPLETADO')
+    ) THEN
+        RAISE EXCEPTION
+            'No se pueden modificar los componentes porque uno o más pasos ya han sido iniciados o completados.'
+            USING ERRCODE = 'check_violation';
+    END IF;
 
-                    -- Parámetros
-                    'ph',                   opp.ph,
-                    'temperatura',          opp.temperatura,
-                    'tiempo_estandar',      opp.tiempo_estandar,
-                    'relacion_bano',        opp.relacion_bano,
-                    'receta_id',            opp.receta_id,
+    WITH orden_rollos AS (
+        SELECT
+            (i->>'item_id')::int       AS item_id,
+            (i->>'lote_id')::int       AS lote_id,
+            (i->>'ubicacion_id')::int  AS ubicacion_id,
+            SUM((i->>'cantidad')::numeric) AS cantidad
+        FROM jsonb_array_elements(p_componentes) i
+        GROUP BY 1,2,3
+    ), errores AS (
+        SELECT
+            im.item_id,
+            im.lote_id,
+            COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+            items.cantidad,
+            SUM(im.cantidad * imt.factor) AS saldo
+        FROM inventario.item_movimientos im
+        JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
+        JOIN orden_rollos AS items
+          ON items.lote_id = im.lote_id
+         AND items.ubicacion_id = COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id)
+        GROUP BY im.item_id, im.lote_id,
+                 COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),
+                 items.cantidad
+        HAVING SUM(im.cantidad * imt.factor) < items.cantidad
+    )
+    SELECT jsonb_agg(
+        jsonb_build_object(
+            'item_id', item_id,
+            'lote_id', lote_id,
+            'ubicacion_id', ubicacion_id,
+            'saldo_disponible', saldo,
+            'cantidad_requerida', cantidad
+        )
+    )
+    INTO v_error_payload
+    FROM errores;
 
-                    -- Estado
-                    'estado',               opp.estado,
-                    'flg_genera_produccion',            opp.flg_genera_produccion,
-                    'fyh_inicio',           opp.fyh_inicio,
-                    'fyh_fin',              opp.fyh_fin,
+    IF v_error_payload IS NOT NULL THEN
+        RAISE EXCEPTION 'Stock insuficiente para asignar los componentes'
+            USING DETAIL = v_error_payload::text;
+    END IF;
 
-                    -- ─── PROGRAMACION ───
-                    'programacion', (
-                        SELECT jsonb_build_object(
-                            'id',        prog.id,
-                            'maquina_id', prog.maquina_id,
-                            'fecha',     prog.fecha,
-                            'secuencia', prog.secuencia,
-                            'nota',      prog.nota
-                        )
-                        FROM mes.programacion prog
-                        WHERE prog.actividad_tipo = 'proceso_paso' AND prog.actividad_id = opp.id
-                        LIMIT 1
-                    ),
+    -- Reservation conflict check (exclude current order)
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(p_componentes) i
+        JOIN mes.partida_componente pc
+          ON  pc.lote_id      = (i->>'lote_id')::int
+          AND pc.ubicacion_id = (i->>'ubicacion_id')::int
+        JOIN mes.partida pr ON pr.id = pc.partida_id
+        WHERE pr.estado NOT IN ('CANCELADA','FINALIZADA','TECO','CERRADA')
+          AND pc.partida_id <> p_partida_id
+    ) THEN
+        RAISE EXCEPTION 'Uno o más rollos ya están reservados en otra orden activa'
+            USING ERRCODE = 'check_violation';
+    END IF;
 
-                    -- ─── CONSUMO (chemicals/auxiliaries) ───
-                    'consumo', COALESCE((
-                        SELECT jsonb_agg(
-                            jsonb_build_object(
-                                'id',                   m.id,
-                                'item_id',              m.item_id,
-                                'item_codigo',          vi_mov.item_codigo,
-                                'item_nombre',          vi_mov.item_nombre,
-                                'lote_id',              m.lote_id,
-                                'cantidad',             m.cantidad,
-                                'unidad',               vi_mov.unidad_codigo,
-                                'origen_ubicacion_id',  m.origen_ubicacion_id,
-                                'origen_ubicacion',     ubi.nombre,
-                                'origen_almacen',       al.nombre
-                            ) ORDER BY m.fyh_cre
-                        )
-                        FROM inventario.item_movimientos m
-                        LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
-                        LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
-                        LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
-                        WHERE m.documento_tipo = 'proceso_paso'
-                          AND m.documento_id = opp.id
-                    ), '[]'::jsonb),
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(p_componentes) i
+        JOIN inventario.lote l       ON l.id = (i->>'lote_id')::INT
+        JOIN item_rollo_detalle ird  ON ird.item_id = l.item_id
+        JOIN articulo a              ON a.id = ird.articulo_id
+        JOIN mes.partida p           ON p.id = v_partida_id
+        WHERE a.articulo_tipo_id IS DISTINCT FROM p.articulo_tipo_id
+    ) THEN
+        RAISE EXCEPTION
+            'Los rollos asignados no coinciden con el tipo de artículo de la partida (articulo_tipo_id)'
+            USING ERRCODE = 'check_violation';
+    END IF;
 
-                    -- ─── ITEMS PROCESADOS (roll tracking) ───
-                    'items_procesados', COALESCE((
-                        SELECT jsonb_agg(
-                            jsonb_build_object(
-                                'id',                        oppi.id,
-                                'proceso_componente_id',  oppi.proceso_componente_id
-                            ) ORDER BY oppi.id
-                        )
-                        FROM mes.proceso_paso_item oppi
-                        WHERE oppi.proceso_paso_id = opp.id
-                    ), '[]'::jsonb)
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_componentes_partida', v_usr_id,
+            jsonb_build_object('partida_id', p_partida_id, 'componentes', p_componentes));
 
-                ) ORDER BY opp.secuencia
-            )
-            FROM mes.proceso_paso opp
-            LEFT JOIN mes.operacion o     ON o.id   = opp.operacion_id
-            LEFT JOIN mes.maquina maq     ON maq.id = opp.maquina_asignada_id
-            LEFT JOIN mes.empleado emp    ON emp.id = opp.empleado_id
-            WHERE opp.proceso_id = op.id
-        ), '[]'::jsonb),
+    -- Remove components no longer in the list
+    DELETE FROM mes.partida_componente pc
+    WHERE pc.partida_id = p_partida_id
+      AND NOT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(p_componentes) i
+          WHERE (i->>'lote_id')::int = pc.lote_id
+            AND (i->>'ubicacion_id')::int = pc.ubicacion_id
+      );
 
-        -- ═══════════════════════════════════════
-        -- MATERIALES RESERVADOS (rolls assigned)
-        -- ═══════════════════════════════════════
-        'materiales_reservados', COALESCE((
-            SELECT jsonb_agg(
-                jsonb_build_object(
-                    'id',              opi.id,
-                    'lote_id',         opi.lote_id,
-                    'lote_codigo',    EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || LPAD(l.secuencia::TEXT, 5, '0'),
-                    'item_id',         l.item_id,
-                    'item_codigo',     vi_mat.item_codigo,
-                    'item_nombre',     vi_mat.item_nombre,
-                    'ubicacion_id',    opi.ubicacion_id,
-                    'cantidad',        l.cantidad,
-                    'unidad',          vi_mat.unidad_codigo,
-                    'ubicacion',       ubic.nombre,
-                    'almacen',         alm.nombre,
-                    'estado_calidad',  l.estado_calidad,
-                    -- lote_rollo_detalle fields (null for non-roll items)
-                    'guia_remision_id',    lrd_in.guia_remision_id,
-                    'ancho',               lrd_in.ancho,
-                    'malla',               lrd_in.malla,
-                    'rendimiento',         lrd_in.rendimiento,
-                    'flg_tenido',          lrd_in.flg_tenido,
-                    'flg_antipilling',     lrd_in.flg_antipilling,
-                    'color_x_cliente_id',  lrd_in.color_x_cliente_id,
-                    'tenido_id',           lrd_in.tenido_id
-                ) ORDER BY opi.id
-            )
-            FROM mes.proceso_componente opi
-            LEFT JOIN inventario.lote l                          ON l.id = opi.lote_id
-            LEFT JOIN vw_items vi_mat                            ON vi_mat.item_id = l.item_id
-            LEFT JOIN inventario.ubicacion ubic                  ON ubic.id = opi.ubicacion_id
-            LEFT JOIN inventario.almacen alm                     ON alm.id = ubic.almacen_id
-            LEFT JOIN inventario.lote_rollo_detalle lrd_in       ON lrd_in.lote_id = l.id
-            WHERE opi.proceso_id = op.id
-        ), '[]'::jsonb),
+    -- Insert new components; skip any that already exist
+    INSERT INTO mes.partida_componente(partida_id, item_id, lote_id, ubicacion_id, usr_cre)
+    SELECT p_partida_id,
+           (i->>'item_id')::int,
+           (i->>'lote_id')::int,
+           (i->>'ubicacion_id')::int,
+           v_usr_id
+    FROM jsonb_array_elements(p_componentes) i
+    ON CONFLICT (partida_id, lote_id, ubicacion_id) DO NOTHING;
 
-        -- ═══════════════════════════════════════
-        -- PRODUCCION (output lotes)
-        -- ═══════════════════════════════════════
-        'produccion', COALESCE((
-            SELECT jsonb_agg(
-                jsonb_build_object(
-                    'id',              l.id,
-                    'lote_codigo',     EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || LPAD(l.secuencia::TEXT, 5, '0'),
-                    'item_id',         l.item_id,
-                    'item_codigo',     vi_prod.item_codigo,
-                    'item_nombre',     vi_prod.item_nombre,
-                    'cantidad',        l.cantidad,
-                    'unidad',          vi_prod.unidad_codigo,
-                    'estado_calidad',  l.estado_calidad,
-                    'fyh_cre',         l.fyh_cre,
-                    -- lote_rollo_detalle fields for finished roll
-                    'guia_remision_id',    lrd_out.guia_remision_id,
-                    'ancho',               lrd_out.ancho,
-                    'malla',               lrd_out.malla,
-                    'rendimiento',         lrd_out.rendimiento,
-                    'flg_tenido',          lrd_out.flg_tenido,
-                    'flg_antipilling',     lrd_out.flg_antipilling,
-                    'color_x_cliente_id',  lrd_out.color_x_cliente_id,
-                    'tenido_id',           lrd_out.tenido_id,
+    RETURN format('Componentes actualizados para orden #%s.', p_partida_id);
 
-                    -- ─── INSPECCIONES (QC) ───
-                    'inspecciones', COALESCE((
-                        SELECT jsonb_agg(
-                            jsonb_build_object(
-                                'id',               insp.id,
-                                'resultado',        insp.resultado,
-                                'observacion',      insp.observacion,
-                                'empleado_id',      insp.empleado_id,
-                                'empleado_nombre',  CONCAT(emp_i.nombre, ' ', emp_i.apellido),
-                                'fyh_inspeccion',   insp.fyh_inspeccion
-                            ) ORDER BY insp.fyh_inspeccion DESC
-                        )
-                        FROM calidad.inspeccion insp
-                        LEFT JOIN mes.empleado emp_i ON emp_i.id = insp.empleado_id
-                        WHERE insp.lote_id = l.id
-                    ), '[]'::jsonb)
-                ) ORDER BY l.fyh_cre
-            )
-            FROM inventario.lote l
-            JOIN mes.proceso_paso opp ON opp.proceso_id = op.id AND opp.id = l.documento_id AND l.documento_tipo = 'proceso_paso'
-            LEFT JOIN vw_items vi_prod                       ON vi_prod.item_id = l.item_id
-            LEFT JOIN inventario.lote_rollo_detalle lrd_out  ON lrd_out.lote_id = l.id
-            WHERE l.documento_tipo = 'proceso_paso'
-        ), '[]'::jsonb)
-
-    ) INTO v_result
-    FROM mes.proceso op
-    JOIN mes.partida p        ON p.id = op.partida_id
-    LEFT JOIN tercero c       ON c.id = p.tercero_id
-    LEFT JOIN tenido          ON tenido.id = p.tenido_id
-    LEFT JOIN vw_colores vc   ON vc.color_x_cliente_id = p.color_x_cliente_id
-    LEFT JOIN articulo_tipo at ON at.id = p.articulo_tipo_id
-    WHERE op.id = p_proceso_id;
-
-    RETURN v_result;
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS
+        v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in actualizar_componentes_partida - User: %, partida: %, Error: %, Detail: %',
+              v_usr_id, p_partida_id, v_message, v_detail;
+    RAISE;
 END;
 $function$;
 

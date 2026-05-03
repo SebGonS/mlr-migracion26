@@ -3,10 +3,10 @@
 -- Depends on: Step 5 (foundation), Step 6 (receta)
 -- Key FK chains:
 --   mes.partida → cliente, prioridad, tenido, color_x_cliente (all legacy)
---   mes.proceso → mes.partida
---   mes.proceso_paso → receta.tenido
+--   mes.partida → mes.partida
+--   mes.partida_paso → receta.tenido
 --   mes.lavado_maquina → receta.lavado_maquina
---   calidad.inspeccion → inventario.lote, mes.proceso_paso
+--   calidad.inspeccion → inventario.lote, mes.partida_paso
 -- ═══════════════════════════════════════════════════════════════
 
 -- ── mes.partida ───────────────────────────────────────────────
@@ -76,7 +76,7 @@ EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente) VALUES
     ('COMPRA_INGRESO',            'Compra – Ingreso de insumos',                       false, false),
     ('VENTA_EGRESO',              'Venta – Egreso de producto terminado',               true,  true),
-    ('CLIENTE_ENVIO_PROCESO',     'Servicio – Recepción de material cliente',           false, true),
+    ('CLIENTE_ENVIO_partida',     'Servicio – Recepción de material cliente',           false, true),
     ('DESPACHO_CLIENTE',          'Servicio – Despacho de material procesado a cliente',true,  true),
     ('DEVOLUCION_CLIENTE_CRUDO',  'Devolución a cliente (rollos sin procesar)',         true,  true),
     ('DEVOLUCION_PROVEEDOR',      'Devolución a proveedor',                            true,  false);
@@ -87,7 +87,7 @@ FROM inventario.item_movimiento_tipo imt
 WHERE
     (grt.codigo = 'COMPRA_INGRESO'           AND imt.codigo = 'COMPRA_ING')
  OR (grt.codigo = 'VENTA_EGRESO'             AND imt.codigo = 'VENTA_EGR')
- OR (grt.codigo = 'CLIENTE_ENVIO_PROCESO'    AND imt.codigo = 'SERV_ING')
+ OR (grt.codigo = 'CLIENTE_ENVIO_partida'    AND imt.codigo = 'SERV_ING')
  OR (grt.codigo = 'DESPACHO_CLIENTE'         AND imt.codigo = 'SERV_EGR')
  OR (grt.codigo = 'DEVOLUCION_CLIENTE_CRUDO' AND imt.codigo = 'DEV_CLI_EGR')
  OR (grt.codigo = 'DEVOLUCION_PROVEEDOR'     AND imt.codigo = 'DEV_PROV_EGR');
@@ -131,9 +131,9 @@ CREATE TABLE IF NOT EXISTS doc.guia_remision_detalle (
 );
 
 -- ── inventario.pesaje ─────────────────────────────────────────
--- Placed here (after mes.proceso) so the table ordering is clear,
+-- Placed here (after mes.partida) so the table ordering is clear,
 -- though pesaje no longer holds FKs to any mes table.
--- → Defined after mes.proceso below.
+-- → Defined after mes.partida below.
 
 -- ── mes.operacion ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS mes.operacion (
@@ -273,20 +273,18 @@ CREATE TABLE mes.ruta_plantilla_detalle (
     UNIQUE (ruta_plantilla_id, secuencia)
 );
 
--- ── mes.proceso ──────────────────────────────────────
-CREATE TABLE mes.proceso (
-    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    partida_id bigint NOT NULL REFERENCES mes.partida(id),
-    tipo proceso_tipo_enum NOT NULL,
-    proceso_origen_id bigint REFERENCES mes.proceso(id),
-    estado proceso_estado_enum NOT NULL DEFAULT 'CREADA',
-    fyh_cre timestamptz DEFAULT now(),
-    fyh_inicio timestamptz,
-    fyh_fin timestamptz,
+-- ── mes.partida_componente ────────────────────────────────────
+-- BOM: rolls assigned to a job upfront.  SAP: RESB at order level.
+-- cantidad_reservada: weight snapshot at assignment time (from lote.cantidad).
+-- Captured before weighing corrections — provides the committed reservation qty.
+CREATE TABLE mes.partida_componente (
+    id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    partida_id          bigint NOT NULL REFERENCES mes.partida(id),
+    lote_id             int    NOT NULL REFERENCES inventario.lote(id),
+    cantidad_reservada  numeric(12,4),
     usr_cre int,
-    flg_elm BOOL DEFAULT false,
-    usr_elm INT,
-    fyh_elm TIMESTAMPTZ
+    fyh_cre timestamptz DEFAULT now(),
+    UNIQUE (partida_id, lote_id)
 );
 
 -- ── inventario.pesaje ─────────────────────────────────────────
@@ -351,60 +349,64 @@ CREATE TABLE inventario.lote_rollo_detalle (
     fyh_mod TIMESTAMPTZ
 );
 
--- ── mes.proceso_paso ─────────────────────────────────
-CREATE TABLE mes.proceso_paso (
-    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    proceso_id bigint NOT NULL REFERENCES mes.proceso(id),
-    secuencia smallint NOT NULL,
-    operacion_id smallint NOT NULL REFERENCES mes.operacion(id),
-    maquina_asignada_id int REFERENCES mes.maquina(id),
-    ph numeric(4,2),
-    temperatura numeric(5,2),
-    tiempo_estandar int,
-    relacion_bano numeric(5,2),
-    receta_id int REFERENCES receta.tenido(id),
-    estado proceso_paso_estado_enum DEFAULT 'PENDIENTE',
-    empleado_id smallint REFERENCES mes.empleado(id),
-    flg_genera_produccion bool DEFAULT false,
-    fyh_inicio timestamptz,
-    fyh_fin timestamptz,
-    -- Free-text field for backfill attribution when registering production retroactively
-    observacion_backfill TEXT,
-    -- Set to true when any mid-step colour correction (matizado) was applied.
-    -- Zero-compute signal: no need to scan item_movimientos.observacion for reporting.
-    flg_matizado         BOOLEAN NOT NULL DEFAULT false,
+-- ── mes.partida_paso ─────────────────────────────────────────
+-- AFVC equivalent: planned steps for a job — guidelines only, no execution state.
+-- Actual execution (who, when, what machine, real params) lives in paso_ejecucion.
+CREATE TABLE mes.partida_paso (
+    id                      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    partida_id              bigint NOT NULL REFERENCES mes.partida(id),
+    secuencia               smallint NOT NULL,
+    operacion_id            smallint NOT NULL REFERENCES mes.operacion(id),
+    maquina_planificada_id  int REFERENCES mes.maquina(id),
+    receta_id               int REFERENCES receta.tenido(id),
+    tiempo_estandar         int,
+    ph_objetivo             numeric(4,2),
+    temperatura_objetivo    numeric(5,2),
+    relacion_bano_objetivo  numeric(5,2),
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
     fyh_mod TIMESTAMPTZ,
-    UNIQUE (proceso_id, secuencia)
+    flg_elm BOOL DEFAULT false,
+    UNIQUE (partida_id, secuencia)
 );
 
--- ── mes.proceso_componente ─────────────────────────────────
-CREATE TABLE mes.proceso_componente (
-    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    proceso_id bigint NOT NULL REFERENCES mes.proceso(id),
-    item_id int NOT NULL REFERENCES item(id),
-    lote_id int NOT NULL REFERENCES inventario.lote(id),
-    ubicacion_id int NOT NULL REFERENCES inventario.ubicacion(id),
+-- ── mes.paso_ejecucion ────────────────────────────────────────
+-- AFRU equivalent: actual run of a planned step.
+-- One partida_paso can have 1..N paso_ejecucion rows (normal, lagging).
+-- Continuation is derivable: prior COMPLETADO run on same paso_id = lagging continuation.
+-- A run is created when it starts — no PENDIENTE state.
+CREATE TABLE mes.paso_ejecucion (
+    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    paso_id         bigint NOT NULL REFERENCES mes.partida_paso(id),
+    estado          paso_ejecucion_estado_enum NOT NULL DEFAULT 'EN_partida',
+    maquina_id      int REFERENCES mes.maquina(id),
+    empleado_id     smallint REFERENCES mes.empleado(id),
+    fyh_inicio      timestamptz NOT NULL DEFAULT now(),
+    fyh_fin         timestamptz,
+    ph_real             numeric(4,2),
+    temperatura_real    numeric(5,2),
+    relacion_bano_real  numeric(5,2),
+    peso_real           numeric(12,4),  -- kg processed in this run; basis for recipe validation on non-recipe steps
+    notas           text,
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
-    fyh_mod TIMESTAMPTZ,
-    UNIQUE(proceso_id, lote_id, ubicacion_id)
+    fyh_mod TIMESTAMPTZ
 );
 
--- ── mes.proceso_paso_item ────────────────────────────
-CREATE TABLE mes.proceso_paso_item (
-    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    proceso_paso_id bigint NOT NULL REFERENCES mes.proceso_paso(id),
-    proceso_componente_id int NOT NULL REFERENCES mes.proceso_componente(id),
+-- ── mes.ejecucion_componente ──────────────────────────────────
+-- RESB equivalent: which rolls (from partida_componente) are in a specific run.
+-- Normal case: all partida_componente rows. Partial/lagging: subset.
+CREATE TABLE mes.ejecucion_componente (
+    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ejecucion_id    bigint NOT NULL REFERENCES mes.paso_ejecucion(id),
+    componente_id   bigint NOT NULL REFERENCES mes.partida_componente(id),
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
-    usr_mod int,
-    fyh_mod TIMESTAMPTZ,
-    UNIQUE (proceso_paso_id, proceso_componente_id)
+    UNIQUE (ejecucion_id, componente_id)
 );
+
 
 -- ── mes.programacion ─────────────────────────────────────────
 CREATE TABLE mes.programacion (
@@ -421,7 +423,7 @@ CREATE TABLE mes.programacion (
     fyh_mod timestamptz,
     UNIQUE (maquina_id, fecha, secuencia),
     CONSTRAINT chk_programacion_actividad_tipo
-        CHECK (actividad_tipo IN ('proceso_paso', 'LAVADO_MAQUINA'))
+        CHECK (actividad_tipo IN ('paso_ejecucion', 'LAVADO_MAQUINA'))
 );
 
 -- ── mes.lavado_maquina ────────────────────────────────────────
@@ -429,7 +431,7 @@ CREATE TABLE mes.lavado_maquina (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     receta_id   INT NOT NULL REFERENCES receta.lavado_maquina(id),
     maquina_id  INT NOT NULL REFERENCES mes.maquina(id),
-    estado      proceso_paso_estado_enum NOT NULL DEFAULT 'PENDIENTE',
+    estado      partida_paso_estado_enum NOT NULL DEFAULT 'PENDIENTE',
     empleado_id SMALLINT REFERENCES mes.empleado(id),
     fyh_inicio  TIMESTAMPTZ,
     fyh_fin     TIMESTAMPTZ,
@@ -444,7 +446,6 @@ CREATE TABLE mes.lavado_maquina (
 CREATE TABLE calidad.inspeccion (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     lote_id int NOT NULL REFERENCES inventario.lote(id),
-    proceso_paso_id bigint REFERENCES mes.proceso_paso(id),
     resultado calidad_estado_enum NOT NULL,
     observacion text,
     empleado_id int REFERENCES mes.empleado(id),
@@ -473,7 +474,7 @@ INSERT INTO calidad.tipo_defecto (codigo, nombre, descripcion, severidad) VALUES
 ('MANCHA',           'Mancha',                        'Mancha de aceite, óxido, suciedad u otro agente',            2),
 ('HUECO',            'Hueco',                         'Perforación o rotura en la tela',                            3),
 ('HILO_ROTO',        'Hilo roto',                     'Filamento o hilo cortado visible en la superficie',          2),
-('CAIDA_MALLA',      'Caída de malla',                'Malla suelta o proceso en tejido de punto',                  3),
+('CAIDA_MALLA',      'Caída de malla',                'Malla suelta o partida en tejido de punto',                  3),
 ('HILO_GRUESO',      'Hilo grueso / delgado',         'Variación de título de hilo visible',                        1),
 ('CONTAMINACION',    'Contaminación / Fibra extraña', 'Fibra o material ajeno atrapado en el tejido',              2),
 ('TONO_DESIGUAL',    'Tono desigual',                 'Variación de tono dentro del mismo rollo',                   2),
@@ -481,7 +482,7 @@ INSERT INTO calidad.tipo_defecto (codigo, nombre, descripcion, severidad) VALUES
 ('PILLING',          'Pilling',                       'Bolitas de fibra en la superficie',                          1),
 ('PESO_FUERA_SPEC',  'Peso fuera de especificación',  'Gramaje (g/m²) fuera de tolerancia',                        2),
 ('ANCHO_FUERA_SPEC', 'Ancho fuera de especificación', 'Ancho del rollo fuera de tolerancia',                       2),
-('ENCOGIMIENTO',     'Encogimiento excesivo',         'Encogimiento superior al permitido tras lavado/proceso',     3),
+('ENCOGIMIENTO',     'Encogimiento excesivo',         'Encogimiento superior al permitido tras lavado/partida',     3),
 ('ARRUGA',           'Arruga / Quiebre',              'Marca de pliegue permanente',                                1),
 ('ORILLO_DEFECTUOSO','Orillo defectuoso',             'Orillo enrollado, cortado o irregular',                      1);
 
@@ -655,27 +656,6 @@ CREATE TABLE IF NOT EXISTS doc.catalogo_precios (
 GRANT SELECT, INSERT, UPDATE ON doc.catalogo_precios TO authenticated;
 
 
--- ── mes.partida_guia_remision ─────────────────────────────────
--- N:N junction: service order ↔ ingress guias. Mirrors compra_guia_remision.
--- Authoritative document-layer link — the derivable path
--- (guia_detalle → lote → OP → partida) exists for genealogy
--- but is expensive; this is the query-time anchor.
---
--- SAP document graph (service/sales side):
---   partida ─────────────────────── hub (service order)
---     ├── partida_guia_remision ──→ guia_remision CLIENTE_ENVIO_PROCESO (ingress)
---     └── factura ────────────────→ financial document
---           └── factura_detalle ─── one line per (ingress guia × service × dimensions)
---
--- Unbilled coverage: DESPACHO_CLIENTE dispatch events traced back to ingress guia
--- via lote_rollo_detalle.guia_remision_id — see vw_pendientes_facturacion.
-CREATE TABLE mes.partida_guia_remision (
-    partida_id        BIGINT NOT NULL REFERENCES mes.partida(id),
-    guia_remision_id  BIGINT NOT NULL REFERENCES doc.guia_remision(id),
-    PRIMARY KEY (partida_id, guia_remision_id),
-    usr_cre INT,
-    fyh_cre TIMESTAMPTZ DEFAULT NOW()
-);
 
 -- ── doc.letra ─────────────────────────────────────────────────
 -- Payment instrument (SAP: payment document).
@@ -759,7 +739,7 @@ CREATE TABLE doc.factura (
 -- partida_id links back to the sales order for billing-to-order reconciliation.
 -- igv_porcentaje allows 0% for IGV-exempt items (e.g. exported goods).
 --
--- guia_remision_id: ingress guia (CLIENTE_ENVIO_PROCESO) — the material-origin
+-- guia_remision_id: ingress guia (CLIENTE_ENVIO_partida) — the material-origin
 --   anchor the client recognizes on their invoice. Carried forward from the input
 --   lote via lote_rollo_detalle.guia_remision_id when registrar_produccion runs.
 --   NULL for ad-hoc lines or MLR-confectioned rolls without an ingress guia.
@@ -799,14 +779,13 @@ GRANT SELECT ON doc.factura                         TO authenticated;
 GRANT SELECT ON doc.factura_detalle                 TO authenticated;
 GRANT SELECT ON doc.factura_proveedor_detalle       TO authenticated;
 GRANT SELECT ON doc.compra_factura_proveedor        TO authenticated;
-GRANT SELECT ON mes.partida_guia_remision           TO authenticated;
 GRANT SELECT ON inventario.lote_rollo_detalle       TO authenticated;
 
 -- ── mes.tiempos_estandar_tenido ───────────────────────────────
 -- Planning reference: expected duration for a dyeing step given
 -- the color depth (valor), dyeing chemistry (tenido), and whether
 -- antipilling treatment is included. Computed live at projection
--- time — NOT stored on proceso_paso (which keeps
+-- time — NOT stored on partida_paso (which keeps
 -- tiempo_estandar only for non-recipe steps copied from template).
 CREATE TABLE mes.tiempos_estandar_tenido (
     id              SMALLINT    GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

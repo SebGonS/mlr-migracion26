@@ -146,9 +146,9 @@ CREATE TRIGGER trg_bu_operacion_audit BEFORE UPDATE ON mes.operacion
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 -----ORDEN PRODUCCION ITEM
-CREATE TRIGGER trg_bi_proceso_componente_audit BEFORE INSERT ON mes.proceso_componente
+CREATE TRIGGER trg_bi_partida_componente_audit BEFORE INSERT ON mes.partida_componente
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_proceso_componente_audit BEFORE UPDATE ON mes.proceso_componente
+CREATE TRIGGER trg_bu_partida_componente_audit BEFORE UPDATE ON mes.partida_componente
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 -----MAQUINA TIPO
@@ -192,21 +192,21 @@ CREATE TRIGGER trg_biud_ruta_plantilla_detalle_audit BEFORE INSERT OR UPDATE OR 
     FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
 
 -----ORDEN DE PRODUCCION
-CREATE TRIGGER trg_bi_proceso_audit BEFORE INSERT ON mes.proceso
+CREATE TRIGGER trg_bi_partida_audit BEFORE INSERT ON mes.partida
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 
 -----ORDEN PRODUCCION PASO
-CREATE TRIGGER trg_biud_proceso_paso_audit BEFORE INSERT OR UPDATE OR DELETE ON mes.proceso_paso
+CREATE TRIGGER trg_biud_partida_paso_audit BEFORE INSERT OR UPDATE OR DELETE ON mes.partida_paso
     FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
-CREATE TRIGGER trg_bi_proceso_paso_audit BEFORE INSERT ON mes.proceso_paso
+CREATE TRIGGER trg_bi_partida_paso_audit BEFORE INSERT ON mes.partida_paso
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_proceso_paso_audit BEFORE UPDATE ON mes.proceso_paso
+CREATE TRIGGER trg_bu_partida_paso_audit BEFORE UPDATE ON mes.partida_paso
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 -----ORDEN PRODUCCION PASO ITEM
-CREATE TRIGGER trg_bi_proceso_paso_item_audit BEFORE INSERT ON mes.proceso_paso_item
+CREATE TRIGGER trg_bi_partida_paso_item_audit BEFORE INSERT ON mes.partida_paso_item
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_proceso_paso_item_audit BEFORE UPDATE ON mes.proceso_paso_item
+CREATE TRIGGER trg_bu_partida_paso_item_audit BEFORE UPDATE ON mes.partida_paso_item
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 ---PROGRAMACION
@@ -241,10 +241,6 @@ CREATE TRIGGER trg_bu_factura_proveedor_audit BEFORE UPDATE ON doc.factura_prove
 
 -----FACTURA PROVEEDOR DETALLE
 CREATE TRIGGER trg_bi_factura_proveedor_detalle_audit BEFORE INSERT ON doc.factura_proveedor_detalle
-    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-
------PARTIDA GUIA REMISION
-CREATE TRIGGER trg_bi_partida_guia_remision_audit BEFORE INSERT ON mes.partida_guia_remision
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 
 -----COMPRA FACTURA PROVEEDOR

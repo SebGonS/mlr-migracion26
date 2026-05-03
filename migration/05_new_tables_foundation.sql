@@ -64,7 +64,7 @@ BEFORE INSERT OR UPDATE ON item_tipo
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 INSERT INTO item_tipo (codigo, descripcion) VALUES
-    ('ROLLO',  'Rollo de tela (materia prima o en proceso)'),
+    ('ROLLO',  'Rollo de tela (materia prima o en partida)'),
     ('INSUMO', 'Insumo químico / colorante / auxiliar');
 
 -- ── insumo_tipo ────────────────────────────────────────────────
@@ -118,6 +118,7 @@ CREATE TABLE item (
     nombre TEXT NOT NULL,
     item_tipo_id integer NOT NULL REFERENCES item_tipo(id),
     unidad_id integer NOT NULL REFERENCES unidad(id),
+    stock_minimo NUMERIC(12,4),
     usr_cre int,
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
@@ -177,7 +178,7 @@ SELECT
         WHEN 'COMPRA'         THEN 'Compras'
         WHEN 'VENTA'          THEN 'Ventas'
         WHEN 'PRODUCCION'     THEN 'Producción'
-        WHEN 'PROCESO_EXTERNO'THEN 'Proceso externo'
+        WHEN 'partida_EXTERNO'THEN 'partida externo'
         WHEN 'DEVOLUCION'     THEN 'Devoluciones'
         WHEN 'AJUSTE'         THEN 'Ajustes'
         WHEN 'TRANSFERENCIA'  THEN 'Transferencias'
@@ -220,31 +221,51 @@ VALUES
 ('VENTA_EGR',        'Venta – Despacho',                          'VENTA',           -1, true,  true,  false, true,  true,  false, 'Salida por venta a cliente'),
 ('PROD_CONSUMO',     'Producción – Consumo MP',                   'PRODUCCION',      -1, true,  true,  false, false, true,  false, 'Consumo de materia prima hacia orden de producción'),
 ('PROD_ING',         'Producción – Ingreso PT',                   'PRODUCCION',      1,  true,  true,  true,  false, false, true,  'Ingreso de producto terminado'),
-('EXT_ENVIO',        'Proceso Ext. – Envío',                      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Salida a maquilador/tercero para proceso externo'),
-('EXT_RETORNO',      'Proceso Ext. – Retorno',                    'PROCESO_EXTERNO', 1,  true,  true,  true,  true,  false, true,  'Retorno con valor agregado'),
+('EXT_ENVIO',        'partida Ext. – Envío',                      'partida_EXTERNO', -1, true,  false, false, true,  true,  false, 'Salida a maquilador/tercero para partida externo'),
+('EXT_RETORNO',      'partida Ext. – Retorno',                    'partida_EXTERNO', 1,  true,  true,  true,  true,  false, true,  'Retorno con valor agregado'),
 ('INT_TRANSFER_ING', 'Transferencia Interna',                     'TRANSFERENCIA',   1,  true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
 ('INT_TRANSFER_EGR', 'Transferencia Interna',                     'TRANSFERENCIA',   -1, true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
 ('DEV_CLI_ING',      'Devolución Cliente',                        'DEVOLUCION',      1,  true,  true,  false, true,  false, true,  'Cliente devuelve'),
 ('DEV_CLI_EGR',      'Devolución Cliente',                        'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Se devuelve al cliente'),
 ('DEV_PROV_EGR',     'Devolución Proveedor',                      'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Salida por devolución a proveedor'),
-('SERV_ING',         'Servicio – Recepción Material Cliente',     'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Recepción de material de cliente'),
-('SERV_EGR',         'Servicio – Despacho Material Cliente',      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Despacho de material procesado al cliente'),
-('SERV_DEV_ING',     'Servicio – Devolución Material Cliente',    'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Cliente devuelve material procesado'),
-('AJUSTE_POS',       'Ajuste Inventario (+)',                     'AJUSTE',          1,  true,  true,  true,  false, false, true,  'Sobrante físico'),
-('AJUSTE_NEG',       'Ajuste Inventario (-)',                     'AJUSTE',          -1, true,  true,  false, false, true,  false, 'Faltante físico / Merma'),
+('SERV_ING',         'Servicio – Recepción Material Cliente',     'partida_EXTERNO', 1,  true,  false, false, true,  false, true,  'Recepción de material de cliente'),
+('SERV_EGR',         'Servicio – Despacho Material Cliente',      'partida_EXTERNO', -1, true,  false, false, true,  true,  false, 'Despacho de material procesado al cliente'),
+('SERV_DEV_ING',     'Servicio – Devolución Material Cliente',    'partida_EXTERNO', 1,  true,  false, false, true,  false, true,  'Cliente devuelve material procesado'),
+('AJUSTE_POS',       'Ajuste Inventario (+)',                     'AJUSTE',          1,  true,  true,  true,  false, false, true,  'Corrección positiva de inventario'),
+('AJUSTE_NEG',       'Ajuste Inventario (-)',                     'AJUSTE',          -1, true,  true,  false, false, true,  false, 'Corrección negativa de inventario'),
 ('PESAJE_POS',       'Pesaje – Corrección (+)',                   'AJUSTE',          1,  true,  false, false, false, false, true,  'Corrección de peso (real > declarado)'),
 ('PESAJE_NEG',       'Pesaje – Corrección (-)',                   'AJUSTE',          -1, true,  false, false, false, true,  false, 'Corrección de peso (real < declarado)'),
 -- Muestras: no valorizables ni recalculan costo — son movimientos de trazabilidad, no de compra.
 -- MUESTRA_ING cubre recepciones de muestra de proveedor sin documento de compra.
--- MUESTRA_EGR cubre salidas de muestra (cliente, proceso, etc.) registradas en salida_inventario con motivo='muestra'.
+-- MUESTRA_EGR cubre salidas de muestra (cliente, partida, etc.) registradas en salida_inventario con motivo='muestra'.
 ('MUESTRA_ING',      'Muestra – Ingreso',                         'AJUSTE',          1,  true,  false, false, false, false, true,  'Ingreso de muestra de proveedor'),
-('MUESTRA_EGR',      'Muestra – Egreso',                          'AJUSTE',          -1, true,  false, false, false, true,  false, 'Salida de muestra para cliente/proceso'),
+('MUESTRA_EGR',      'Muestra – Egreso',                          'AJUSTE',          -1, true,  false, false, false, true,  false, 'Salida de muestra para cliente/partida'),
 -- Production reversals: paired with PROD_ING / PROD_CONSUMO to cancel a completed paso.
 -- PROD_ING_REV     reverses the output lote ingress  (factor -1, removes it from stock).
 -- PROD_CONSUMO_REV reverses the input lote backflush (factor +1, restores it to stock).
 -- Not valorizable — the original movements already set valuation; reversal is stock-only.
 ('PROD_ING_REV',     'Producción – Anulación Ingreso PT',         'PRODUCCION',      -1, true,  false, false, false, true,  false, 'Anulación de ingreso de producto terminado (reversal de PROD_ING)'),
 ('PROD_CONSUMO_REV', 'Producción – Anulación Consumo MP',         'PRODUCCION',      1,  true,  false, false, false, false, true,  'Anulación de consumo de materia prima (reversal de PROD_CONSUMO)');
+
+-- ── inventario.item_movimiento_motivo ────────────────────────
+-- Movement reason catalog scoped per movement type (≈ SAP T157 / MSEG.GRUND).
+-- motivo_id on item_movimientos is nullable — most movements need no reason.
+CREATE TABLE inventario.item_movimiento_motivo (
+    id                      smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    item_movimiento_tipo_id smallint NOT NULL REFERENCES inventario.item_movimiento_tipo(id),
+    codigo                  text NOT NULL,
+    nombre                  text NOT NULL,
+    UNIQUE (item_movimiento_tipo_id, codigo)
+);
+
+INSERT INTO inventario.item_movimiento_motivo (item_movimiento_tipo_id, codigo, nombre)
+SELECT id, 'MATIZADO',        'Corrección de color en máquina' FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO'
+UNION ALL
+SELECT id, 'SOBRANTE_FISICO', 'Sobrante en conteo físico'      FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS'
+UNION ALL
+SELECT id, 'FALTANTE_FISICO', 'Faltante en conteo físico'      FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG'
+UNION ALL
+SELECT id, 'MERMA',           'Merma / pérdida en partida'     FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG';
 
 -- ── inventario.almacen ────────────────────────────────────────
 CREATE TABLE inventario.almacen (
@@ -400,6 +421,7 @@ CREATE TABLE inventario.item_movimientos (
     fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
     documento_tipo TEXT,
     documento_id int,
+    motivo_id smallint REFERENCES inventario.item_movimiento_motivo(id), -- ≈ SAP MSEG.GRUND
     observacion TEXT,
     usr_cre int,
     fyh_cre timestamptz DEFAULT NOW()

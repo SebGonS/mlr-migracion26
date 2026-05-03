@@ -302,7 +302,7 @@ $$;
 -- for antipilling when partida.flg_antipilling = true.
 --
 -- All dimensions come directly from mes.partida — no need to
--- inspect proceso_paso. tenido_id lives on partida.
+-- inspect partida_paso. tenido_id lives on partida.
 -- sin_precio = true flags combinations missing from the catalog.
 CREATE OR REPLACE FUNCTION doc.fn_precios_partida(p_partida_ids BIGINT[])
 RETURNS TABLE (
@@ -328,19 +328,19 @@ AS $$
             p.flg_antipilling,
             p.articulo_tipo_id::smallint  AS articulo_tipo_id,
             ar.fibra::smallint            AS fibra,
-            -- Distinct completed operaciones across ALL ops for this partida (reproceso included)
+            -- Distinct completed operaciones across ALL ops for this partida (repartida included)
             ARRAY(
                 SELECT DISTINCT opp.operacion_id
-                FROM mes.proceso op
-                JOIN mes.proceso_paso opp ON opp.proceso_id = op.id
+                FROM mes.partida op
+                JOIN mes.partida_paso opp ON opp.partida_id = op.id
                 WHERE op.partida_id = p.id
                   AND op.flg_elm = false
                   AND opp.estado = 'COMPLETADO'
             ) AS operacion_ids
         FROM mes.partida p
         -- fibra only — articulo_tipo_id comes directly from partida
-        JOIN mes.proceso op_r    ON op_r.partida_id = p.id AND op_r.flg_elm = false
-        JOIN mes.proceso_componente opi ON opi.proceso_id = op_r.id
+        JOIN mes.partida op_r    ON op_r.partida_id = p.id AND op_r.flg_elm = false
+        JOIN mes.partida_componente opi ON opi.partida_id = op_r.id
         JOIN item_rollo_detalle ird        ON ird.item_id = opi.item_id
         JOIN articulo ar                   ON ar.id = ird.articulo_id
         WHERE p.id = ANY(p_partida_ids) AND p.flg_elm = false
@@ -430,8 +430,8 @@ FROM mes.partida p
 JOIN color_x_cliente cxc           ON cxc.id = p.color_x_cliente_id
 JOIN public.color c                ON c.id   = cxc.color_id
 JOIN tercero t                     ON t.id   = cxc.tercero_id
-JOIN mes.proceso op_h     ON op_h.partida_id = p.id AND op_h.flg_elm = false
-JOIN mes.proceso_paso opp ON opp.proceso_id = op_h.id
+JOIN mes.partida op_h     ON op_h.partida_id = p.id AND op_h.flg_elm = false
+JOIN mes.partida_paso opp ON opp.partida_id = op_h.id
                                    AND opp.estado = 'COMPLETADO'
 JOIN mes.operacion op              ON op.id = opp.operacion_id
 -- For TENIDO: expand into variants needing pricing (false always; true when partida has antipilling)
@@ -446,10 +446,10 @@ CROSS JOIN LATERAL (
 ) v
 CROSS JOIN LATERAL (
     SELECT ar2.fibra::smallint AS fibra
-    FROM mes.proceso_componente opi2
+    FROM mes.partida_componente opi2
     JOIN item_rollo_detalle ird2 ON ird2.item_id = opi2.item_id
     JOIN articulo ar2            ON ar2.id = ird2.articulo_id
-    WHERE opi2.proceso_id = op_h.id
+    WHERE opi2.partida_id = op_h.id
     LIMIT 1
 ) ar
 JOIN public.articulo_tipo aty    ON aty.id = p.articulo_tipo_id
@@ -491,7 +491,7 @@ GRANT SELECT ON doc.vw_precios_pendientes TO authenticated;
 --   "observacion":       "...",           -- nullable
 --   "lineas": [
 --     {
---       "guia_remision_id":   456,        -- ingress guia CLIENTE_ENVIO_PROCESO (nullable for ad-hoc/MLR rolls)
+--       "guia_remision_id":   456,        -- ingress guia CLIENTE_ENVIO_partida (nullable for ad-hoc/MLR rolls)
 --       "partida_id":         123,        -- traceability (nullable)
 --       "operacion_id":       1,          -- service billed (nullable for ad-hoc)
 --       "es_antipilling":     false,
@@ -601,7 +601,7 @@ $$;
 -- Live view of billable lines with remaining unbilled weight.
 -- One row per (ingress guia × partida × operacion × billing dimensions × antipilling).
 --
--- guia_remision_id = the CLIENTE_ENVIO_PROCESO guia (client's own reference,
+-- guia_remision_id = the CLIENTE_ENVIO_partida guia (client's own reference,
 -- appears on invoice description as "Ref. [serie]-[correlativo]").
 -- Weight is aggregated across ALL dispatch events that trace back to the same
 -- ingress guia + partida combination.
@@ -626,8 +626,8 @@ $$;
 -- Join path:
 --   DESPACHO_CLIENTE guia → grd.lote_id (dyed output lote)
 --   → lote_rollo_detalle.guia_remision_id (ingress guia, carried by registrar_produccion)
---   → output lote.documento_id → proceso_paso → proceso → partida
---   → completed proceso_paso → operacion
+--   → output lote.documento_id → partida_paso → partida → partida
+--   → completed partida_paso → operacion
 --   → item_rollo_detalle → articulo (fibra)
 CREATE OR REPLACE VIEW doc.vw_pendientes_facturacion AS
 WITH lineas AS (
@@ -660,24 +660,24 @@ WITH lineas AS (
     JOIN doc.guia_remision_tipo grt    ON grt.id = gr.guia_remision_tipo_id
                                       AND grt.codigo = 'DESPACHO_CLIENTE'
     JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
-    -- Dispatched lote is always a dyed OUTPUT lote (documento_tipo = 'proceso_paso')
+    -- Dispatched lote is always a dyed OUTPUT lote (documento_tipo = 'partida_paso')
     JOIN inventario.lote l             ON l.id = grd.lote_id
-                                      AND l.documento_tipo = 'proceso_paso'
+                                      AND l.documento_tipo = 'partida_paso'
     -- Ingress guia + source lote carried forward in lote_rollo_detalle by registrar_produccion
     LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
     LEFT JOIN doc.guia_remision gr_ing          ON gr_ing.id = lrd.guia_remision_id
     -- Source lote: input lote before dyeing — used for billing weight (input weight)
     LEFT JOIN inventario.lote source_l          ON source_l.id = lrd.origen_lote_id
     -- Trace: output lote → OPP → OP → partida
-    JOIN mes.proceso_paso opp_out ON opp_out.id = l.documento_id
-    JOIN mes.proceso op_out       ON op_out.id  = opp_out.proceso_id
+    JOIN mes.partida_paso opp_out ON opp_out.id = l.documento_id
+    JOIN mes.partida op_out       ON op_out.id  = opp_out.partida_id
                                           AND op_out.flg_elm = false
     JOIN mes.partida p                     ON p.id = op_out.partida_id
                                           AND p.flg_elm = false
     JOIN tercero t                         ON t.id = p.tercero_id
     -- Only completed operations from the SAME OP that produced this output lote.
-    -- A reproceso roll is billed separately when its own output is dispatched.
-    JOIN mes.proceso_paso opp     ON opp.proceso_id = op_out.id
+    -- A repartida roll is billed separately when its own output is dispatched.
+    JOIN mes.partida_paso opp     ON opp.partida_id = op_out.id
                                           AND opp.estado = 'COMPLETADO'
     JOIN mes.operacion o                   ON o.id = opp.operacion_id
     -- fibra needs articulo join; articulo_tipo_id comes directly from partida

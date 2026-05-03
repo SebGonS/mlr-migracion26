@@ -22,10 +22,10 @@ BEGIN
     VALUES ('crear_inspeccion', v_usr_id, p_inspeccion);
 
     -- Parent: inspeccion
-    INSERT INTO calidad.inspeccion (lote_id, proceso_paso_id, resultado, observacion, empleado_id)
+    INSERT INTO calidad.inspeccion (lote_id, partida_paso_id, resultado, observacion, empleado_id)
     VALUES (
         (p_inspeccion->>'lote_id')::INT,
-        (p_inspeccion->>'proceso_paso_id')::BIGINT,
+        (p_inspeccion->>'partida_paso_id')::BIGINT,
         (p_inspeccion->>'resultado')::calidad_estado_enum,
         p_inspeccion->>'observacion',
         (p_inspeccion->>'empleado_id')::INT
@@ -112,7 +112,7 @@ BEGIN
     SELECT jsonb_build_object(
         'id', i.id,
         'lote_id', i.lote_id,
-        'proceso_paso_id', i.proceso_paso_id,
+        'partida_paso_id', i.partida_paso_id,
         'resultado', i.resultado,
         'observacion', i.observacion,
         'empleado_id', i.empleado_id,

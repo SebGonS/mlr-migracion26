@@ -9,7 +9,7 @@ CREATE TYPE calidad_estado_enum AS ENUM (
   'PENDIENTE',
   'APROBADO',
   'RECHAZADO',
-  'REPROCESO',
+  'REpartida',
   'CUARENTENA'
 );
 
@@ -17,7 +17,7 @@ CREATE TYPE item_movimiento_tipo_categoria_enum AS ENUM (
     'COMPRA',
     'VENTA',
     'PRODUCCION',
-    'PROCESO_EXTERNO',
+    'partida_EXTERNO',
     'DEVOLUCION',
     'AJUSTE',
     'TRANSFERENCIA'
@@ -26,23 +26,6 @@ CREATE TYPE item_movimiento_tipo_categoria_enum AS ENUM (
 -- ── MES / Production ───────────────────────────────────────────
 -- FIX: was DROP TYPE IF EXISTS ... (no CASCADE) — would fail if type in use.
 -- Use safe CREATE with duplicate guard instead.
-DO $$
-BEGIN
-    CREATE TYPE proceso_estado_enum AS ENUM (
-      'CREADA',
-      'PLANIFICADA',
-      'PROGRAMADA',
-      'LIBERADA',
-      'EN_PROCESO',
-      'PAUSADA',
-      'FINALIZADA',
-      'TECO',
-      'CERRADA',
-      'CANCELADA'
-    );
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
 DO $$
 BEGIN
     CREATE TYPE partida_estado_enum AS ENUM (
@@ -60,18 +43,20 @@ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+-- partida_paso_estado_enum: kept for mes.lavado_maquina (needs PENDIENTE for scheduled washes)
 DO $$
 BEGIN
-    CREATE TYPE proceso_tipo_enum AS ENUM (
-        'NORMAL', 'REPROCESO', 'AJUSTE'
+    CREATE TYPE partida_paso_estado_enum AS ENUM (
+        'PENDIENTE', 'EN_partida', 'COMPLETADO', 'OMITIDO'
     );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+-- Execution run state: no PENDIENTE — a run exists only when it has started
 DO $$
 BEGIN
-    CREATE TYPE proceso_paso_estado_enum AS ENUM (
-        'PENDIENTE', 'EN_PROCESO', 'COMPLETADO', 'OMITIDO'
+    CREATE TYPE paso_ejecucion_estado_enum AS ENUM (
+        'EN_partida', 'COMPLETADO', 'OMITIDO'
     );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
