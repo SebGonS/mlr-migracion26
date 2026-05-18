@@ -123,7 +123,6 @@ CREATE TABLE item (
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
     fyh_mod TIMESTAMPTZ,
-    flg_elm boolean NOT NULL DEFAULT FALSE,
     usr_elm int,
     fyh_elm timestamptz,
     UNIQUE(codigo_canon)
@@ -178,7 +177,7 @@ SELECT
         WHEN 'COMPRA'         THEN 'Compras'
         WHEN 'VENTA'          THEN 'Ventas'
         WHEN 'PRODUCCION'     THEN 'Producción'
-        WHEN 'partida_EXTERNO'THEN 'partida externo'
+        WHEN 'PROCESO_EXTERNO'THEN 'Proceso externo'
         WHEN 'DEVOLUCION'     THEN 'Devoluciones'
         WHEN 'AJUSTE'         THEN 'Ajustes'
         WHEN 'TRANSFERENCIA'  THEN 'Transferencias'
@@ -203,7 +202,6 @@ CREATE TABLE inventario.item_movimiento_tipo (
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
     fyh_mod TIMESTAMPTZ,
-    flg_elm boolean NOT NULL DEFAULT FALSE,
     usr_elm int,
     fyh_elm timestamptz,
     UNIQUE(codigo_canon)
@@ -221,16 +219,16 @@ VALUES
 ('VENTA_EGR',        'Venta – Despacho',                          'VENTA',           -1, true,  true,  false, true,  true,  false, 'Salida por venta a cliente'),
 ('PROD_CONSUMO',     'Producción – Consumo MP',                   'PRODUCCION',      -1, true,  true,  false, false, true,  false, 'Consumo de materia prima hacia orden de producción'),
 ('PROD_ING',         'Producción – Ingreso PT',                   'PRODUCCION',      1,  true,  true,  true,  false, false, true,  'Ingreso de producto terminado'),
-('EXT_ENVIO',        'partida Ext. – Envío',                      'partida_EXTERNO', -1, true,  false, false, true,  true,  false, 'Salida a maquilador/tercero para partida externo'),
-('EXT_RETORNO',      'partida Ext. – Retorno',                    'partida_EXTERNO', 1,  true,  true,  true,  true,  false, true,  'Retorno con valor agregado'),
+('EXT_ENVIO',        'partida Ext. – Envío',                      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Salida a maquilador/tercero para partida externo'),
+('EXT_RETORNO',      'partida Ext. – Retorno',                    'PROCESO_EXTERNO', 1,  true,  true,  true,  true,  false, true,  'Retorno con valor agregado'),
 ('INT_TRANSFER_ING', 'Transferencia Interna',                     'TRANSFERENCIA',   1,  true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
 ('INT_TRANSFER_EGR', 'Transferencia Interna',                     'TRANSFERENCIA',   -1, true,  true,  false, false, true,  true,  'Movimiento entre almacenes propios'),
 ('DEV_CLI_ING',      'Devolución Cliente',                        'DEVOLUCION',      1,  true,  true,  false, true,  false, true,  'Cliente devuelve'),
 ('DEV_CLI_EGR',      'Devolución Cliente',                        'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Se devuelve al cliente'),
 ('DEV_PROV_EGR',     'Devolución Proveedor',                      'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Salida por devolución a proveedor'),
-('SERV_ING',         'Servicio – Recepción Material Cliente',     'partida_EXTERNO', 1,  true,  false, false, true,  false, true,  'Recepción de material de cliente'),
-('SERV_EGR',         'Servicio – Despacho Material Cliente',      'partida_EXTERNO', -1, true,  false, false, true,  true,  false, 'Despacho de material procesado al cliente'),
-('SERV_DEV_ING',     'Servicio – Devolución Material Cliente',    'partida_EXTERNO', 1,  true,  false, false, true,  false, true,  'Cliente devuelve material procesado'),
+('SERV_ING',         'Servicio – Recepción Material Cliente',     'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Recepción de material de cliente'),
+('SERV_EGR',         'Servicio – Despacho Material Cliente',      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Despacho de material procesado al cliente'),
+('SERV_DEV_ING',     'Servicio – Devolución Material Cliente',    'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Cliente devuelve material procesado'),
 ('AJUSTE_POS',       'Ajuste Inventario (+)',                     'AJUSTE',          1,  true,  true,  true,  false, false, true,  'Corrección positiva de inventario'),
 ('AJUSTE_NEG',       'Ajuste Inventario (-)',                     'AJUSTE',          -1, true,  true,  false, false, true,  false, 'Corrección negativa de inventario'),
 ('PESAJE_POS',       'Pesaje – Corrección (+)',                   'AJUSTE',          1,  true,  false, false, false, false, true,  'Corrección de peso (real > declarado)'),
@@ -259,13 +257,15 @@ CREATE TABLE inventario.item_movimiento_motivo (
 );
 
 INSERT INTO inventario.item_movimiento_motivo (item_movimiento_tipo_id, codigo, nombre)
-SELECT id, 'MATIZADO',        'Corrección de color en máquina' FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO'
+SELECT id, 'MATIZADO',        'Corrección de color en máquina'              FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO'
 UNION ALL
-SELECT id, 'SOBRANTE_FISICO', 'Sobrante en conteo físico'      FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS'
+SELECT id, 'CONFECCION',      'Ingreso desde línea de confección propia'    FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING'
 UNION ALL
-SELECT id, 'FALTANTE_FISICO', 'Faltante en conteo físico'      FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG'
+SELECT id, 'SOBRANTE_FISICO', 'Sobrante en conteo físico'                   FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS'
 UNION ALL
-SELECT id, 'MERMA',           'Merma / pérdida en partida'     FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG';
+SELECT id, 'FALTANTE_FISICO', 'Faltante en conteo físico'                   FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG'
+UNION ALL
+SELECT id, 'MERMA',           'Merma / pérdida en partida'                  FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG';
 
 -- ── inventario.almacen ────────────────────────────────────────
 CREATE TABLE inventario.almacen (
@@ -337,7 +337,6 @@ CREATE TABLE tercero (
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod INT REFERENCES usuario(id),
     fyh_mod TIMESTAMPTZ,
-    flg_elm BOOL DEFAULT false,
     usr_elm INT,
     fyh_elm TIMESTAMPTZ
 );
@@ -354,6 +353,15 @@ INSERT INTO tercero (codigo, nombre) VALUES ('MLR', 'Manufacturas la Real');
 GRANT SELECT ON tercero TO authenticated;
 
 -- ── inventario.lote ───────────────────────────────────────────
+-- documento_tipo / documento_id: the business event that created this lote.
+-- Valid values:
+--   'GUIA_REMISION'          → doc.guia_remision.id          (all external ingress: insumos via COMPRA_INGRESO, rolls via CLIENTE_ENVIO_PROCESO)
+--   'partida_paso_ejecucion' → mes.partida_paso_ejecucion.id (production output rolls — AFRU)
+--   'CUADRE'                 → inventario.cuadre.id          (surplus lots from stock reconciliation)
+-- Movements (item_movimientos) carry the same pair to group all postings
+-- from a single business event (≈ SAP MBLNR / MKPF).
+-- Note: guia_remision_tipo.item_movimiento_tipo_id drives which movement is posted
+-- (COMPRA_ING for COMPRA_INGRESO, SERV_ING for CLIENTE_ENVIO_PROCESO, etc.).
 CREATE TABLE inventario.lote (
     id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     secuencia int NOT NULL,
@@ -368,9 +376,9 @@ CREATE TABLE inventario.lote (
     fyh_cre TIMESTAMPTZ DEFAULT NOW(),
     usr_mod int,
     fyh_mod TIMESTAMPTZ,
-    flg_elm BOOL DEFAULT false,
     usr_elm INT,
-    fyh_elm TIMESTAMPTZ
+    fyh_elm TIMESTAMPTZ,
+    cantidad_actual NUMERIC(12,4) NOT NULL DEFAULT 0
 );
 
 CREATE TABLE inventario.lote_secuencia_anual (
@@ -403,6 +411,15 @@ BEFORE INSERT ON inventario.lote
 FOR EACH ROW
 WHEN (NEW.secuencia IS NULL)
 EXECUTE FUNCTION inventario.trfn_generar_secuencia_lote();
+
+-- ── inventario.saldo_item ─────────────────────────────────────
+-- Maintained lot-less stock balance per item (≈ SAP MARD).
+-- Updated synchronously by trg_ai_im_sync_cantidad_actual when lote_id IS NULL.
+-- No audit fields — pure derived state, not a business entity.
+CREATE TABLE inventario.saldo_item (
+    item_id       INT PRIMARY KEY REFERENCES item(id),
+    cantidad_actual NUMERIC(12,4) NOT NULL DEFAULT 0
+);
 
 -- ── inventario.item_movimientos ───────────────────────────────
 CREATE SEQUENCE IF NOT EXISTS inventario.mov_doc_seq START 1;

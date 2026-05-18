@@ -9,7 +9,7 @@ CREATE TYPE calidad_estado_enum AS ENUM (
   'PENDIENTE',
   'APROBADO',
   'RECHAZADO',
-  'REpartida',
+  'REPROCESO',
   'CUARENTENA'
 );
 
@@ -17,7 +17,7 @@ CREATE TYPE item_movimiento_tipo_categoria_enum AS ENUM (
     'COMPRA',
     'VENTA',
     'PRODUCCION',
-    'partida_EXTERNO',
+    'PROCESO_EXTERNO',
     'DEVOLUCION',
     'AJUSTE',
     'TRANSFERENCIA'
@@ -28,26 +28,33 @@ CREATE TYPE item_movimiento_tipo_categoria_enum AS ENUM (
 -- Use safe CREATE with duplicate guard instead.
 DO $$
 BEGIN
-    CREATE TYPE partida_estado_enum AS ENUM (
-      'CREADA',
-      'CONFIRMADA',
-      'EN_PRODUCCION',
-      'ENTREGA_PARCIAL',
-      'ENTREGADA',
-      'DEVUELTA_PARCIAL',
-      'DEVUELTA_TOTAL',
-      'FACTURADA',
-      'CERRADA',
-      'CANCELADA'
+    CREATE TYPE partida_estado_produccion_enum AS ENUM (
+        'CREADA',        -- order created
+        'PLANIFICADA',   -- full route (partida_paso rows) defined
+        'PROGRAMADA',    -- scheduled on machines (programacion rows exist)
+        'EN_PRODUCCION', -- first paso_ejecucion started
+        'TECO',          -- all steps complete, pending closure
+        'CERRADA',       -- settled
+        'CANCELADA'
     );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
-
+DO $$
+BEGIN
+    CREATE TYPE partida_estado_comercial_enum AS ENUM (
+    'PENDIENTE',
+    'ENTREGA_PARCIAL',
+    'ENTREGADA',
+    'DEVUELTA_PARCIAL',
+    'DEVUELTA_TOTAL'
+);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 -- partida_paso_estado_enum: kept for mes.lavado_maquina (needs PENDIENTE for scheduled washes)
 DO $$
 BEGIN
     CREATE TYPE partida_paso_estado_enum AS ENUM (
-        'PENDIENTE', 'EN_partida', 'COMPLETADO', 'OMITIDO'
+        'PENDIENTE', 'EN_PROCESO', 'COMPLETADO', 'OMITIDO'
     );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
@@ -56,8 +63,14 @@ END $$;
 DO $$
 BEGIN
     CREATE TYPE paso_ejecucion_estado_enum AS ENUM (
-        'EN_partida', 'COMPLETADO', 'OMITIDO'
+        'EN_PROCESO', 'COMPLETADO', 'OMITIDO'
     );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    CREATE TYPE partida_tipo_enum AS ENUM ('NORMAL', 'REPROCESO');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 

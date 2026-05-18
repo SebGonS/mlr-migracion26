@@ -37,17 +37,28 @@ JOIN unidad u ON i.unidad_id = u.id;
 -- Already created in 05 before the table — kept here for view-only reference.
 
 -- ── inventario.vw_stock_actual ────────────────────────────────
+-- Two branches unioned, both fully maintained — no aggregation at query time.
+--   Lot-tracked (rollos): reads lote.cantidad_actual  (≈ SAP MCHB)
+--   Lot-less (insumos):   reads saldo_item.cantidad_actual (≈ SAP MARD)
 CREATE OR REPLACE VIEW inventario.vw_stock_actual AS
 SELECT
-    im.lote_id,
-    im.item_id,
-    COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
-    SUM(im.cantidad * imt.factor) AS cantidad_disponible,
-    MIN(im.fecha_hora) AS fecha_hora_ingreso
-FROM inventario.item_movimientos im
-JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
-GROUP BY im.lote_id, im.item_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id)
-HAVING SUM(im.cantidad * imt.factor) > 0;
+    l.id                AS lote_id,
+    l.item_id,
+    NULL::INT           AS ubicacion_id,
+    l.cantidad_actual   AS cantidad_disponible,
+    l.fyh_cre           AS fecha_hora_ingreso
+FROM inventario.lote l
+WHERE l.cantidad_actual > 0
+  AND l.fyh_elm IS NULL
+UNION ALL
+SELECT
+    NULL::INT           AS lote_id,
+    si.item_id,
+    NULL::INT           AS ubicacion_id,
+    si.cantidad_actual  AS cantidad_disponible,
+    NULL::TIMESTAMPTZ   AS fecha_hora_ingreso
+FROM inventario.saldo_item si
+WHERE si.cantidad_actual > 0;
 
 GRANT SELECT ON inventario.vw_stock_actual TO anon, authenticated;
 
@@ -114,143 +125,96 @@ LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_c
 LEFT JOIN tenido tn                     ON tn.id = lrd.tenido_id
 ORDER BY art.nombre, u.nombre, i.nombre;
 
--- ── mes.vw_partidas ───────────────────────────
+-- ── mes.vw_partidas (detailed: paso/material/produccion stats) ───────────
+-- Replaces the old "ordenes de produccion" view: after the schema redesign
+-- mes.partida IS the commercial order. Paso execution state is derived from
+-- partida_paso_ejecucion (no estado column on partida_paso anymore).
 DROP VIEW IF EXISTS mes.vw_partidas;
 CREATE OR REPLACE VIEW mes.vw_partidas AS
 SELECT
     p.id,
     p.numero,
-    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS codigo,
-    p.estado,
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT
+        || '-' || LPAD(p.numero::TEXT, 4, '0')                            AS codigo,
+    p.estado_produccion                                                    AS estado,
+    p.estado_comercial,
+    p.partida_origen_id,
+    p.fyh_cre,
+    p.fyh_inicio,
+    p.fyh_fin,
     p.tercero_id,
-    c.nombre AS cliente,
-    p.prioridad_id,
-    pri.prioridad,
+    c.nombre                                                               AS cliente,
+    vc.color_id,
+    vc.color,
+    vc.tono,
+    vc.color_hex,
     p.tenido_id,
     t.tenido,
-    p.color_x_cliente_id,
-    vc.color_id,
-    vc.color,
-    vc.tono,
-    vc.color_hex,
-    vc.color_x_cliente_hex,
-    p.malla,
-    p.rendimiento,
-    p.ancho,
-    p.flg_antipilling,
-    p.fecha_acordada,
-    p.fyh_cre AS fecha_creacion,
-    p.fyh_programacion AS fecha_programacion,
-    p.fyh_inicio AS fecha_inicio,
-    p.fyh_fin AS fecha_finalizacion,
-    EXTRACT(EPOCH FROM (NOW() - p.fyh_cre)) / 86400 AS dias_desde_creacion,
-    COALESCE(pd_agg.total_items, 0) AS total_items,
-    COALESCE(pd_agg.cantidad_total, '0') AS cantidad_total,
-    COALESCE(pd_agg.cantidad_principales, '0') AS cantidad_principales,
-    COALESCE(pd_agg.cantidad_rib, '0') AS cantidad_rib,
-    CASE
-        WHEN EXISTS (SELECT 1 FROM mes.partida op WHERE op.partida_id = p.id)
-        THEN true ELSE false
-    END AS tiene_ordenes_produccion,
-    p.usr_cre,
-    p.fyh_cre
-FROM mes.partida p
-LEFT JOIN tercero c ON c.id = p.tercero_id
-LEFT JOIN prioridad pri ON pri.id = p.prioridad_id
-LEFT JOIN tenido t ON t.id = p.tenido_id
-LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
-LEFT JOIN LATERAL (
-    SELECT
-        COUNT(*) AS total_items,
-        SUM(pd.cantidad) AS cantidad_total,
-        SUM(CASE WHEN ird.flg_rib = FALSE THEN pd.cantidad ELSE 0 END) AS cantidad_principales,
-        SUM(CASE WHEN ird.flg_rib = TRUE  THEN pd.cantidad ELSE 0 END) AS cantidad_rib
-    FROM mes.partida_detalle pd
-    LEFT JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
-    WHERE pd.partida_id = p.id
-) pd_agg ON true;
-
-GRANT SELECT ON mes.vw_partidas TO authenticated;
-
--- ── mes.vw_partidas ─────────────────────────────────
-DROP VIEW IF EXISTS mes.vw_partidas;
-CREATE OR REPLACE VIEW mes.vw_partidas AS
-SELECT
-    op.id,
-    op.tipo,
-    op.estado,
-    op.partida_origen_id,
-    op.fyh_cre,
-    op.fyh_inicio,
-    op.fyh_fin,
-    op.partida_id,
-    p.numero AS partida_numero,
-    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
-    -- op_codigo: human-readable run identifier within a partida, e.g. "2026-0017-2"
-    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') || '-' || op.op_seq::TEXT AS op_codigo,
-    p.estado AS partida_estado,
-    c.id AS tercero_id,
-    c.nombre AS cliente,
-    vc.color_id,
-    vc.color,
-    vc.tono,
-    vc.color_hex,
-    t.id AS tenido_id,
-    t.tenido,
-    COALESCE(pasos_stats.total_pasos, 0)        AS total_pasos,
-    COALESCE(pasos_stats.pasos_completados, 0)  AS pasos_completados,
-    COALESCE(pasos_stats.pasos_en_partida, 0)   AS pasos_en_partida,
-    COALESCE(pasos_stats.pasos_pendientes, 0)   AS pasos_pendientes,
+    COALESCE(pasos_stats.total_pasos, 0)                                   AS total_pasos,
+    COALESCE(pasos_stats.pasos_completados, 0)                             AS pasos_completados,
+    COALESCE(pasos_stats.pasos_en_proceso, 0)                              AS pasos_en_proceso,
+    COALESCE(pasos_stats.pasos_pendientes, 0)                              AS pasos_pendientes,
     CASE
         WHEN COALESCE(pasos_stats.total_pasos, 0) > 0
-        THEN ROUND((COALESCE(pasos_stats.pasos_completados, 0)::NUMERIC / pasos_stats.total_pasos::NUMERIC) * 100, 0)
+        THEN ROUND(
+            (COALESCE(pasos_stats.pasos_completados, 0)::NUMERIC
+             / pasos_stats.total_pasos::NUMERIC) * 100, 0)
         ELSE 0
-    END AS progreso_porcentaje,
-    COALESCE(materiales_stats.total_materiales, 0)  AS total_materiales,
-    COALESCE(materiales_stats.cantidad_total_kg, 0) AS cantidad_total_kg,
-    COALESCE(produccion_stats.lotes_generados, 0)   AS lotes_generados,
+    END                                                                    AS progreso_porcentaje,
+    COALESCE(materiales_stats.total_materiales, 0)                        AS total_materiales,
+    COALESCE(materiales_stats.cantidad_total_kg, 0)                       AS cantidad_total_kg,
+    COALESCE(produccion_stats.rollos_producidos, 0)                       AS rollos_producidos,
+    COALESCE(produccion_stats.kg_producidos, 0)                           AS kg_producidos,
     CASE
-        WHEN op.fyh_inicio IS NOT NULL AND op.fyh_fin IS NOT NULL
-            THEN EXTRACT(EPOCH FROM (op.fyh_fin - op.fyh_inicio)) / 3600
-        WHEN op.fyh_inicio IS NOT NULL
-            THEN EXTRACT(EPOCH FROM (NOW() - op.fyh_inicio)) / 3600
+        WHEN p.fyh_inicio IS NOT NULL AND p.fyh_fin IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (p.fyh_fin - p.fyh_inicio)) / 3600
+        WHEN p.fyh_inicio IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (NOW() - p.fyh_inicio)) / 3600
         ELSE NULL
-    END AS duracion_horas,
-    op.usr_cre,
-    prof.nombre || ' ' || prof.apellido AS creado_por
-FROM (
-    -- Subquery computes op_seq before any outer WHERE so numbering is stable
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY partida_id ORDER BY fyh_cre, id) AS op_seq
-    FROM mes.partida
-) op
-JOIN mes.partida p ON p.id = op.partida_id
-LEFT JOIN tercero c ON c.id = p.tercero_id
+    END                                                                    AS duracion_horas,
+    p.usr_cre,
+    prof.nombre || ' ' || prof.apellido                                    AS creado_por
+FROM mes.partida p
+LEFT JOIN tercero c     ON c.id  = p.tercero_id
 LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
-LEFT JOIN tenido t ON t.id = p.tenido_id
-LEFT JOIN usuario prof ON prof.id = op.usr_cre
+LEFT JOIN tenido t      ON t.id  = p.tenido_id
+LEFT JOIN usuario prof  ON prof.id = p.usr_cre
 LEFT JOIN LATERAL (
+    -- Paso completion is derived: a paso is COMPLETADO when it has a COMPLETADO ejecucion.
+    -- PENDIENTE = no ejecucion rows at all. EN_PROCESO = ejecucion with EN_PROCESO estado.
     SELECT
-        COUNT(*) AS total_pasos,
-        COUNT(*) FILTER (WHERE estado = 'COMPLETADO') AS pasos_completados,
-        COUNT(*) FILTER (WHERE estado = 'EN_partida')  AS pasos_en_partida,
-        COUNT(*) FILTER (WHERE estado = 'PENDIENTE')   AS pasos_pendientes
-    FROM mes.partida_paso opp WHERE opp.partida_id = op.id
+        COUNT(*)                                                           AS total_pasos,
+        COUNT(*) FILTER (WHERE EXISTS (
+            SELECT 1 FROM mes.partida_paso_ejecucion pe
+            WHERE pe.partida_paso_id = pp.id AND pe.estado = 'COMPLETADO'
+        ))                                                                 AS pasos_completados,
+        COUNT(*) FILTER (WHERE EXISTS (
+            SELECT 1 FROM mes.partida_paso_ejecucion pe
+            WHERE pe.partida_paso_id = pp.id AND pe.estado = 'EN_PROCESO'
+        ))                                                                 AS pasos_en_proceso,
+        COUNT(*) FILTER (WHERE NOT EXISTS (
+            SELECT 1 FROM mes.partida_paso_ejecucion pe
+            WHERE pe.partida_paso_id = pp.id
+        ))                                                                 AS pasos_pendientes
+    FROM mes.partida_paso pp
+    WHERE pp.partida_id = p.id
 ) pasos_stats ON true
 LEFT JOIN LATERAL (
     SELECT COUNT(*) AS total_materiales, SUM(l.cantidad) AS cantidad_total_kg
     FROM mes.partida_componente opi
     LEFT JOIN inventario.lote l ON l.id = opi.lote_id
-    WHERE opi.partida_id = op.id
+    WHERE opi.partida_id = p.id
 ) materiales_stats ON true
 LEFT JOIN LATERAL (
-    -- Lotes are stamped at paso level (documento_tipo = 'partida_paso',
-    -- documento_id = partida_paso.id), so we must go through pasos to
-    -- count output lotes at the order level.
-    SELECT COUNT(*) AS lotes_generados
+    SELECT
+        COUNT(*)           AS rollos_producidos,
+        SUM(l.cantidad)    AS kg_producidos
     FROM inventario.lote l
-    JOIN mes.partida_paso opp2 ON opp2.id = l.documento_id
-    WHERE l.documento_tipo = 'partida_paso'
-      AND opp2.partida_id = op.id
+    JOIN mes.partida_paso_ejecucion pe ON pe.id = l.documento_id
+    JOIN mes.partida_paso pp           ON pp.id = pe.partida_paso_id
+    WHERE l.documento_tipo = 'partida_paso_ejecucion'
+      AND pp.partida_id = p.id
+      AND l.fyh_elm IS NULL
 ) produccion_stats ON true;
 
 GRANT SELECT ON mes.vw_partidas TO anon, authenticated;
@@ -372,7 +336,7 @@ SELECT
     lrd.flg_antipilling,
     c.id                                AS propietario_id,
     c.nombre                            AS propietario,
-    op.partida_id,
+    p.id AS partida_id,
     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
     lrd.guia_remision_id
 FROM inventario.lote l
@@ -384,9 +348,9 @@ JOIN articulo art                       ON art.id = ird.articulo_id
 JOIN unidad un                          ON un.id = i.unidad_id
 JOIN inventario.lote_rollo_detalle lrd  ON lrd.lote_id = l.id AND lrd.flg_tenido = true
 LEFT JOIN tercero c                     ON c.id = l.propietario_id
-LEFT JOIN mes.partida_paso opp ON opp.id = l.documento_id AND l.documento_tipo = 'partida_paso'
-LEFT JOIN mes.partida op       ON op.id = opp.partida_id
-LEFT JOIN mes.partida p                 ON p.id = op.partida_id
+LEFT JOIN mes.partida_paso_ejecucion pe ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
+LEFT JOIN mes.partida_paso pp          ON pp.id = pe.partida_paso_id
+LEFT JOIN mes.partida p                ON p.id = pp.partida_id
 LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_cliente_id;
 
 
@@ -434,10 +398,10 @@ SELECT
     COUNT(*) AS cantidad_rollos
 FROM inventario.lote l
 JOIN vw_items vi ON vi.item_id = l.item_id AND vi.item_tipo_codigo = 'ROLLO'
-JOIN mes.partida_paso opp ON opp.id = l.documento_id
-JOIN mes.partida op ON op.id = opp.partida_id
-JOIN mes.partida p ON op.partida_id = p.id
-WHERE l.documento_tipo = 'partida_paso'
+JOIN mes.partida_paso_ejecucion pe ON pe.id = l.documento_id
+JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+JOIN mes.partida p ON p.id = pp.partida_id
+WHERE l.documento_tipo = 'partida_paso_ejecucion'
 GROUP BY p.id, l.item_id, vi.item_codigo, vi.item_nombre;
 
 -- ── inventario.vw_stock_general ───────────────────────────────
@@ -511,9 +475,7 @@ ORDER BY art.nombre, i.nombre;
 */
 
 -- ── inventario.vw_stock_rollos_crudos ─────────────────────────
--- Undyed rolls in stock. No color, no quality state, no dyeing specs —
--- those are meaningless until the roll is processed.
--- One row per (item × propietario).
+-- Undyed rolls in stock. One row per (item × propietario).
 CREATE OR REPLACE VIEW inventario.vw_stock_rollos_crudos AS
 SELECT
     sa.item_id,
@@ -538,7 +500,7 @@ JOIN item_rollo_detalle ird         ON ird.item_id = i.id
 JOIN articulo art                   ON art.id = ird.articulo_id
 LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = sa.lote_id
 LEFT JOIN tercero c                 ON c.id = l.propietario_id
-WHERE lrd.flg_tenido = false OR lrd.lote_id IS NULL
+WHERE lrd.flg_tenido IS NOT TRUE
 GROUP BY
     sa.item_id, i.codigo, i.nombre, u.codigo,
     ird.articulo_id, art.nombre, art.articulo_tipo_id, ird.flg_rib, art.fibra,
@@ -600,16 +562,13 @@ GROUP BY
 ORDER BY art.nombre, vc.color, i.nombre;
 
 -- ── inventario.vw_stock_insumos ───────────────────────────────
--- Insumos are fungible (no lote tracking), so we aggregate directly from
--- item_movimientos with the item_tipo filter applied before the GROUP BY.
--- Avoids vw_stock_actual whose HAVING clause blocks predicate pushdown.
--- Index on item_movimientos(item_id) will be used after idx_im_item_id is added.
+-- Reads from maintained saldo_item — no aggregation at query time.
 CREATE OR REPLACE VIEW inventario.vw_stock_insumos AS
 SELECT
-    im.item_id,
+    si.item_id,
     i.codigo            AS item_codigo,
     i.nombre            AS item_nombre,
-    SUM(im.cantidad * imt.factor) AS cantidad_total,
+    si.cantidad_actual  AS cantidad_total,
     un.codigo           AS unidad_codigo,
     iid.insumo_tipo_id,
     intp.codigo         AS insumo_tipo_codigo,
@@ -617,19 +576,14 @@ SELECT
     iid.colorante_tipo_id,
     ct.codigo           AS colorante_tipo_codigo,
     ct.nombre           AS colorante_tipo_nombre
-FROM inventario.item_movimientos im
-JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-JOIN item i   ON i.id = im.item_id
-JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
-JOIN unidad un ON un.id = i.unidad_id
-LEFT JOIN item_insumo_detalle iid  ON iid.item_id = im.item_id
+FROM inventario.saldo_item si
+JOIN item i        ON i.id = si.item_id
+JOIN item_tipo it  ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
+JOIN unidad un     ON un.id = i.unidad_id
+LEFT JOIN item_insumo_detalle iid  ON iid.item_id = si.item_id
 LEFT JOIN insumo_tipo intp         ON intp.id = iid.insumo_tipo_id
 LEFT JOIN colorante_tipo ct        ON ct.id = iid.colorante_tipo_id
-GROUP BY
-    im.item_id, i.codigo, i.nombre, un.codigo,
-    iid.insumo_tipo_id, intp.codigo, intp.nombre,
-    iid.colorante_tipo_id, ct.codigo, ct.nombre
-HAVING SUM(im.cantidad * imt.factor) > 0;
+WHERE si.cantidad_actual > 0;
 
 -- ── inventario.vw_precio_promedio_insumos ────────────────────
 -- Weighted average cost per insumo item.
@@ -699,6 +653,11 @@ LEFT JOIN vw_items vi ON vi.item_id = sa.item_id
 LEFT JOIN inventario.lote l ON l.id = sa.lote_id;
 
 -- ── calidad.vw_lotes_pendientes_inspeccion ────────────────────
+-- Shows all ROLLO lotes pending QC:
+--   Output rolls: created by a partida_paso_ejecucion (always eligible)
+--   Input rolls:  assigned via partida_componente to an EN_PRODUCCION partida
+-- Step/machine context comes from the ejecucion path (NULL for input rolls).
+-- Partida context is resolved from whichever path applies.
 DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion;
 CREATE OR REPLACE VIEW calidad.vw_lotes_pendientes_inspeccion AS
 SELECT
@@ -709,13 +668,15 @@ SELECT
     vi.item_nombre,
     l.documento_tipo,
     l.documento_id,
-    opp.id AS partida_paso_id,
-    m.id AS maquina_id,
-    m.codigo AS maquina_codigo,
-    o.id AS operacion_id,
-    o.codigo AS operacion_codigo,
-    p.id AS partida_id,
-    EXTRACT(YEAR FROM p.fyh_cre) || '-' || p.numero AS partida_codigo,
+    COALESCE(pe.id,     active_ppe.ejecucion_id)        AS partida_paso_ejecucion_id,
+    COALESCE(pp.id,     active_ppe.paso_id)             AS partida_paso_id,
+    m.id                                                AS maquina_id,
+    m.codigo                                            AS maquina_codigo,
+    o.id                                                AS operacion_id,
+    o.codigo                                            AS operacion_codigo,
+    p.id                                                AS partida_id,
+    p.partida_origen_id,
+    EXTRACT(YEAR FROM p.fyh_cre) || '-' || p.numero    AS partida_codigo,
     p.ancho,
     p.rendimiento,
     p.malla,
@@ -726,18 +687,42 @@ SELECT
     c.nombre AS cliente_nombre,
     l.fyh_cre AS fecha_creacion_lote
 FROM inventario.lote l
-LEFT JOIN vw_items vi ON vi.item_id = l.item_id
-LEFT JOIN mes.partida_paso opp
-    ON opp.id = l.documento_id AND l.documento_tipo = 'partida_paso'
-LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
-LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id
-LEFT JOIN mes.partida op ON op.id = opp.partida_id
-LEFT JOIN mes.partida p ON p.id = op.partida_id
-LEFT JOIN tercero c ON l.propietario_id = c.id
+JOIN vw_items vi ON vi.item_id = l.item_id AND vi.item_tipo_codigo = 'ROLLO'
+LEFT JOIN mes.partida_paso_ejecucion pe
+    ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
+LEFT JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+LEFT JOIN mes.partida_componente pc ON pc.lote_id = l.id
+-- For input rolls: resolve the currently active paso ejecucion in the assigned partida
+LEFT JOIN LATERAL (
+    SELECT ppe.id           AS ejecucion_id,
+           ppe.maquina_id   AS active_maquina_id,
+           pp2.id           AS paso_id,
+           pp2.operacion_id AS active_operacion_id
+    FROM mes.partida_paso_ejecucion ppe
+    JOIN mes.partida_paso pp2 ON pp2.id = ppe.partida_paso_id
+    WHERE pp2.partida_id = pc.partida_id
+      AND ppe.estado = 'EN_PROCESO'
+      AND pe.id IS NULL
+    LIMIT 1
+) active_ppe ON true
+LEFT JOIN mes.operacion o ON o.id = COALESCE(pp.operacion_id, active_ppe.active_operacion_id)
+LEFT JOIN mes.maquina m   ON m.id = COALESCE(pe.maquina_id,   active_ppe.active_maquina_id)
+LEFT JOIN mes.partida p ON p.id = COALESCE(pp.partida_id, pc.partida_id)
+LEFT JOIN tercero c    ON c.id  = l.propietario_id
 LEFT JOIN prioridad pr ON pr.id = p.prioridad_id
-WHERE l.estado_calidad = 'PENDIENTE'
-  AND vi.item_tipo_codigo = 'ROLLO'
-  AND l.documento_tipo = 'partida_paso';
+WHERE (
+    -- Output roll: ejecucion exists, no inspection recorded for it yet
+    (pe.id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM calidad.inspeccion ci
+        WHERE ci.lote_id = l.id AND ci.partida_paso_ejecucion_id = pe.id
+    ))
+    OR
+    -- Input roll: currently active in a paso, no inspection recorded for that paso yet
+    (active_ppe.ejecucion_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM calidad.inspeccion ci
+        WHERE ci.lote_id = l.id AND ci.partida_paso_ejecucion_id = active_ppe.ejecucion_id
+    ))
+);
 
 -- ── calidad.vw_inspecciones ───────────────────────────────────
 CREATE OR REPLACE VIEW calidad.vw_inspecciones AS
@@ -747,7 +732,7 @@ SELECT
     l.item_id,
     vi.item_codigo,
     vi.item_nombre,
-    i.partida_paso_id,
+    i.partida_paso_ejecucion_id,
     i.resultado,
     i.observacion,
     i.empleado_id,
@@ -773,36 +758,43 @@ JOIN mes.empleado_rol er ON er.id = e.rol_id
 WHERE e.activo = true;
 
 -- ── mes.vw_pasos ──────────────────────────────────────────────
+-- Execution columns (estado, fyh_inicio/fin, maquina, empleado) come from the
+-- latest partida_paso_ejecucion row — they were removed from partida_paso in step 04.
+-- maquina_planificada_id replaces the dropped maquina_asignada_id on partida_paso.
 CREATE OR REPLACE VIEW mes.vw_pasos AS
 SELECT
-    opp.id AS paso_id,
-    opp.secuencia,
-    opp.partida_id,
-    op.partida_id,
+    pp.id AS paso_id,
+    pp.secuencia,
+    pp.partida_id,
     p.numero AS partida_numero,
     EXTRACT(YEAR FROM p.fyh_cre) || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
-    opp.operacion_id,
+    pp.operacion_id,
     o.codigo AS operacion_codigo,
     o.nombre AS operacion_nombre,
     o.requiere_receta,
     o.requiere_maquina,
-    opp.maquina_asignada_id,
-    opp.receta_id,
+    pp.maquina_planificada_id,
+    pp.receta_id,
     m.codigo AS maquina_codigo,
     m.nombre AS maquina_nombre,
-    opp.estado,
-    opp.fyh_inicio,
-    opp.fyh_fin,
-    opp.flg_genera_produccion,
-    opp.empleado_id,
-    e.nombre || ' ' || e.apellido AS empleado_nombre,
-    opp.observacion_backfill
-FROM mes.partida_paso opp
-JOIN mes.partida op ON op.id = opp.partida_id
-JOIN mes.partida p ON p.id = op.partida_id
-JOIN mes.operacion o ON o.id = opp.operacion_id
-LEFT JOIN mes.maquina m ON m.id = opp.maquina_asignada_id
-LEFT JOIN mes.empleado e ON e.id = opp.empleado_id;
+    -- Derived execution state: PENDIENTE when no ejecucion rows exist
+    CASE
+        WHEN pe.id IS NOT NULL AND pe.estado = 'COMPLETADO' THEN 'COMPLETADO'
+        WHEN pe.id IS NOT NULL AND pe.estado = 'EN_PROCESO' THEN 'EN_PROCESO'
+        WHEN pe.id IS NOT NULL AND pe.estado = 'OMITIDO'    THEN 'OMITIDO'
+        ELSE 'PENDIENTE'
+    END AS estado
+FROM mes.partida_paso pp
+JOIN mes.partida p ON p.id = pp.partida_id
+JOIN mes.operacion o ON o.id = pp.operacion_id
+LEFT JOIN LATERAL (
+    SELECT id, estado, maquina_id
+    FROM mes.partida_paso_ejecucion
+    WHERE partida_paso_id = pp.id
+    ORDER BY fyh_inicio DESC NULLS LAST
+    LIMIT 1
+) pe ON true
+LEFT JOIN mes.maquina m ON m.id = COALESCE(pe.maquina_id, pp.maquina_planificada_id);
 
 -- ── inventario.vw_items_movimientos ───────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_items_movimientos AS
@@ -847,7 +839,7 @@ WITH
 
   partidas_kpi AS (
     SELECT
-      COUNT(*) FILTER (WHERE estado IN ('CONFIRMADA','EN_PRODUCCION','ENTREGA_PARCIAL')) AS activas,
+      COUNT(*) FILTER (WHERE estado_produccion NOT IN ('CERRADA','CANCELADA'))          AS activas,
       COUNT(*) FILTER (WHERE fyh_cre >= (SELECT d FROM ini_mes))                        AS creadas_mes_actual,
       COUNT(*) FILTER (WHERE fyh_cre >= (SELECT d FROM ini_ant)
                          AND fyh_cre <  (SELECT d FROM ini_mes))                        AS creadas_mes_anterior
@@ -856,20 +848,25 @@ WITH
 
   ordenes_kpi AS (
     SELECT
-      COUNT(*) FILTER (WHERE estado NOT IN ('FINALIZADA','CANCELADA')) AS activas,
-      COUNT(*) FILTER (WHERE fyh_cre >= (SELECT d FROM ini_mes))       AS creadas_mes_actual,
+      COUNT(*) FILTER (WHERE estado_produccion NOT IN ('CERRADA','CANCELADA')) AS activas,
+      COUNT(*) FILTER (WHERE fyh_cre >= (SELECT d FROM ini_mes))               AS creadas_mes_actual,
       COUNT(*) FILTER (WHERE fyh_cre >= (SELECT d FROM ini_ant)
-                         AND fyh_cre <  (SELECT d FROM ini_mes))       AS creadas_mes_anterior
+                         AND fyh_cre <  (SELECT d FROM ini_mes))               AS creadas_mes_anterior
     FROM mes.partida
   ),
 
   pasos_kpi AS (
     SELECT
-      COUNT(*) FILTER (WHERE opp.estado = 'PENDIENTE')  AS pendientes,
-      COUNT(*) FILTER (WHERE opp.estado = 'EN_partida') AS en_partida
-    FROM mes.partida_paso opp
-    JOIN mes.partida op ON op.id = opp.partida_id
-    WHERE op.estado NOT IN ('FINALIZADA','CANCELADA')
+      COUNT(*) FILTER (WHERE NOT EXISTS (
+          SELECT 1 FROM mes.partida_paso_ejecucion pe WHERE pe.partida_paso_id = pp.id
+      ))                                                                        AS pendientes,
+      COUNT(*) FILTER (WHERE EXISTS (
+          SELECT 1 FROM mes.partida_paso_ejecucion pe
+          WHERE pe.partida_paso_id = pp.id AND pe.estado = 'EN_PROCESO'
+      ))                                                                        AS en_partida
+    FROM mes.partida_paso pp
+    JOIN mes.partida p ON p.id = pp.partida_id
+    WHERE p.estado_produccion NOT IN ('CERRADA','CANCELADA')
   ),
 
   rollos_kpi AS (
@@ -922,27 +919,29 @@ FROM (
   UNION ALL
 
   SELECT
-    'ORDEN_FINALIZADA',
-    'Orden #' || op.id::TEXT || ' finalizada',
-    op.fyh_fin,
-    op.id,
-    op.id::TEXT
-  FROM mes.partida op
-  WHERE op.fyh_fin >= now() - interval '30 days'
-    AND op.estado = 'FINALIZADA'
+    'PARTIDA_CERRADA',
+    'Partida #' || p.numero::TEXT || ' cerrada',
+    p.fyh_fin,
+    p.id,
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0')
+  FROM mes.partida p
+  WHERE p.fyh_fin >= now() - interval '30 days'
+    AND p.fyh_fin <= now()
+    AND p.estado_produccion = 'CERRADA'
 
   UNION ALL
 
   SELECT
     'PASO_COMPLETADO',
     'Paso completado: ' || o.nombre,
-    opp.fyh_fin,
-    opp.id,
-    opp.id::TEXT
-  FROM mes.partida_paso opp
-  JOIN mes.operacion o ON o.id = opp.operacion_id
-  WHERE opp.fyh_fin >= now() - interval '7 days'
-    AND opp.estado = 'COMPLETADO'
+    pe.fyh_fin,
+    pp.id,
+    pp.id::TEXT
+  FROM mes.partida_paso pp
+  JOIN mes.operacion o ON o.id = pp.operacion_id
+  JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+  WHERE pe.fyh_fin >= now() - interval '7 days'
+    AND pe.estado = 'COMPLETADO'
 ) feed
 ORDER BY fyh DESC
 LIMIT 20;
@@ -954,24 +953,25 @@ CREATE OR REPLACE VIEW public.vw_dashboard_tareas AS
 SELECT tipo, descripcion, count, urgencia
 FROM (
   SELECT
-    'SIN_ORDEN'   AS tipo,
-    'Partidas confirmadas sin orden de producción' AS descripcion,
+    'SIN_RUTA'    AS tipo,
+    'Partidas confirmadas sin ruta de producción' AS descripcion,
     COUNT(*)::INT AS count,
     'alta'        AS urgencia
   FROM mes.partida p
-  WHERE p.estado = 'CONFIRMADA'
-    AND NOT EXISTS (SELECT 1 FROM mes.partida op WHERE op.partida_id = p.id)
+  WHERE p.estado_produccion = 'CREADA'
+    AND NOT EXISTS (SELECT 1 FROM mes.partida_paso pp WHERE pp.partida_id = p.id)
 
   UNION ALL
 
   SELECT
     'PASO_VENCIDO',
-    'Pasos con más de 24h en partida',
+    'Pasos con más de 24h en ejecución',
     COUNT(*)::INT,
     'alta'
-  FROM mes.partida_paso
-  WHERE estado = 'EN_partida'
-    AND fyh_inicio < now() - interval '24 hours'
+  FROM mes.partida_paso pp
+  JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+  WHERE pe.estado = 'EN_PROCESO'
+    AND pe.fyh_inicio < now() - interval '24 hours'
 
   UNION ALL
 
@@ -981,18 +981,19 @@ FROM (
     COUNT(*)::INT,
     'alta'
   FROM mes.partida
-  WHERE estado IN ('CREADA','CONFIRMADA','EN_PRODUCCION','ENTREGA_PARCIAL','DEVUELTA_PARCIAL')
+  WHERE estado_produccion IN ('CREADA','PLANIFICADA','PROGRAMADA','EN_PRODUCCION','TECO')
     AND fecha_acordada BETWEEN CURRENT_DATE AND CURRENT_DATE + 3
 
   UNION ALL
 
   SELECT
     'SIN_MAQUINA',
-    'Pasos en partida sin máquina asignada',
+    'Pasos en ejecución sin máquina asignada',
     COUNT(*)::INT,
     'media'
-  FROM mes.partida_paso
-  WHERE estado = 'EN_partida' AND maquina_asignada_id IS NULL
+  FROM mes.partida_paso pp
+  JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+  WHERE pe.estado = 'EN_PROCESO' AND pe.maquina_id IS NULL
 ) t
 WHERE count > 0
 ORDER BY CASE urgencia WHEN 'alta' THEN 1 ELSE 2 END;
@@ -1022,7 +1023,7 @@ FROM doc.guia_remision gr
 JOIN doc.guia_remision_tipo grt         ON grt.id = gr.guia_remision_tipo_id
 JOIN tercero t                          ON t.id = gr.tercero_id
 JOIN inventario.lote_rollo_detalle lrd  ON lrd.guia_remision_id = gr.id
-JOIN inventario.lote l                  ON l.id = lrd.lote_id AND l.flg_elm = false
+JOIN inventario.lote l                  ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
 LEFT JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
 GROUP BY gr.id, gr.serie, gr.correlativo, gr.fecha_emision, gr.tercero_id,
          t.nombre, grt.codigo;
@@ -1060,3 +1061,61 @@ GRANT USAGE ON SCHEMA calidad    TO authenticated;
 GRANT INSERT ON calidad.inspeccion      TO authenticated;
 GRANT INSERT ON calidad.inspeccion_foto TO authenticated;
 GRANT UPDATE ON mes.operacion           TO authenticated;
+
+/*
+-- ═══════════════════════════════════════════════════════════════
+-- REVERSAL — undoes step 8 in full. Run then comment back out.
+-- Views that depend on other views here are covered by CASCADE.
+-- Non-view grants (INSERT/UPDATE on tables, schema USAGE) must
+-- be revoked explicitly — dropping the views doesn't touch them.
+-- ═══════════════════════════════════════════════════════════════
+
+-- public views
+DROP VIEW IF EXISTS public.vw_dashboard_tareas             CASCADE;
+DROP VIEW IF EXISTS public.vw_dashboard_actividad_reciente CASCADE;
+DROP VIEW IF EXISTS public.vw_dashboard_kpis               CASCADE;
+
+-- calidad views
+DROP VIEW IF EXISTS calidad.vw_inspecciones                CASCADE;
+DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion CASCADE;
+
+-- mes views
+DROP VIEW IF EXISTS mes.vw_pasos                           CASCADE;
+DROP VIEW IF EXISTS mes.vw_empleados_activos               CASCADE;
+DROP VIEW IF EXISTS mes.vw_maquinas                        CASCADE;
+DROP VIEW IF EXISTS mes.vw_partida_resumen_tenido          CASCADE;
+DROP VIEW IF EXISTS mes.vw_partida_produccion_rollos       CASCADE;
+DROP VIEW IF EXISTS mes.vw_partidas                        CASCADE;
+
+-- inventario views (dependent on vw_stock_actual — drop before it)
+DROP VIEW IF EXISTS inventario.vw_rollos_por_guia          CASCADE;
+DROP VIEW IF EXISTS inventario.vw_lotes_rollos_despachados CASCADE;
+DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock       CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_rollos_tenidos     CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_rollos_crudos      CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_general            CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_insumos            CASCADE;
+DROP VIEW IF EXISTS inventario.vw_lotes_disponibles        CASCADE;
+DROP VIEW IF EXISTS inventario.vw_precio_promedio_insumos  CASCADE;
+DROP VIEW IF EXISTS inventario.vw_item_proveedor_guia      CASCADE;
+DROP VIEW IF EXISTS inventario.vw_items_movimientos        CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_actual             CASCADE;
+
+-- doc views
+DROP VIEW IF EXISTS doc.vw_compras                         CASCADE;
+
+-- public base views (other views may depend — drop last)
+DROP VIEW IF EXISTS vw_items                               CASCADE;
+DROP VIEW IF EXISTS vw_colores                             CASCADE;
+
+-- Non-view grants on tables (not removed by DROP VIEW)
+REVOKE INSERT ON calidad.inspeccion      FROM authenticated;
+REVOKE INSERT ON calidad.inspeccion_foto FROM authenticated;
+REVOKE UPDATE ON mes.operacion           FROM authenticated;
+
+-- Schema USAGE grants added in this file
+-- (doc USAGE was also granted in step 7 — leave that revoke to step 7's reversal)
+REVOKE USAGE ON SCHEMA mes        FROM authenticated;
+REVOKE USAGE ON SCHEMA inventario FROM authenticated;
+REVOKE USAGE ON SCHEMA calidad    FROM authenticated;
+*/

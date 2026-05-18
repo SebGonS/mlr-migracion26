@@ -11,27 +11,82 @@ DECLARE
     v_context   text;
     v_sqlstate  text;
     v_inspeccion_id BIGINT;
-    v_usr_id int := get_user_id();
+    v_usr_id        int  := get_user_id();
+    v_lote_id       int  := (p_inspeccion->>'lote_id')::INT;
+    v_ejecucion_id  BIGINT;
+    v_es_output     BOOLEAN;
 BEGIN
     IF NOT jwt_has_permission('calidad.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere calidad.crear'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
+    -- Resolve lote type and ejecucion_id.
+    -- Output rolls: auto-populate from lote.documento_id so the per-ejecucion
+    -- view filter can detect this inspection even if the caller omits the field.
+    -- Input rolls: caller must supply partida_paso_ejecucion_id explicitly.
+    SELECT l.documento_tipo = 'partida_paso_ejecucion',
+           COALESCE(
+               (p_inspeccion->>'partida_paso_ejecucion_id')::BIGINT,
+               CASE WHEN l.documento_tipo = 'partida_paso_ejecucion'
+                    THEN l.documento_id::BIGINT END
+           )
+    INTO v_es_output, v_ejecucion_id
+    FROM inventario.lote l
+    WHERE l.id = v_lote_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Lote % no encontrado.', v_lote_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Eligibility: output roll or input roll in a running partida
+    IF NOT (
+        v_es_output
+        OR EXISTS (
+            SELECT 1 FROM mes.partida_componente pc
+            JOIN mes.partida p ON p.id = pc.partida_id
+            WHERE pc.lote_id = v_lote_id AND p.estado_produccion = 'EN_PRODUCCION'
+        )
+    ) THEN
+        RAISE EXCEPTION 'Lote % no está asociado a una partida activa.', v_lote_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Input rolls must link to an active paso so the view filter works correctly
+    IF NOT v_es_output AND v_ejecucion_id IS NULL THEN
+        RAISE EXCEPTION 'Se requiere partida_paso_ejecucion_id para inspección de rollo de entrada.'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Input rolls: verify the lote is actually a component of the partida owning this ejecucion
+    IF NOT v_es_output THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM mes.partida_componente pc2
+            JOIN mes.partida_paso pp2        ON pp2.partida_id = pc2.partida_id
+            JOIN mes.partida_paso_ejecucion ppe ON ppe.partida_paso_id = pp2.id
+            WHERE pc2.lote_id = v_lote_id AND ppe.id = v_ejecucion_id
+        ) THEN
+            RAISE EXCEPTION 'Lote % no es componente de la partida en ejecución %.', v_lote_id, v_ejecucion_id
+                USING ERRCODE = 'invalid_parameter_value';
+        END IF;
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('crear_inspeccion', v_usr_id, p_inspeccion);
 
     -- Parent: inspeccion
-    INSERT INTO calidad.inspeccion (lote_id, partida_paso_id, resultado, observacion, empleado_id)
+    INSERT INTO calidad.inspeccion (lote_id, partida_paso_ejecucion_id, resultado, observacion, empleado_id)
     VALUES (
-        (p_inspeccion->>'lote_id')::INT,
-        (p_inspeccion->>'partida_paso_id')::BIGINT,
+        v_lote_id,
+        v_ejecucion_id,
         (p_inspeccion->>'resultado')::calidad_estado_enum,
         p_inspeccion->>'observacion',
         (p_inspeccion->>'empleado_id')::INT
     )
     RETURNING id INTO v_inspeccion_id;  
-
+     
     -- Children: defectos + fotos (fotos nested inside each defecto in the JSON)
     WITH defectos_inserted AS (
         INSERT INTO calidad.inspeccion_defecto (inspeccion_id, tipo_defecto_id, cantidad, observacion)
@@ -112,7 +167,7 @@ BEGIN
     SELECT jsonb_build_object(
         'id', i.id,
         'lote_id', i.lote_id,
-        'partida_paso_id', i.partida_paso_id,
+        'partida_paso_ejecucion_id', i.partida_paso_ejecucion_id,
         'resultado', i.resultado,
         'observacion', i.observacion,
         'empleado_id', i.empleado_id,

@@ -1,7 +1,7 @@
 # MLR Database Schema Manual
 
 **Manufacturas la Real — Supabase/PostgreSQL backend**
-Last updated: 2026-03-17
+Last updated: 2026-05-16
 
 This document is the authoritative reference for all schemas, tables, functions, views, and triggers in the MLR system. It explains *what* each piece does, *why* it exists, and *how* the parts work together.
 
@@ -31,8 +31,7 @@ This document is the authoritative reference for all schemas, tables, functions,
 MLR is a textile dyeing/finishing service company. The database models:
 
 - **Client rolls arrive** as raw fabric (crudo) → tracked as inventory lots (`inventario.lote`).
-- **Sales orders** (`doc.partida`) capture what the client wants processed (color, type, quantity).
-- **Production orders** (`mes.orden_produccion`) are created against those sales orders and pass the rolls through a sequence of operations (dyeing, washing, drying, etc.).
+- **Production orders** (`mes.partida`) capture what the client wants processed (color, type, quantity) and drive the physical execution through a sequence of operations (dyeing, washing, drying, etc.).
 - **Recipes** (`receta.tenido`, `receta.lavado_maquina`) define the chemical steps and ingredients for each operation.
 - **Quality inspections** (`calidad.inspeccion`) are recorded per roll after each production step.
 - **Inventory movements** (`inventario.item_movimientos`) record every stock change with full traceability.
@@ -44,29 +43,21 @@ MLR is a textile dyeing/finishing service company. The database models:
 CLIENT SENDS ROLLS
       │
       ▼
-doc.guia_remision (CLIENTE_ENVIO_partida)
+doc.guia_remision (CLIENTE_ENVIO_PROCESO)
       │  creates inventario.lote per roll
       ▼
-doc.partida  ←── partida_detalle (what to process: item × qty)
+mes.partida  ←── mes.partida_detalle (what to process: item × qty)
       │
-      ▼
-mes.orden_produccion
-      │
-      ├── mes.orden_produccion_paso  (sequence: TENIDO → LAVADO_HIDRO → SECADO…)
+      ├── mes.partida_paso  (sequence: TENIDO → LAVADO_HIDRO → SECADO…)
       │         │  each paso may reference receta.tenido or be a standalone op
       │         │
       │         ▼
-      │   inventario.pesaje (weighing gate per roll)
+      │   mes.partida_paso_ejecucion  (actual execution run per paso)
       │         │
       │         ▼
       │   calidad.inspeccion  (QC per roll per paso)
       │
-      ├── mes.orden_produccion_item  (which specific lotes go into this order)
-      │
-      └── mes.orden_produccion_paso_item (lote ↔ paso assignment)
-              │
-              ▼
-        inventario.item_movimientos  (all stock in/out)
+      └── mes.partida_componente  (which specific lotes go into this order)
 
 ROLLS DISPATCHED
       │
@@ -85,7 +76,7 @@ doc.factura  (billing)
 |--------|---------|
 | `public` | Master data shared across all modules (items, terceros, units, legacy tables) |
 | `inventario` | Lot and movement tracking — the stock ledger |
-| `doc` | Commercial documents: sales orders, delivery notes, purchase orders, invoices |
+| `doc` | Commercial documents: delivery notes, purchase orders, invoices |
 | `mes` | Manufacturing Execution System: machines, operations, production orders, scheduling |
 | `receta` | Dyeing and machine-wash recipes with chemical step details |
 | `calidad` | Quality control inspections, defects, photos |
@@ -133,7 +124,7 @@ Tables with `flg_elm` support soft delete:
 
 The `fn_trg_set_elm_fields()` trigger auto-fills `usr_elm`/`fyh_elm` when `flg_elm` transitions from false → true.
 
-**Hard deletes are blocked** on `doc.partida`, `doc.guia_remision`, `inventario.lote`, and `mes.orden_produccion` via the `fn_trg_prevent_hard_delete()` trigger. `doc.factura` blocks hard delete only once emitted/annulled.
+**Hard deletes are blocked** on `doc.guia_remision`, `inventario.lote`, and `mes.partida` via the `fn_trg_prevent_hard_delete()` trigger. `doc.factura` blocks hard delete only once emitted/annulled.
 
 ### 3.4 `doc_movimiento_id` — Posting Events
 
@@ -146,7 +137,8 @@ A polymorphic FK pattern. Used on `inventario.item_movimientos` and `inventario.
 | `documento_tipo` | `documento_id` | Meaning |
 |-----------------|---------------|---------|
 | `'COMPRA'` | doc.compra.id | Purchase receipt |
-| `'ORDEN_PRODUCCION_PASO'` | mes.orden_produccion_paso.id | Production step output |
+| `'PARTIDA'` | mes.partida.id | Production order (roll ingress) |
+| `'partida_paso_ejecucion'` | mes.partida_paso_ejecucion.id | Production step execution output |
 | `'CUADRE'` | inventario.cuadre.id | Inventory adjustment |
 | `'LAVADO_MAQUINA'` | mes.lavado_maquina.id | Machine wash execution |
 
@@ -261,7 +253,7 @@ A **lot** is the minimum unit of stock identity. For rolls, **1 lot = 1 physical
 | `documento_tipo` / `documento_id` | What document created this lot (polymorphic) |
 | `cantidad` | Weight in kg (must be > 0) |
 | `detalles` | JSONB for ad-hoc attributes (e.g. `color_x_cliente_id`, `ancho`) |
-| `estado_calidad` | QC state: PENDIENTE / APROBADO / RECHAZADO / REpartida / CUARENTENA |
+| `estado_calidad` | QC state: PENDIENTE / APROBADO / RECHAZADO / REPROCESO / CUARENTENA |
 | `propietario_id` | References `tercero.id` — the client who owns this material |
 
 The sequence is maintained in `lote_secuencia_anual` (one row per year), incremented by the `trfn_generar_secuencia_lote()` trigger on INSERT.
@@ -273,7 +265,7 @@ Created when a roll is physically weighed on-site. This is the **weighing gate**
 | Column | Notes |
 |--------|-------|
 | `lote_id` | The roll being weighed (NOT NULL) |
-| `orden_produccion_id` | Which production order this weighing belongs to |
+| `partida_id` | Which production order this weighing belongs to |
 | `peso_real` | Actual weight recorded on scale |
 
 ### 5.4 `inventario.item_movimiento_tipo` — Movement Type Catalog
@@ -293,8 +285,8 @@ Key movement type codes:
 | `COMPRA_ING` | + | Purchase receipt (recalculates MAP) |
 | `SERV_ING` | + | Client sends material for processing |
 | `SERV_EGR` | - | Processed material dispatched to client |
-| `PROD_CONSUMO` | - | Chemical consumed in production |
-| `PROD_ING` | + | Finished product enters stock |
+| `PROD_CONSUMO` | - | Raw roll consumed entering dyeing |
+| `PROD_ING` | + | Finished (dyed) roll enters stock |
 | `AJUSTE_POS` / `AJUSTE_NEG` | +/- | Physical count adjustment |
 | `MUESTRA_ING` / `MUESTRA_EGR` | +/- | Sample movements (non-valorizable) |
 
@@ -344,33 +336,9 @@ The `inventario.finalizar_cuadre()` function posts `AJUSTE_NEG` (deficits) and `
 
 ## 6. Schema: `doc` — Commercial Documents
 
-### 6.1 `doc.partida` — Sales Order (the central document)
+Note: the former `doc.partida` (sales order) has been merged into `mes.partida`. The `doc` schema now covers purely commercial paper: delivery notes, purchase records, and invoices.
 
-The **sales order** is the top-level commercial contract for one job. Everything downstream traces back to it.
-
-| Column | Notes |
-|--------|-------|
-| `numero` | Human-facing sequential number |
-| `tercero_id` | The client |
-| `tenido_id` | Legacy tenido reference (dyeing type) |
-| `color_x_cliente_id` | The specific color specification for this client |
-| `malla` / `rendimiento` / `ancho` | Fabric specs |
-| `flg_antipilling` | Whether antipilling process is required |
-| `fecha_acordada` | Agreed delivery date |
-| `estado` | `partida_estado_enum`: CREADA → CONFIRMADA → EN_PRODUCCION → ENTREGADA → FACTURADA → CERRADA |
-| `estado_facturacion` | `partida_facturacion_enum`: pendiente / parcial / facturado (billing axis, independent of production state) |
-
-**`doc.partida_detalle`** — Intent lines. One row per item type requested in the order.
-
-| Column | Notes |
-|--------|-------|
-| `item_id` | References `item` (a ROLLO item type) |
-| `cantidad` | Roll count requested |
-| `unidad_id` | Unit (rolls) |
-
-**Key rule:** `partida_detalle` is **pure intent/demand**. It has no `lote_id` — specific lots are assigned in `mes.orden_produccion_item` at execution time.
-
-### 6.2 `doc.guia_remision` — Delivery Notes
+### 6.1 `doc.guia_remision` — Delivery Notes
 
 Physical transport documents (guias de remisión). Direction (inbound/outbound) determined by `guia_remision_tipo.flg_emitida`:
 - `flg_emitida = false` → MLR receives (inbound: purchases, client material arrivals)
@@ -381,7 +349,7 @@ Physical transport documents (guias de remisión). Direction (inbound/outbound) 
 | Code | Direction | Meaning |
 |------|-----------|---------|
 | `COMPRA_INGRESO` | In | Inbound purchase of supplies |
-| `CLIENTE_ENVIO_partida` | In | Client sends rolls for processing |
+| `CLIENTE_ENVIO_PROCESO` | In | Client sends rolls for processing |
 | `DESPACHO_CLIENTE` | Out | Processed rolls returned to client |
 | `VENTA_EGRESO` | Out | Product sold to client |
 | `DEVOLUCION_CLIENTE_CRUDO` | Out | Raw rolls returned to client (unprocessed) |
@@ -393,7 +361,7 @@ Each `guia_remision_tipo` links to an `inventario.item_movimiento_tipo` so that 
 
 **`doc.guia_remision_detalle`** — line items on the delivery note. One row per roll. Has `lote_id` — lots are created at guia insertion time for inbound guias.
 
-### 6.3 `doc.compra` — Purchase Record
+### 6.2 `doc.compra` — Purchase Record
 
 Groups the purchase event. Links to:
 - `doc.compra_detalle` — what was purchased (item × qty × price)
@@ -402,7 +370,7 @@ Groups the purchase event. Links to:
 
 Inventory movements for a purchase are posted via the guia, not the compra directly.
 
-### 6.4 `doc.factura_proveedor` — Supplier Invoice
+### 6.3 `doc.factura_proveedor` — Supplier Invoice
 
 | Column | Notes |
 |--------|-------|
@@ -414,7 +382,7 @@ Inventory movements for a purchase are posted via the guia, not the compra direc
 
 **`doc.letra`** — payment drafts (letras de cambio) linked to a supplier invoice. States: emitida → pagada / vencida / protestada / anulada.
 
-### 6.5 `doc.factura` — Customer Invoice
+### 6.4 `doc.factura` — Customer Invoice
 
 Emitted customer invoices (SUNAT facturas, boletas, notas de crédito/débito).
 
@@ -430,7 +398,7 @@ Emitted customer invoices (SUNAT facturas, boletas, notas de crédito/débito).
 
 | Column | Notes |
 |--------|-------|
-| `partida_id` | Links billing back to the sales order |
+| `partida_id` | Links billing back to the production order |
 | `cantidad` × `precio_unitario` | Line qty and price |
 | `igv_porcentaje` | 18% standard, 0% for exports |
 | `subtotal_linea` / `igv_linea` / `total_linea` | Generated stored columns (no rounding drift) |
@@ -463,50 +431,88 @@ Emitted customer invoices (SUNAT facturas, boletas, notas de crédito/débito).
 
 **`mes.ruta_plantilla`** / **`mes.ruta_plantilla_detalle`** — reusable production route templates. A template is a sequence of operations (with standard time/pH/temp) that can be copied onto a new production order.
 
-### 7.2 Production Order Hierarchy
+### 7.2 Production Order (`mes.partida`)
+
+`mes.partida` is the **unified production/service order** — it combines what was historically split between a commercial sales order and a manufacturing order. This follows the ISA-88 batch order model: one document drives both the commercial intent and the physical execution.
 
 ```
-doc.partida
-    └── mes.orden_produccion  (one per job, can be NORMAL/REpartida/AJUSTE)
-            ├── mes.orden_produccion_paso  (one per process step: TENIDO, LAVADO, etc.)
-            │       └── mes.orden_produccion_paso_item  (which lot goes through this paso)
-            └── mes.orden_produccion_item  (which physical lots are assigned to this order)
+mes.partida
+    ├── mes.partida_detalle      (what to produce: item × qty target)
+    ├── mes.partida_paso         (planned route: step sequence)
+    │       └── mes.partida_paso_ejecucion  (actual execution run per step)
+    └── mes.partida_componente   (SAP RESB equivalent: roll and insumo assignments)
 ```
 
-**`mes.orden_produccion`**
+**`mes.partida`**
 
 | Column | Notes |
 |--------|-------|
-| `partida_id` | Parent sales order |
-| `tipo` | NORMAL / REpartida / AJUSTE |
-| `orden_origen_id` | Self-FK: for REpartida, which original order this reprocesses |
-| `estado` | Full lifecycle enum (see below) |
+| `tercero_id` | The client |
+| `tenido_id` | Dyeing method reference |
+| `color_x_cliente_id` | Client's color specification |
+| `articulo_tipo_id` | Fabric knit type |
+| `fibra` | Fiber composition code |
+| `malla` / `rendimiento` / `ancho` | Fabric specs |
+| `flg_antipilling` | Whether antipilling process is required |
+| `partida_origen_id` | Self-FK: for REPROCESO orders, references the original partida |
+| `estado_produccion` | `partida_estado_produccion_enum` — production lifecycle axis |
+| `estado_comercial` | `partida_estado_comercial_enum` — commercial/delivery axis |
+| `fyh_inicio` / `fyh_fin` | Actual production start/end timestamps |
 
-States: `CREADA → PLANIFICADA → PROGRAMADA → LIBERADA → EN_partida → PAUSADA → FINALIZADA → TECO → CERRADA` | `CANCELADA`
+**Production states** (`estado_produccion`):
+`CREADA → PLANIFICADA → PROGRAMADA → EN_PRODUCCION → TECO → CERRADA | CANCELADA`
 
-**`mes.orden_produccion_paso`** — one step in the production sequence.
+**Commercial states** (`estado_comercial`):
+`PENDIENTE → ENTREGA_PARCIAL → ENTREGADA | DEVUELTA_PARCIAL | DEVUELTA_TOTAL`
+
+**REPROCESO orders (rework):** When a batch requires reprocessing, a new child `mes.partida` is created with `partida_origen_id` pointing to the original order. The child copies the parent's fabric specs but has its own `partida_detalle` with the adjusted (reprocessed) roll count. This is the SAP PP/PPI split model: the original order's target remains unchanged; the child order tracks the rework scope. Constraint `chk_rework_comercial_locked` enforces that rework orders always stay `estado_comercial = 'PENDIENTE'` — they are never billed independently.
+
+**`mes.partida_detalle`** — production target lines. One row per item type.
 
 | Column | Notes |
 |--------|-------|
-| `secuencia` | Order within the production order |
-| `operacion_id` | What type of step this is |
-| `maquina_asignada_id` | Which machine runs this step |
-| `receta_id` | References `receta.tenido` (only when `operacion.requiere_receta = true`) |
-| `estado` | PENDIENTE → EN_partida → COMPLETADO | OMITIDO |
-| `flg_genera_produccion` | true = this paso generates output lots (inventory ingress) |
-| `fyh_inicio` / `fyh_fin` | Actual start/end timestamps |
+| `item_id` | References `item` (a ROLLO item type) |
+| `cantidad` | Roll count target |
+| `unidad_id` | Unit (rolls) |
 
-**`mes.orden_produccion_item`** — maps physical lots to a production order. The specific rolls assigned to process.
+**Key rule:** `partida_detalle` is **pure planning intent**. It has no `lote_id` — specific lots are assigned in `mes.partida_componente` at execution time.
 
-**`mes.orden_produccion_paso_item`** — maps specific lots to a specific step within the order.
+### 7.3 Production Route (`mes.partida_paso`)
 
-### 7.3 Scheduling Board
+One row per planned process step. Created when the route is defined (PLANIFICADA state).
+
+| Column | Notes |
+|--------|-------|
+| `partida_id` | Parent production order |
+| `secuencia` | Step order (smallint) |
+| `operacion_id` | What type of step (TENIDO, LAVADO, etc.) |
+| `maquina_planificada_id` | Planned machine |
+
+**`mes.partida_paso_ejecucion`** — actual execution run for a step. A paso can have multiple executions (e.g. dyeing retries). Tracks real start/end timestamps, machine used, and operator.
+
+### 7.4 Component Assignment (`mes.partida_componente`)
+
+The unified component reservation table (≈ SAP RESB). Covers all components of a partida in a single table, discriminated by which columns are populated:
+
+| Row type | `lote_id` | `item_id` | `partida_paso_id` | Meaning |
+|----------|-----------|-----------|-------------------|---------|
+| Roll | NOT NULL | NULL | NULL | A specific roll lot assigned to this order |
+| Insumo | NULL | NOT NULL | NOT NULL | A chemical reservation for a specific paso |
+
+Constraints enforce this cleanly:
+- `chk_resb_tipo` — CHECK ensures only one of the two patterns above is valid per row.
+- `uq_resb_roll` — partial unique index on `(partida_id, lote_id) WHERE lote_id IS NOT NULL` — one roll per order.
+- `uq_resb_insumo` — partial unique index on `(partida_paso_id, item_id) WHERE item_id IS NOT NULL` — one chemical reservation per step per item.
+
+For insumo rows, `cantidad_reservada` holds the recipe quantity scaled to the actual batch weight — serves as the expected consumption baseline for variance alerts.
+
+### 7.5 Scheduling Board
 
 **`mes.programacion`** — machine-centric daily schedule.
 
 | Column | Notes |
 |--------|-------|
-| `actividad_tipo` | `'ORDEN_PRODUCCION_PASO'` or `'LAVADO_MAQUINA'` |
+| `actividad_tipo` | `'partida_paso_ejecucion'` or `'LAVADO_MAQUINA'` |
 | `actividad_id` | FK to the corresponding entity (polymorphic) |
 | `maquina_id` | Which machine |
 | `fecha` | Date of the slot |
@@ -514,7 +520,7 @@ States: `CREADA → PLANIFICADA → PROGRAMADA → LIBERADA → EN_partida → P
 
 UNIQUE constraint `(maquina_id, fecha, secuencia)` prevents double-booking.
 
-### 7.4 Machine Wash
+### 7.6 Machine Wash
 
 Machine washes are **standalone activities** (not attached to a production order).
 
@@ -524,7 +530,7 @@ Machine washes are **standalone activities** (not attached to a production order
 |--------|-------|
 | `receta_id` | References `receta.lavado_maquina` |
 | `maquina_id` | Which machine is being washed |
-| `estado` | PENDIENTE → EN_partida → COMPLETADO | OMITIDO |
+| `estado` | PENDIENTE → EN_PROCESO → COMPLETADO | OMITIDO |
 
 Chemical consumption during a wash is posted to `inventario.item_movimientos` with `documento_tipo = 'LAVADO_MAQUINA'`.
 
@@ -538,7 +544,7 @@ There are two separate, non-unified recipe headers:
 
 | Table | Used by | Keyed by |
 |-------|---------|---------|
-| `receta.tenido` | `mes.orden_produccion_paso` | color × articulo_tipo × fibra × tenido × antipilling |
+| `receta.tenido` | `mes.partida_paso_ejecucion` | color × articulo_tipo × fibra × tenido × antipilling |
 | `receta.lavado_maquina` | `mes.lavado_maquina` | machine type × from-value × to-value transition |
 
 They are intentionally separate because they have different domain attributes and different consumers. Do not unify them.
@@ -608,8 +614,8 @@ One inspection per roll per production step.
 | Column | Notes |
 |--------|-------|
 | `lote_id` | The roll being inspected |
-| `orden_produccion_paso_id` | Which step generated this roll |
-| `resultado` | calidad_estado_enum: PENDIENTE / APROBADO / RECHAZADO / REpartida / CUARENTENA |
+| `partida_paso_ejecucion_id` | Which execution run generated this roll |
+| `resultado` | calidad_estado_enum: PENDIENTE / APROBADO / RECHAZADO / REPROCESO / CUARENTENA |
 | `empleado_id` | Who performed the inspection |
 
 Creating an inspection also **updates `inventario.lote.estado_calidad`** to match the result.
@@ -645,7 +651,7 @@ Immutable log of every INSERT/UPDATE/DELETE on audited tables.
 Populated by the `audit.fn_audit_row()` trigger, which is attached to all high-value tables.
 
 **Which tables have full audit (INSERT+UPDATE+DELETE):**
-`tercero`, `doc.partida`, `doc.partida_detalle`, `doc.guia_remision`, `doc.guia_remision_detalle`, `mes.ruta_plantilla`, `mes.ruta_plantilla_detalle`, `mes.orden_produccion_paso`, `doc.factura_proveedor`, `doc.compra`, `doc.letra`, `doc.factura`
+`tercero`, `mes.partida`, `mes.partida_detalle`, `doc.guia_remision`, `doc.guia_remision_detalle`, `mes.ruta_plantilla`, `mes.ruta_plantilla_detalle`, `mes.partida_paso`, `doc.factura_proveedor`, `doc.compra`, `doc.letra`, `doc.factura`
 
 ---
 
@@ -691,22 +697,19 @@ All functions use `SECURITY DEFINER` and explicit `SET search_path` to prevent s
 
 ### 11.4 MES Functions (funciones/mes.sql)
 
-The mes.sql file contains the core manufacturing execution functions:
-
 | Function | Description |
 |----------|-------------|
-| `mes.get_programacion_diaria(p_fecha)` → JSONB | Returns the full daily scheduling board for all machines on a given date. Includes both `ORDEN_PRODUCCION_PASO` and `LAVADO_MAQUINA` activities. |
+| `mes.get_programacion_diaria(p_fecha)` → JSONB | Returns the full daily scheduling board for all machines on a given date. Includes both `partida_paso_ejecucion` and `LAVADO_MAQUINA` activities. |
 | `mes.get_actividades_sin_programar()` → JSONB | Returns all unscheduled activities (both production steps and wash jobs) in a unified list. |
-| `mes.get_pasos_sin_programar()` → JSONB | Backward-compat version returning only unscheduled production steps. |
-| `mes.calcular_fifo(p_items JSONB)` → JSONB | Internal FIFO resolver. Given `[{item_id, cantidad}, ...]`, resolves which specific lots to consume in FIFO order. Returns `[{item_id, lote_id, ubicacion_id, cantidad}, ...]`. Used by `finalizar_cuadre` and production consumption. |
-| `mes.iniciar_lavado(...)` | Starts a machine wash execution: sets estado = EN_partida, records fyh_inicio. |
+| `mes.calcular_fifo(p_items JSONB)` → JSONB | Internal FIFO resolver. Given `[{item_id, cantidad}, ...]`, resolves which specific lots to consume in FIFO order. Returns `[{item_id, lote_id, ubicacion_id, cantidad}, ...]`. |
+| `mes.iniciar_lavado(...)` | Starts a machine wash execution: sets estado = EN_PROCESO, records fyh_inicio. |
 | `mes.finalizar_lavado(...)` | Completes a machine wash: sets estado = COMPLETADO, records fyh_fin, posts chemical consumption movements. |
 
 ### 11.5 Recipe Functions
 
 | Function | Description |
 |----------|-------------|
-| `receta.crear_tenido(p_color_x_cliente_id, p_articulo_tipo_id, p_fibra, p_tenido_id, ...)` → INT | Creates a new dyeing recipe in EN_DESARROLLO state. Steps/insumos are added separately via direct INSERT (guarded by estado check). Returns new `receta.tenido.id`. |
+| `receta.crear_tenido(...)` → INT | Creates a new dyeing recipe in EN_DESARROLLO state. Returns new `receta.tenido.id`. |
 | `receta.transicionar_tenido(p_receta_id, p_estado_codigo)` | Transitions a recipe to a new state. On APROBADO: atomically moves any existing approved recipe for the same spec to HISTORICO first. |
 
 ### 11.6 Quality Functions
@@ -757,18 +760,16 @@ The mes.sql file contains the core manufacturing execution functions:
 
 | View | Description |
 |------|-------------|
-| `vw_partidas_lista_comercial` | Sales order list view for the commercial/admin UI. Aggregates totals (roll count, rib vs regular), days since creation, whether production orders exist. |
 | `vw_compras` | Purchase list view with aggregated line totals, guia count, letter totals and payment status. |
-| `partida_resumen_tenido` | Per-partida summary of rolls by articulo type: total, regular, rib counts. |
 
 ### `mes` schema
 
 | View | Description |
 |------|-------------|
-| `vw_ordenes_produccion` | Production order list with step progress stats (total/completed/in-process/pending), material totals, duration. |
+| `vw_partidas_produccion` | Production order list with step progress stats (total/completed/in-process/pending), material totals, duration. |
 | `vw_pasos` | Production step details including operation, machine, step state, start/end times. |
 | `vw_maquinas` | Machines with their type details. |
-| `vw_partida_produccion_rollos` | Roll output count per sales order per item type (from completed production). |
+| `vw_partida_rollos` | Roll output count per production order per item type (from completed executions). |
 
 ### `calidad` schema
 
@@ -791,35 +792,44 @@ The mes.sql file contains the core manufacturing execution functions:
 ### Flow 1: Client Sends Rolls for Processing
 
 1. Client arrives with rolls.
-2. Create `doc.guia_remision` type `CLIENTE_ENVIO_partida`.
+2. Create `doc.guia_remision` type `CLIENTE_ENVIO_PROCESO`.
 3. Add one `doc.guia_remision_detalle` row per roll, each with a new `inventario.lote`.
 4. An `inventario.item_movimientos` row (type `SERV_ING`) is posted for each roll.
 5. Rolls are now in stock with `propietario_id = client's tercero.id`.
 
-### Flow 2: Create a Sales Order (Partida)
+### Flow 2: Create a Production Order (Partida)
 
-1. Create `doc.partida` with the client, color spec, and process requirements.
-2. Add `doc.partida_detalle` rows declaring how many rolls of each item type.
-3. Partida estado = `CREADA`.
+1. Create `mes.partida` with the client, color spec, fabric specs, and process requirements.
+2. Add `mes.partida_detalle` rows declaring how many rolls of each item type.
+3. Partida `estado_produccion = 'CREADA'`, `estado_comercial = 'PENDIENTE'`.
 
-### Flow 3: Create and Execute a Production Order
+### Flow 3: Plan and Execute a Production Order
 
-1. Create `mes.orden_produccion` linked to the partida.
-2. Add `mes.orden_produccion_paso` rows in sequence (e.g. TERMOFIJADO → TENIDO → LAVADO_HIDRO → SECADO).
-3. Assign the recipe (`receta.tenido`) to dyeing steps.
-4. Add `mes.orden_produccion_item` rows: which specific lots go into this order.
-5. Schedule: create `mes.programacion` rows mapping pasos to machines and dates.
-6. Weigh rolls: create `inventario.pesaje` rows (one per roll). This is the weighing gate.
-7. Execute each step (update `orden_produccion_paso.estado` to EN_partida → COMPLETADO).
-8. For steps with `flg_genera_produccion = true`: create output lots and post `PROD_ING` movements.
-9. QC: call `calidad.crear_inspeccion()` for each roll after each relevant step.
+1. Define the route: add `mes.partida_paso` rows in sequence (e.g. TENIDO → LAVADO_HIDRO → SECADO). Partida moves to `PLANIFICADA`.
+2. Assign rolls: add `mes.partida_componente` rows (roll type: `lote_id IS NOT NULL`, `item_id IS NULL`).
+3. Reserve insumos: add `mes.partida_componente` rows (insumo type: `item_id IS NOT NULL`, `partida_paso_id IS NOT NULL`, `cantidad_reservada` = scaled recipe qty).
+4. Schedule: create `mes.programacion` rows mapping pasos to machines and dates. Partida moves to `PROGRAMADA`.
+5. Weigh rolls: create `inventario.pesaje` rows (one per roll). This is the weighing gate.
+6. Start execution: create `mes.partida_paso_ejecucion` for each step. Partida moves to `EN_PRODUCCION`.
+7. Post `PROD_CONSUMO` movements for raw rolls consumed, `PROD_ING` for dyed rolls produced.
+8. QC: call `calidad.crear_inspeccion()` for each roll after each relevant step.
+9. On completion: partida moves to `TECO`, then `CERRADA` after settlement.
+
+### Flow 3b: Rework (REPROCESO)
+
+1. Create a child `mes.partida` with `partida_origen_id = original partida.id`.
+2. Copy parent's fabric specs; set `partida_detalle.cantidad` to the reprocessed roll count only.
+3. Add a single `mes.partida_paso` (TENIDO) and execute as normal.
+4. `estado_comercial` stays `PENDIENTE` — rework is never billed independently (`chk_rework_comercial_locked`).
+5. No second `PROD_CONSUMO` for the same rolls — the original ingress covers both runs.
 
 ### Flow 4: Dispatch Processed Rolls to Client
 
 1. Create `doc.guia_remision` type `DESPACHO_CLIENTE`.
 2. Add one `guia_remision_detalle` per roll with its `lote_id`.
 3. Post `SERV_EGR` movement for each roll. Stock reaches zero for those lots.
-4. Rolls now appear in `vw_lotes_rollos_despachados`.
+4. Update `mes.partida.estado_comercial` to `ENTREGADA`.
+5. Rolls now appear in `vw_lotes_rollos_despachados`.
 
 ### Flow 5: Inventory Reconciliation (Cuadre)
 
@@ -865,8 +875,13 @@ Files must be applied in this exact order to a fresh database:
 | 08 | `08_views.sql` | All views |
 | 09 | `09_constraints_audit.sql` | Immutability triggers, hard-delete guards, `audit.data_audit`, REVOKEs, lote sequence trigger |
 | 10 | `10_auth.sql` | JWT hook, RLS policies |
-| 11 | `11_data_migration.sql` | Migrates data from legacy tables |
-| 12 | `12_triggers_audit.sql` | Audit INSERT/UPDATE triggers (must run AFTER data migration) |
+| 11 | `11_data_migration.sql` | Migrates data from legacy tables into the new schema |
+| 12 | `12_triggers_audit.sql` | Audit INSERT/UPDATE triggers (must run AFTER data migration to avoid noise) |
+
+**Notes on file 11:**
+- Runs in two transactions separated by an explicit `COMMIT`. The second block disables the `trg_bi_lote_secuencia` trigger and drops the `secuencia NOT NULL` constraint for the bulk lote insert, then restores them.
+- `SET statement_timeout = 0` is issued before the second block — the roll lote + movement CTE chain takes several minutes.
+- `partida_tipo_enum` (defined in `02_enums.sql`) is not used by any table after the migration; it was a discarded intermediate design artifact.
 
 **Function files** (`funciones/*.sql`) are applied after all migration steps. They can be re-run (all use `CREATE OR REPLACE`):
 

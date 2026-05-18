@@ -24,6 +24,8 @@ migration/
   10_auth.sql                 — JWT hook, RLS policies
   11_data_migration.sql       — data migration from legacy tables
   12_triggers_audit.sql       — audit cre/mod/elm triggers (run after data migration)
+  14_cuadre_cutoff.sql        — inventory cutoff trigger (blocks retroactive movements past a closed cuadre)
+  15_alerts_schema.sql        — alert infrastructure (persistent notifications, alertas schema, pg_cron)
 
 funciones/
   core.sql        — item query functions
@@ -32,11 +34,14 @@ funciones/
   receta.sql      — recipe lifecycle functions
   calidad.sql     — quality inspection functions
   compras.sql     — purchase and payment functions
+  despacho.sql    — dispatch and delivery functions
+  facturacion.sql — invoicing functions
+  alertas.sql     — alert evaluation cron functions
 ```
 
 ## Apply Order
 
-Run migration files 01 → 12 in order, then all funciones files (order within funciones doesn't matter).
+Run migration files 01 → 12, then 14 → 15 in order, then all funciones files (order within funciones doesn't matter).
 
 ## Future Improvements
 

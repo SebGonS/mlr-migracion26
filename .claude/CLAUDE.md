@@ -41,6 +41,16 @@ Extract patterns, not vendor-specific artifacts. Avoid proposing alternatives th
 
 You must explicitly state why each condition is satisfied.
 
+   Exception — Configuration/Customizing Tables:
+   Rule 4 does not apply to configuration tables that meet ALL of the following:
+
+* They centralize business rules otherwise scattered across multiple functions
+* Runtime changeability without code deployment is a genuine operational need
+* They follow established ERP customizing patterns (SAP T-tables, Odoo config models)
+
+   Even under this exception, prefer a single centralized function over a config table
+   when the rules are few, stable, and already implicit in the function logic.
+
 5. Prefer Column Extension Over Entity Explosion
    If variation is:
 

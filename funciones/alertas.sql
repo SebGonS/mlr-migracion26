@@ -49,8 +49,8 @@ BEGIN
         WHERE r.code = ANY(ARRAY['jefe_planta', 'compras'])
     ) ur
     WHERE p.fecha_acordada < now()
-      AND p.estado NOT IN ('CERRADA', 'CANCELADA', 'FACTURADA')
-      AND p.flg_elm = false
+      AND p.estado_produccion NOT IN ('CERRADA', 'CANCELADA')
+      AND p.fyh_elm IS NULL
       AND NOT EXISTS (
           SELECT 1 FROM notification.notifications n
           WHERE n.user_id     = ur.user_id
@@ -69,7 +69,7 @@ BEGIN
       AND fyh_resuelta IS NULL
       AND objeto_id IN (
           SELECT id FROM mes.partida
-          WHERE estado IN ('CERRADA', 'CANCELADA', 'FACTURADA')
+          WHERE estado_produccion IN ('CERRADA', 'CANCELADA')
              OR fecha_acordada >= now()
       );
 END;
@@ -122,7 +122,7 @@ BEGIN
         JOIN iam.rol r ON r.id = ur.rol_id
         WHERE r.code = ANY(ARRAY['jefe_planta', 'supervisor_produccion'])
     ) ur
-    WHERE grt.codigo = 'CLIENTE_ENVIO_partida'
+    WHERE grt.codigo = 'CLIENTE_ENVIO_PROCESO'
       AND gr.fyh_cre < now() - interval '5 days'
       AND NOT EXISTS (
           SELECT 1
@@ -211,7 +211,7 @@ BEGIN
         LEFT JOIN stock_actual  sa ON sa.item_id = i.id
         LEFT JOIN consumo_60d   c  ON c.item_id  = i.id
         LEFT JOIN actividad_90d a  ON a.item_id  = i.id
-        WHERE i.flg_elm = false
+        WHERE i.fyh_elm IS NULL
           AND (i.stock_minimo IS NOT NULL OR a.item_id IS NOT NULL)
           AND COALESCE(sa.cantidad, 0) < COALESCE(i.stock_minimo, COALESCE(c.avg_daily, 0) * 7)
           AND COALESCE(i.stock_minimo, COALESCE(c.avg_daily, 0) * 7) > 0
@@ -311,13 +311,13 @@ BEGIN
             )                                                               AS kg_demandado
         FROM mes.partida_paso pp
         JOIN mes.operacion op          ON op.id = pp.operacion_id AND op.requiere_receta = true
-        JOIN mes.partida_componente pc ON pc.partida_id = pp.partida_id
+        JOIN mes.partida_componente pc ON pc.partida_id = pp.partida_id AND pc.lote_id IS NOT NULL
         JOIN receta.tenido rt          ON rt.id = pp.receta_id AND rt.flg_produccion = true
         JOIN receta.tenido_paso rtp    ON rtp.receta_id = rt.id
         JOIN receta.tenido_paso_insumo tpi ON tpi.paso_id = rtp.id
         WHERE NOT EXISTS (
-            SELECT 1 FROM mes.paso_ejecucion pe
-            WHERE pe.paso_id = pp.id AND pe.estado = 'COMPLETADO'
+            SELECT 1 FROM mes.partida_paso_ejecucion pe
+            WHERE pe.partida_paso_id = pp.id AND pe.estado = 'COMPLETADO'
         )
         GROUP BY pp.id, tpi.item_id
     ),
@@ -391,14 +391,14 @@ BEGIN
                   )                                                AS kg_demandado
               FROM mes.partida_paso pp
               JOIN mes.operacion op          ON op.id = pp.operacion_id AND op.requiere_receta = true
-              JOIN mes.partida_componente pc ON pc.partida_id = pp.partida_id
+              JOIN mes.partida_componente pc ON pc.partida_id = pp.partida_id AND pc.lote_id IS NOT NULL
               JOIN receta.tenido rt          ON rt.id = pp.receta_id AND rt.flg_produccion = true
               JOIN receta.tenido_paso rtp    ON rtp.receta_id = rt.id
               JOIN receta.tenido_paso_insumo tpi ON tpi.paso_id = rtp.id
               WHERE pp.id = n.objeto_id
                 AND NOT EXISTS (
-                    SELECT 1 FROM mes.paso_ejecucion pe
-                    WHERE pe.paso_id = pp.id AND pe.estado = 'COMPLETADO'
+                    SELECT 1 FROM mes.partida_paso_ejecucion pe
+                    WHERE pe.partida_paso_id = pp.id AND pe.estado = 'COMPLETADO'
                 )
               GROUP BY pp.id, tpi.item_id
           ),

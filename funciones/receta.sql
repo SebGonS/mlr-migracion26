@@ -40,8 +40,8 @@ DECLARE
     v_estado_id SMALLINT;
     v_usr_id    INT := get_user_id();
 BEGIN
-    IF NOT jwt_has_permission('configuracion.admin') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+    IF NOT jwt_has_permission('produccion.configurar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.configurar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
@@ -102,8 +102,8 @@ DECLARE
     v_historico_id SMALLINT;
     v_usr_id       INT := get_user_id();
 BEGIN
-    IF NOT jwt_has_permission('configuracion.admin') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+    IF NOT jwt_has_permission('produccion.configurar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.configurar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
@@ -283,8 +283,8 @@ DECLARE
     v_receta receta.tenido%ROWTYPE;
     v_usr_id INT := get_user_id();
 BEGIN
-    IF NOT jwt_has_permission('configuracion.admin') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+    IF NOT jwt_has_permission('produccion.configurar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.configurar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
@@ -359,8 +359,8 @@ DECLARE
     v_id     INT;
     v_usr_id INT := get_user_id();
 BEGIN
-    IF NOT jwt_has_permission('configuracion.admin') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+    IF NOT jwt_has_permission('produccion.configurar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.configurar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
@@ -422,8 +422,8 @@ DECLARE
     v_receta receta.lavado_maquina%ROWTYPE;
     v_usr_id INT := get_user_id();
 BEGIN
-    IF NOT jwt_has_permission('configuracion.admin') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+    IF NOT jwt_has_permission('produccion.configurar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.configurar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
@@ -463,8 +463,8 @@ AS $$
 DECLARE
     v_usr_id INT := get_user_id();
 BEGIN
-    IF NOT jwt_has_permission('configuracion.admin') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+    IF NOT jwt_has_permission('produccion.configurar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.configurar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
@@ -499,8 +499,8 @@ AS $$
 DECLARE
     v_usr_id INT := get_user_id();
 BEGIN
-    IF NOT jwt_has_permission('configuracion.admin') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere configuracion.admin'
+    IF NOT jwt_has_permission('produccion.configurar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.configurar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
@@ -614,7 +614,7 @@ $$;
 --   articulo_tipo_id, fibra
 -- flg_antipilling is context-sensitive:
 --   NORMAL tipo_receta  → use partida.flg_antipilling
---   REpartida tipo_receta → force false (antipilling is applied only on first dyeing)
+--   REPROCESO tipo_receta → force false (antipilling is applied only on first dyeing)
 --   p_tipo_receta_id NULL → use partida.flg_antipilling as-is (safe for existence checks)
 --
 -- Returns NULL when no approved recipe exists yet for the combination.
@@ -653,10 +653,10 @@ BEGIN
 
     SELECT flg_antipilling INTO v_flg_antipill FROM mes.partida WHERE id = p_partida_id;
 
-    -- REpartida: antipilling already applied on first dyeing — always match false
+    -- REPROCESO: antipilling already applied on first dyeing — always match false
     IF p_tipo_receta_id IS NOT NULL THEN
         SELECT partida_tipo INTO v_op_tipo FROM tipo_receta WHERE id = p_tipo_receta_id;
-        IF v_op_tipo = 'REpartida' THEN
+        IF v_op_tipo = 'REPROCESO' THEN
             v_flg_antipill := false;
         END IF;
     END IF;

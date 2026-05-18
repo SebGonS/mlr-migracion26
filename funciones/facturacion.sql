@@ -201,13 +201,6 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION doc.fn_precio_info(SMALLINT, INT, INT, SMALLINT, INT, SMALLINT, BOOLEAN)
-    TO authenticated;
-
-GRANT EXECUTE ON FUNCTION doc.fn_get_costo_receta(INT)
-    TO authenticated;
-
-
 -- ── doc.upsert_catalogo_precio ────────────────────────────────
 -- Changes a price: closes the currently active row (sets fyh_elm)
 -- and inserts a new active row. Both happen atomically.
@@ -245,6 +238,18 @@ BEGIN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('upsert_catalogo_precio', v_usr_id, jsonb_build_object(
+        'operacion_id', p_operacion_id,
+        'color_x_cliente_id', p_color_x_cliente_id,
+        'tercero_id', p_tercero_id,
+        'articulo_tipo_id', p_articulo_tipo_id,
+        'tenido_id', p_tenido_id,
+        'fibra', p_fibra,
+        'flg_antipilling', p_flg_antipilling,
+        'precio_kg', p_precio_kg
+    ));
 
     IF p_color_x_cliente_id IS NOT NULL AND p_tercero_id IS NOT NULL THEN
         RAISE EXCEPTION 'color_x_cliente_id and tercero_id are mutually exclusive';
@@ -331,19 +336,20 @@ AS $$
             -- Distinct completed operaciones across ALL ops for this partida (repartida included)
             ARRAY(
                 SELECT DISTINCT opp.operacion_id
-                FROM mes.partida op
-                JOIN mes.partida_paso opp ON opp.partida_id = op.id
-                WHERE op.partida_id = p.id
-                  AND op.flg_elm = false
-                  AND opp.estado = 'COMPLETADO'
+                FROM mes.partida_paso opp
+                WHERE opp.partida_id = p.id
+                  AND EXISTS (
+                      SELECT 1 FROM mes.partida_paso_ejecucion pe_c
+                      WHERE pe_c.partida_paso_id = opp.id AND pe_c.estado = 'COMPLETADO'
+                  )
             ) AS operacion_ids
         FROM mes.partida p
         -- fibra only — articulo_tipo_id comes directly from partida
-        JOIN mes.partida op_r    ON op_r.partida_id = p.id AND op_r.flg_elm = false
-        JOIN mes.partida_componente opi ON opi.partida_id = op_r.id
-        JOIN item_rollo_detalle ird        ON ird.item_id = opi.item_id
-        JOIN articulo ar                   ON ar.id = ird.articulo_id
-        WHERE p.id = ANY(p_partida_ids) AND p.flg_elm = false
+        JOIN mes.partida_componente opi ON opi.partida_id = p.id AND opi.lote_id IS NOT NULL
+        JOIN inventario.lote opi_l      ON opi_l.id = opi.lote_id
+        JOIN item_rollo_detalle ird      ON ird.item_id = opi_l.item_id
+        JOIN articulo ar                 ON ar.id = ird.articulo_id
+        WHERE p.id = ANY(p_partida_ids) AND p.fyh_elm IS NULL
         ORDER BY p.id
     ),
     lineas AS (
@@ -430,9 +436,8 @@ FROM mes.partida p
 JOIN color_x_cliente cxc           ON cxc.id = p.color_x_cliente_id
 JOIN public.color c                ON c.id   = cxc.color_id
 JOIN tercero t                     ON t.id   = cxc.tercero_id
-JOIN mes.partida op_h     ON op_h.partida_id = p.id AND op_h.flg_elm = false
-JOIN mes.partida_paso opp ON opp.partida_id = op_h.id
-                                   AND opp.estado = 'COMPLETADO'
+JOIN mes.partida_paso opp ON opp.partida_id = p.id
+    AND EXISTS (SELECT 1 FROM mes.partida_paso_ejecucion pe_c WHERE pe_c.partida_paso_id = opp.id AND pe_c.estado = 'COMPLETADO')
 JOIN mes.operacion op              ON op.id = opp.operacion_id
 -- For TENIDO: expand into variants needing pricing (false always; true when partida has antipilling)
 -- For other ops: single NULL variant
@@ -447,15 +452,16 @@ CROSS JOIN LATERAL (
 CROSS JOIN LATERAL (
     SELECT ar2.fibra::smallint AS fibra
     FROM mes.partida_componente opi2
-    JOIN item_rollo_detalle ird2 ON ird2.item_id = opi2.item_id
+    JOIN inventario.lote opi2_l  ON opi2_l.id = opi2.lote_id
+    JOIN item_rollo_detalle ird2 ON ird2.item_id = opi2_l.item_id
     JOIN articulo ar2            ON ar2.id = ird2.articulo_id
-    WHERE opi2.partida_id = op_h.id
+    WHERE opi2.partida_id = p.id AND opi2.lote_id IS NOT NULL
     LIMIT 1
 ) ar
 JOIN public.articulo_tipo aty    ON aty.id = p.articulo_tipo_id
 LEFT JOIN tenido ten             ON ten.id = p.tenido_id AND op.codigo = 'TENIDO'
 WHERE
-    p.flg_elm = false
+    p.fyh_elm IS NULL
     AND p.estado_facturacion <> 'facturado'
     AND NOT EXISTS (
         SELECT 1 FROM doc.catalogo_precios cp
@@ -491,7 +497,7 @@ GRANT SELECT ON doc.vw_precios_pendientes TO authenticated;
 --   "observacion":       "...",           -- nullable
 --   "lineas": [
 --     {
---       "guia_remision_id":   456,        -- ingress guia CLIENTE_ENVIO_partida (nullable for ad-hoc/MLR rolls)
+--       "guia_remision_id":   456,        -- ingress guia CLIENTE_ENVIO_PROCESO (nullable for ad-hoc/MLR rolls)
 --       "partida_id":         123,        -- traceability (nullable)
 --       "operacion_id":       1,          -- service billed (nullable for ad-hoc)
 --       "es_antipilling":     false,
@@ -510,9 +516,10 @@ CREATE OR REPLACE FUNCTION doc.registrar_factura_cliente(p_factura JSONB)
 RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'iam', 'doc', 'public'
+SET search_path TO 'iam', 'doc', 'mes', 'public'
 AS $$
 DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id     INT := get_user_id();
     v_factura_id BIGINT;
     v_subtotal   NUMERIC(12,2);
@@ -522,6 +529,20 @@ BEGIN
     IF NOT jwt_has_permission('comercial.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
             USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_factura_cliente', v_usr_id, p_factura);
+
+    IF NOT (p_factura ? 'lineas') OR jsonb_array_length(p_factura->'lineas') = 0 THEN
+        RAISE EXCEPTION 'La factura debe tener al menos una línea de detalle.';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM jsonb_array_elements(p_factura->'lineas') l
+        WHERE COALESCE((l->>'precio_unitario')::NUMERIC, 0) <= 0
+    ) THEN
+        RAISE EXCEPTION 'Todas las líneas deben tener un precio unitario mayor a cero.';
     END IF;
 
     -- Insert header with placeholder totals; updated after lines are inserted
@@ -592,7 +613,31 @@ BEGIN
         total    = v_total
     WHERE id = v_factura_id;
 
+    -- Auto-close partidas that are now fully billed
+    UPDATE mes.partida p
+    SET estado_facturacion = 'facturado',
+        usr_mod = v_usr_id,
+        fyh_mod = NOW()
+    WHERE p.id IN (
+        SELECT DISTINCT (l->>'partida_id')::BIGINT
+        FROM jsonb_array_elements(p_factura->'lineas') l
+        WHERE l->>'partida_id' IS NOT NULL
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM doc.vw_pendientes_facturacion vpf
+        WHERE vpf.partida_id = p.id
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM doc.vw_aprobados_sin_despacho vas
+        WHERE vas.partida_id = p.id
+    );
+
     RETURN v_factura_id;
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_factura_cliente - User: %, Error: %', v_usr_id, v_message;
+    RAISE;
 END;
 $$;
 
@@ -601,7 +646,7 @@ $$;
 -- Live view of billable lines with remaining unbilled weight.
 -- One row per (ingress guia × partida × operacion × billing dimensions × antipilling).
 --
--- guia_remision_id = the CLIENTE_ENVIO_partida guia (client's own reference,
+-- guia_remision_id = the CLIENTE_ENVIO_PROCESO guia (client's own reference,
 -- appears on invoice description as "Ref. [serie]-[correlativo]").
 -- Weight is aggregated across ALL dispatch events that trace back to the same
 -- ingress guia + partida combination.
@@ -660,25 +705,24 @@ WITH lineas AS (
     JOIN doc.guia_remision_tipo grt    ON grt.id = gr.guia_remision_tipo_id
                                       AND grt.codigo = 'DESPACHO_CLIENTE'
     JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
-    -- Dispatched lote is always a dyed OUTPUT lote (documento_tipo = 'partida_paso')
+    -- Dispatched lote is always a dyed OUTPUT lote (documento_tipo = 'partida_paso_ejecucion')
     JOIN inventario.lote l             ON l.id = grd.lote_id
-                                      AND l.documento_tipo = 'partida_paso'
+                                      AND l.documento_tipo = 'partida_paso_ejecucion'
     -- Ingress guia + source lote carried forward in lote_rollo_detalle by registrar_produccion
     LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
     LEFT JOIN doc.guia_remision gr_ing          ON gr_ing.id = lrd.guia_remision_id
     -- Source lote: input lote before dyeing — used for billing weight (input weight)
     LEFT JOIN inventario.lote source_l          ON source_l.id = lrd.origen_lote_id
-    -- Trace: output lote → OPP → OP → partida
-    JOIN mes.partida_paso opp_out ON opp_out.id = l.documento_id
-    JOIN mes.partida op_out       ON op_out.id  = opp_out.partida_id
-                                          AND op_out.flg_elm = false
-    JOIN mes.partida p                     ON p.id = op_out.partida_id
-                                          AND p.flg_elm = false
+    -- Trace: output lote → ejecucion → paso → partida
+    JOIN mes.partida_paso_ejecucion pe_out ON pe_out.id = l.documento_id
+    JOIN mes.partida_paso opp_out ON opp_out.id = pe_out.partida_paso_id
+    JOIN mes.partida p            ON p.id = opp_out.partida_id
+                                          AND p.fyh_elm IS NULL
     JOIN tercero t                         ON t.id = p.tercero_id
-    -- Only completed operations from the SAME OP that produced this output lote.
+    -- Only completed operations from the SAME partida that produced this output lote.
     -- A repartida roll is billed separately when its own output is dispatched.
-    JOIN mes.partida_paso opp     ON opp.partida_id = op_out.id
-                                          AND opp.estado = 'COMPLETADO'
+    JOIN mes.partida_paso opp ON opp.partida_id = p.id
+        AND EXISTS (SELECT 1 FROM mes.partida_paso_ejecucion pe_c WHERE pe_c.partida_paso_id = opp.id AND pe_c.estado = 'COMPLETADO')
     JOIN mes.operacion o                   ON o.id = opp.operacion_id
     -- fibra needs articulo join; articulo_tipo_id comes directly from partida
     JOIN LATERAL (
@@ -693,7 +737,7 @@ WITH lineas AS (
     JOIN public.color c                ON c.id = cxc.color_id
     LEFT JOIN tenido ten               ON ten.id = p.tenido_id
                                       AND o.codigo = 'TENIDO'
-    WHERE gr.flg_elm = false
+    WHERE gr.fyh_elm IS NULL
     GROUP BY
         lrd.guia_remision_id,
         gr_ing.serie, gr_ing.correlativo, gr_ing.fecha_emision,
@@ -784,6 +828,7 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT COALESCE(SUM(fd.cantidad), 0) AS peso_facturado
     FROM doc.factura_detalle fd
+    JOIN doc.factura f ON f.id = fd.factura_id AND f.estado <> 'anulada'
     WHERE fd.guia_remision_id  IS NOT DISTINCT FROM l.guia_remision_id
       AND fd.partida_id         = l.partida_id
       AND fd.operacion_id       = l.operacion_id
@@ -795,3 +840,312 @@ LEFT JOIN LATERAL (
 WHERE l.peso_kg - billed.peso_facturado > 0.001;
 
 GRANT SELECT ON doc.vw_pendientes_facturacion TO authenticated;
+
+
+-- ── doc.vw_aprobados_sin_despacho ─────────────────────────────
+-- Output lotes produced but not yet dispatched to the client.
+-- Non-overlapping with vw_pendientes_facturacion: once a lote gets a
+-- DESPACHO_CLIENTE guia it disappears from here and appears there instead.
+--
+-- Entry point: inventario.lote WHERE documento_tipo = 'partida_paso_ejecucion'
+-- + NOT EXISTS a live DESPACHO_CLIENTE guia referencing that lote.
+--
+-- Weight: COALESCE(source_lote.cantidad, output_lote.cantidad)
+-- — same pre-production input weight logic; grd.cantidad fallback is
+--   unavailable here (no dispatch detail row exists).
+--
+-- Billing key, peso_facturado tracking, precio lookup, antipilling CTE,
+-- and final SELECT are identical to vw_pendientes_facturacion so that
+-- registrar_factura_cliente can drive both views with the same line format.
+CREATE OR REPLACE VIEW doc.vw_aprobados_sin_despacho AS
+WITH lineas AS (
+    SELECT
+        lrd.guia_remision_id,              -- ingress guia (material origin)
+        gr_ing.serie,
+        gr_ing.correlativo,
+        gr_ing.fecha_emision::DATE         AS fecha_emision,
+        p.tercero_id,
+        t.nombre                           AS cliente,
+        p.id                               AS partida_id,
+        o.id::SMALLINT                     AS operacion_id,
+        o.nombre                           AS operacion,
+        o.codigo                           AS op_codigo,
+        false                              AS es_antipilling,
+        p.articulo_tipo_id::SMALLINT       AS articulo_tipo_id,
+        atn.nombre                         AS articulo_tipo,
+        p.color_x_cliente_id,
+        c.color,
+        p.tenido_id,
+        ten.tenido,
+        ar.fibra::SMALLINT                 AS fibra,
+        p.tercero_id                       AS partida_tercero_id,
+        p.flg_antipilling,
+        SUM(COALESCE(source_l.cantidad, l.cantidad)) AS peso_kg
+    FROM inventario.lote l
+    JOIN mes.partida_paso_ejecucion pe_out ON pe_out.id = l.documento_id
+    JOIN mes.partida_paso opp_out          ON opp_out.id = pe_out.partida_paso_id
+    JOIN mes.partida p                     ON p.id = opp_out.partida_id AND p.fyh_elm IS NULL
+    JOIN tercero t                         ON t.id = p.tercero_id
+    LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+    LEFT JOIN doc.guia_remision gr_ing          ON gr_ing.id = lrd.guia_remision_id
+    LEFT JOIN inventario.lote source_l          ON source_l.id = lrd.origen_lote_id
+    JOIN mes.partida_paso opp ON opp.partida_id = p.id
+        AND EXISTS (SELECT 1 FROM mes.partida_paso_ejecucion pe_c WHERE pe_c.partida_paso_id = opp.id AND pe_c.estado = 'COMPLETADO')
+    JOIN mes.operacion o ON o.id = opp.operacion_id
+    JOIN LATERAL (
+        SELECT ar2.fibra
+        FROM item_rollo_detalle ird2
+        JOIN articulo ar2 ON ar2.id = ird2.articulo_id
+        WHERE ird2.item_id = l.item_id
+        LIMIT 1
+    ) ar ON true
+    JOIN articulo_tipo atn             ON atn.id = p.articulo_tipo_id
+    JOIN color_x_cliente cxc           ON cxc.id = p.color_x_cliente_id
+    JOIN public.color c                ON c.id = cxc.color_id
+    LEFT JOIN tenido ten               ON ten.id = p.tenido_id AND o.codigo = 'TENIDO'
+    WHERE
+        l.documento_tipo = 'partida_paso_ejecucion'
+        AND l.fyh_elm IS NULL
+        AND NOT EXISTS (
+            SELECT 1
+            FROM doc.guia_remision_detalle grd2
+            JOIN doc.guia_remision gr2       ON gr2.id = grd2.guia_remision_id AND gr2.fyh_elm IS NULL
+            JOIN doc.guia_remision_tipo grt2 ON grt2.id = gr2.guia_remision_tipo_id
+                                             AND grt2.codigo = 'DESPACHO_CLIENTE'
+            WHERE grd2.lote_id = l.id
+        )
+    GROUP BY
+        lrd.guia_remision_id,
+        gr_ing.serie, gr_ing.correlativo, gr_ing.fecha_emision,
+        p.tercero_id, t.nombre,
+        p.id, o.id, o.nombre, o.codigo,
+        p.articulo_tipo_id, atn.nombre,
+        p.color_x_cliente_id, c.color,
+        p.tenido_id, ten.tenido,
+        ar.fibra, p.flg_antipilling
+),
+antipilling AS (
+    SELECT
+        l.guia_remision_id, l.serie, l.correlativo, l.fecha_emision,
+        l.tercero_id, l.cliente, l.partida_id,
+        (SELECT o.id FROM mes.operacion o WHERE o.codigo = 'ANTIPILLING')::SMALLINT AS operacion_id,
+        'Antipilling'::TEXT AS operacion,
+        'ANTIPILLING'::TEXT AS op_codigo,
+        true                AS es_antipilling,
+        l.articulo_tipo_id, l.articulo_tipo,
+        l.color_x_cliente_id, l.color,
+        l.tenido_id, l.tenido,
+        l.fibra, l.partida_tercero_id, l.flg_antipilling,
+        l.peso_kg
+    FROM lineas l
+    WHERE l.flg_antipilling = true
+      AND l.op_codigo = 'TENIDO'
+),
+all_lineas AS (
+    SELECT * FROM lineas
+    UNION ALL
+    SELECT * FROM antipilling
+)
+SELECT
+    l.guia_remision_id,
+    l.serie,
+    l.correlativo,
+    l.fecha_emision,
+    l.tercero_id,
+    l.cliente,
+    l.partida_id,
+    l.operacion_id,
+    l.operacion,
+    l.es_antipilling,
+    l.articulo_tipo_id,
+    l.articulo_tipo,
+    l.color_x_cliente_id,
+    l.color,
+    l.tenido_id,
+    l.tenido,
+    l.peso_kg                               AS peso_total,
+    billed.peso_facturado,
+    l.peso_kg - billed.peso_facturado       AS peso_pendiente,
+    px.precio_kg,
+    ROUND((l.peso_kg - billed.peso_facturado) * px.precio_kg, 2) AS subtotal,
+    (px.precio_kg IS NULL)                  AS sin_precio,
+    CASE WHEN l.es_antipilling
+         THEN 'Antipilling'
+         ELSE COALESCE(l.tenido, l.operacion)
+    END
+    || ' ' || l.articulo_tipo || ' ' || l.color
+    || COALESCE(' - Ref. ' || l.serie || '-' || l.correlativo, '')
+                                            AS descripcion
+FROM all_lineas l
+LEFT JOIN LATERAL (
+    SELECT
+        CASE WHEN l.es_antipilling
+             THEN doc.fn_get_precio(
+                     l.operacion_id, NULL, l.partida_tercero_id,
+                     NULL, NULL, NULL, NULL
+                  )
+             ELSE doc.fn_get_precio(
+                     l.operacion_id, l.color_x_cliente_id, l.partida_tercero_id,
+                     l.articulo_tipo_id,
+                     CASE WHEN l.op_codigo = 'TENIDO' THEN l.tenido_id ELSE NULL END,
+                     l.fibra,
+                     CASE WHEN l.op_codigo = 'TENIDO' THEN l.flg_antipilling ELSE NULL END
+                  )
+        END AS precio_kg
+) px ON true
+LEFT JOIN LATERAL (
+    SELECT COALESCE(SUM(fd.cantidad), 0) AS peso_facturado
+    FROM doc.factura_detalle fd
+    JOIN doc.factura f ON f.id = fd.factura_id AND f.estado <> 'anulada'
+    WHERE fd.guia_remision_id  IS NOT DISTINCT FROM l.guia_remision_id
+      AND fd.partida_id         = l.partida_id
+      AND fd.operacion_id       = l.operacion_id
+      AND fd.articulo_tipo_id   = l.articulo_tipo_id
+      AND fd.color_x_cliente_id = l.color_x_cliente_id
+      AND fd.tenido_id IS NOT DISTINCT FROM l.tenido_id
+      AND fd.es_antipilling     = l.es_antipilling
+) billed ON true
+WHERE l.peso_kg - billed.peso_facturado > 0.001;
+
+GRANT SELECT ON doc.vw_aprobados_sin_despacho TO authenticated;
+
+
+-- ── doc.get_factura_cliente ───────────────────────────────────
+-- Returns a full invoice with line-item breakdown for display/dropdown.
+-- Lines include service description, kg, unit price, and computed amounts
+-- from generated columns — no arithmetic in the function.
+CREATE OR REPLACE FUNCTION doc.get_factura_cliente(p_factura_id BIGINT)
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'doc', 'mes', 'public'
+AS $$
+SELECT jsonb_build_object(
+    'id',               f.id,
+    'tipo_comprobante', f.tipo_comprobante,
+    'serie',            f.serie,
+    'numero',           f.numero,
+    'tercero_id',       f.tercero_id,
+    'cliente',          t.nombre,
+    'fecha_emision',    f.fecha_emision,
+    'fecha_vencimiento',f.fecha_vencimiento,
+    'moneda',           f.moneda,
+    'tipo_cambio',      f.tipo_cambio,
+    'subtotal',         f.subtotal,
+    'igv',              f.igv,
+    'total',            f.total,
+    'estado',           f.estado,
+    'observacion',      f.observacion,
+    'lineas', COALESCE((
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'id',               fd.id,
+                'descripcion',      fd.descripcion,
+                'operacion_id',     fd.operacion_id,
+                'operacion',        o.nombre,
+                'es_antipilling',   fd.es_antipilling,
+                'partida_id',       fd.partida_id,
+                'guia_remision_id', fd.guia_remision_id,
+                'cantidad',         fd.cantidad,
+                'unidad',           u.codigo,
+                'precio_unitario',  fd.precio_unitario,
+                'igv_porcentaje',   fd.igv_porcentaje,
+                'subtotal_linea',   fd.subtotal_linea,
+                'igv_linea',        fd.igv_linea,
+                'total_linea',      fd.total_linea
+            ) ORDER BY fd.id
+        )
+        FROM doc.factura_detalle fd
+        LEFT JOIN mes.operacion o ON o.id = fd.operacion_id
+        LEFT JOIN unidad u        ON u.id = fd.unidad_id
+        WHERE fd.factura_id = f.id
+    ), '[]'::jsonb)
+)
+FROM doc.factura f
+JOIN tercero t ON t.id = f.tercero_id
+WHERE f.id = p_factura_id;
+$$;
+
+
+-- ── doc.anular_factura_cliente ────────────────────────────────
+-- Cancels a client invoice. Sets estado='anulada' and reverts
+-- estado_facturacion on any partida that was closed by this invoice
+-- but now has unbilled weight again (per vw_pendientes_facturacion,
+-- which already excludes anulada invoices from peso_facturado).
+CREATE OR REPLACE FUNCTION doc.anular_factura_cliente(p_factura_id BIGINT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'doc', 'mes', 'public'
+AS $$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id     INT := get_user_id();
+    v_estado     factura_estado_enum;
+    v_partidas   BIGINT[];
+    v_reverted   INT;
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('anular_factura_cliente', v_usr_id, jsonb_build_object('factura_id', p_factura_id));
+
+    SELECT estado INTO v_estado
+    FROM doc.factura WHERE id = p_factura_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Factura #% no encontrada.', p_factura_id;
+    END IF;
+    IF v_estado = 'anulada' THEN
+        RAISE EXCEPTION 'Factura #% ya está anulada.', p_factura_id;
+    END IF;
+
+    -- Collect partidas referenced by this invoice before cancelling
+    SELECT ARRAY(
+        SELECT DISTINCT partida_id
+        FROM doc.factura_detalle
+        WHERE factura_id = p_factura_id AND partida_id IS NOT NULL
+    ) INTO v_partidas;
+
+    UPDATE doc.factura
+    SET estado = 'anulada', usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE id = p_factura_id;
+
+    -- Revert 'facturado' partidas that now have pending weight again.
+    -- vw_pendientes_facturacion excludes anulada invoices, so after the
+    -- UPDATE above it reflects the true unbilled state.
+    UPDATE mes.partida p
+    SET estado_facturacion = 'pendiente',
+        usr_mod = v_usr_id,
+        fyh_mod = NOW()
+    WHERE p.id = ANY(v_partidas)
+      AND p.estado_facturacion = 'facturado'
+      AND (
+          EXISTS (SELECT 1 FROM doc.vw_pendientes_facturacion vpf WHERE vpf.partida_id = p.id)
+          OR EXISTS (SELECT 1 FROM doc.vw_aprobados_sin_despacho vas WHERE vas.partida_id = p.id)
+      );
+
+    GET DIAGNOSTICS v_reverted = ROW_COUNT;
+
+    RETURN format('Factura #%s anulada. %s partida(s) revertida(s) a pendiente.',
+        p_factura_id, v_reverted);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in anular_factura_cliente - User: %, factura: %, Error: %', v_usr_id, p_factura_id, v_message;
+    RAISE;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION doc.anular_factura_cliente(bigint) TO authenticated;
+
+GRANT EXECUTE ON FUNCTION doc.fn_precio_info(SMALLINT, INT, INT, SMALLINT, INT, SMALLINT, BOOLEAN) TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.fn_get_costo_receta(INT)                                             TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.upsert_catalogo_precio(SMALLINT, INT, INT, SMALLINT, INT, SMALLINT, BOOLEAN, NUMERIC) TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.fn_precios_partida(BIGINT[])                                         TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.registrar_factura_cliente(JSONB)                                     TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.get_factura_cliente(BIGINT)                                          TO authenticated;

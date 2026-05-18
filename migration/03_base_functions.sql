@@ -59,10 +59,7 @@ $$;
 CREATE OR REPLACE FUNCTION public.fn_trg_set_elm_fields()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF OLD.flg_elm IS FALSE
-       AND NEW.flg_elm IS TRUE
-       AND OLD.fyh_elm IS NULL
-    THEN
+    IF OLD.fyh_elm IS NULL AND NEW.fyh_elm IS NOT NULL THEN
         NEW.usr_elm := get_user_id();
         NEW.fyh_elm := now();
     END IF;
@@ -84,11 +81,11 @@ END;
 $$;
 
 -- ── Hard-delete prevention ────────────────────────────────────────────────────
--- Core business documents must never be hard-deleted — use flg_elm = true instead.
+-- Core business documents must never be hard-deleted — set fyh_elm instead.
 CREATE OR REPLACE FUNCTION public.fn_trg_prevent_hard_delete()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    RAISE EXCEPTION 'el borrado no está permitido en %. Establezca flg_elm = true para borrar.', TG_TABLE_NAME;
+    RAISE EXCEPTION 'el borrado no está permitido en %. Establezca fyh_elm para anular.', TG_TABLE_NAME;
 END;
 $$;
 

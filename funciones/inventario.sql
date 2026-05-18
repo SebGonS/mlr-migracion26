@@ -76,7 +76,7 @@ BEGIN
     JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
     LEFT JOIN inventario.vw_stock_general  sg ON sg.item_id  = i.id
     LEFT JOIN inventario.item_valoracion   iv ON iv.item_id  = i.id
-    WHERE i.flg_elm = false;
+    WHERE i.fyh_elm IS NULL;
 
     RETURN v_cuadre_id;
 END;
@@ -433,8 +433,8 @@ DECLARE
     v_pesaje_pos_id     smallint;
     v_pesaje_neg_id     smallint;
     v_doc_movimiento_id bigint;
-    v_count_regular     int;
-    v_count_rib         int;
+    v_cantidad_regular     int;
+    v_cantidad_rib         int;
     v_peso_por_regular  numeric;
     v_peso_por_rib      numeric;
     v_updated           int := 0;
@@ -451,12 +451,10 @@ BEGIN
     -- Guard: no roll assigned to this partida may already be in production
     IF EXISTS (
         SELECT 1
-        FROM mes.partida op
-        JOIN mes.partida_componente opi ON opi.partida_id = op.id
+        FROM mes.partida_componente opi
         JOIN inventario.item_movimientos im  ON im.lote_id = opi.lote_id
         JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-        WHERE op.id = p_partida_id
-          AND op.flg_elm = false
+        WHERE opi.partida_id = p_partida_id
           AND imt.codigo = 'PROD_CONSUMO'
     ) THEN
         RAISE EXCEPTION
@@ -468,28 +466,26 @@ BEGIN
     SELECT
         COUNT(*) FILTER (WHERE ird.flg_rib = false),
         COUNT(*) FILTER (WHERE ird.flg_rib = true)
-    INTO v_count_regular, v_count_rib
-    FROM mes.partida op
-    JOIN mes.partida_componente opi ON opi.partida_id = op.id
-    JOIN inventario.lote l             ON l.id = opi.lote_id AND l.flg_elm = false
+    INTO v_cantidad_regular, v_cantidad_rib
+    FROM mes.partida_componente opi
+    JOIN inventario.lote l             ON l.id = opi.lote_id AND l.fyh_elm IS NULL
     JOIN item_rollo_detalle ird        ON ird.item_id = l.item_id
-    WHERE op.id = p_partida_id
-      AND op.flg_elm = false;
+    WHERE opi.partida_id = p_partida_id;
 
-    IF v_count_regular = 0 AND v_count_rib = 0 THEN
+    IF v_cantidad_regular = 0 AND v_cantidad_rib = 0 THEN
         RAISE EXCEPTION 'El partida #% no tiene rollos asignados.', p_partida_id;
     END IF;
-    IF p_peso_regular IS NOT NULL AND v_count_regular = 0 THEN
+    IF p_peso_regular IS NOT NULL AND v_cantidad_regular = 0 THEN
         RAISE EXCEPTION 'Se proporcionó peso_regular pero el partida #% no tiene rollos regulares asignados.', p_partida_id;
     END IF;
-    IF p_peso_rib IS NOT NULL AND v_count_rib = 0 THEN
+    IF p_peso_rib IS NOT NULL AND v_cantidad_rib = 0 THEN
         RAISE EXCEPTION 'Se proporcionó peso_rib pero el partida #% no tiene rollos rib asignados.', p_partida_id;
     END IF;
 
-    v_peso_por_regular := CASE WHEN v_count_regular > 0 AND p_peso_regular IS NOT NULL
-                               THEN ROUND(p_peso_regular / v_count_regular, 4) END;
-    v_peso_por_rib     := CASE WHEN v_count_rib > 0 AND p_peso_rib IS NOT NULL
-                               THEN ROUND(p_peso_rib / v_count_rib, 4) END;
+    v_peso_por_regular := CASE WHEN v_cantidad_regular > 0 AND p_peso_regular IS NOT NULL
+                               THEN ROUND(p_peso_regular / v_cantidad_regular, 4) END;
+    v_peso_por_rib     := CASE WHEN v_cantidad_rib > 0 AND p_peso_rib IS NOT NULL
+                               THEN ROUND(p_peso_rib / v_cantidad_rib, 4) END;
 
     SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
     SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
@@ -504,13 +500,11 @@ BEGIN
             sa.ubicacion_id,
             ird.flg_rib,
             CASE WHEN ird.flg_rib THEN v_peso_por_rib ELSE v_peso_por_regular END AS peso_nuevo
-        FROM mes.partida op
-        JOIN mes.partida_componente opi ON opi.partida_id = op.id
-        JOIN inventario.lote l             ON l.id = opi.lote_id AND l.flg_elm = false
+        FROM mes.partida_componente opi
+        JOIN inventario.lote l             ON l.id = opi.lote_id AND l.fyh_elm IS NULL
         JOIN item_rollo_detalle ird        ON ird.item_id = l.item_id
         JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
-        WHERE op.id = p_partida_id
-          AND op.flg_elm = false
+        WHERE opi.partida_id = p_partida_id
           AND CASE WHEN ird.flg_rib THEN v_peso_por_rib     IS NOT NULL
                    ELSE                  v_peso_por_regular IS NOT NULL END
     ),
@@ -559,14 +553,14 @@ BEGIN
     RETURN format(
         'Pesaje registrado para partida #%s: %s rollos actualizados (%s regulares × %s kg, %s rib × %s kg).',
         p_partida_id, v_updated,
-        COALESCE(v_count_regular, 0), COALESCE(v_peso_por_regular::text, 'sin cambio'),
-        COALESCE(v_count_rib, 0),     COALESCE(v_peso_por_rib::text,     'sin cambio')
+        COALESCE(v_cantidad_regular, 0), COALESCE(v_peso_por_regular::text, 'sin cambio'),
+        COALESCE(v_cantidad_rib, 0),     COALESCE(v_peso_por_rib::text,     'sin cambio')
     );
 
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in registrar_pesaje_produccion - User: %, partida: %, Error: %, Detail: %',
+    RAISE LOG 'Error en registrar_pesaje_produccion - User: %, partida: %, Error: %, Detail: %',
               v_usr_id, p_partida_id, v_message, v_detail;
     RAISE;
 END;
@@ -577,7 +571,7 @@ GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_produccion(BIGINT, NUMERIC
 -- ═══════════════════════════════════════════════════════════════
 -- inventario.registrar_pesaje_guia  (prorated)
 --
--- Ideal ingress weighing flow. Called when a CLIENTE_ENVIO_partida
+-- Ideal ingress weighing flow. Called when a CLIENTE_ENVIO_PROCESO
 -- guia arrives, before any partida assignment or orden creation.
 --
 -- Distributes total weight evenly by roll type across all rolls
@@ -608,8 +602,8 @@ DECLARE
     v_pesaje_pos_id     smallint;
     v_pesaje_neg_id     smallint;
     v_doc_movimiento_id bigint;
-    v_count_regular     int;
-    v_count_rib         int;
+    v_cantidad_regular     int;
+    v_cantidad_rib         int;
     v_peso_por_regular  numeric;
     v_peso_por_rib      numeric;
     v_updated           int := 0;
@@ -641,26 +635,26 @@ BEGIN
     SELECT
         COUNT(*) FILTER (WHERE ird.flg_rib = false),
         COUNT(*) FILTER (WHERE ird.flg_rib = true)
-    INTO v_count_regular, v_count_rib
+    INTO v_cantidad_regular, v_cantidad_rib
     FROM inventario.lote_rollo_detalle lrd
-    JOIN inventario.lote l      ON l.id = lrd.lote_id AND l.flg_elm = false
+    JOIN inventario.lote l      ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
     JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
     WHERE lrd.guia_remision_id = p_guia_id;
 
-    IF v_count_regular = 0 AND v_count_rib = 0 THEN
+    IF v_cantidad_regular = 0 AND v_cantidad_rib = 0 THEN
         RAISE EXCEPTION 'La guía #% no tiene rollos asociados.', p_guia_id;
     END IF;
-    IF p_peso_regular IS NOT NULL AND v_count_regular = 0 THEN
+    IF p_peso_regular IS NOT NULL AND v_cantidad_regular = 0 THEN
         RAISE EXCEPTION 'Se proporcionó peso_regular pero la guía #% no tiene rollos regulares.', p_guia_id;
     END IF;
-    IF p_peso_rib IS NOT NULL AND v_count_rib = 0 THEN
+    IF p_peso_rib IS NOT NULL AND v_cantidad_rib = 0 THEN
         RAISE EXCEPTION 'Se proporcionó peso_rib pero la guía #% no tiene rollos rib.', p_guia_id;
     END IF;
 
-    v_peso_por_regular := CASE WHEN v_count_regular > 0 AND p_peso_regular IS NOT NULL
-                               THEN ROUND(p_peso_regular / v_count_regular, 4) END;
-    v_peso_por_rib     := CASE WHEN v_count_rib > 0 AND p_peso_rib IS NOT NULL
-                               THEN ROUND(p_peso_rib / v_count_rib, 4) END;
+    v_peso_por_regular := CASE WHEN v_cantidad_regular > 0 AND p_peso_regular IS NOT NULL
+                               THEN ROUND(p_peso_regular / v_cantidad_regular, 4) END;
+    v_peso_por_rib     := CASE WHEN v_cantidad_rib > 0 AND p_peso_rib IS NOT NULL
+                               THEN ROUND(p_peso_rib / v_cantidad_rib, 4) END;
 
     SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
     SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
@@ -675,7 +669,7 @@ BEGIN
             ird.flg_rib,
             CASE WHEN ird.flg_rib THEN v_peso_por_rib ELSE v_peso_por_regular END AS peso_nuevo
         FROM inventario.lote_rollo_detalle lrd
-        JOIN inventario.lote l             ON l.id = lrd.lote_id AND l.flg_elm = false
+        JOIN inventario.lote l             ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
         JOIN item_rollo_detalle ird        ON ird.item_id = l.item_id
         JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
         WHERE lrd.guia_remision_id = p_guia_id
@@ -705,7 +699,7 @@ BEGIN
             CASE WHEN r.peso_nuevo < r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
             CASE WHEN r.peso_nuevo > r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
             ABS(r.peso_nuevo - r.peso_anterior),
-            'GUIA_REMISION', p_guia_id
+            'guia_remision', p_guia_id
         FROM rolls r
         JOIN pesajes p ON p.lote_id = r.lote_id
         WHERE r.peso_nuevo <> r.peso_anterior
@@ -727,8 +721,8 @@ BEGIN
     RETURN format(
         'Pesaje registrado para guía #%s: %s rollos actualizados (%s regulares × %s kg, %s rib × %s kg).',
         p_guia_id, v_updated,
-        COALESCE(v_count_regular, 0), COALESCE(v_peso_por_regular::text, 'sin cambio'),
-        COALESCE(v_count_rib, 0),     COALESCE(v_peso_por_rib::text,     'sin cambio')
+        COALESCE(v_cantidad_regular, 0), COALESCE(v_peso_por_regular::text, 'sin cambio'),
+        COALESCE(v_cantidad_rib, 0),     COALESCE(v_peso_por_rib::text,     'sin cambio')
     );
 
 EXCEPTION WHEN OTHERS THEN
@@ -820,7 +814,7 @@ BEGIN
             sa.ubicacion_id,
             i.peso_nuevo
         FROM input i
-        JOIN inventario.lote l             ON l.id = i.lote_id AND l.flg_elm = false
+        JOIN inventario.lote l             ON l.id = i.lote_id AND l.fyh_elm IS NULL
         JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
     ),
     pesajes AS (
@@ -936,7 +930,7 @@ GRANT EXECUTE ON FUNCTION inventario.marcar_cuadre_preparado(BIGINT) TO authenti
 --
 -- Guard: blocks if order is TECO / CERRADA / CANCELADA.
 -- ═══════════════════════════════════════════════════════════════
-DROP FUNCTION IF EXISTS mes.actualizar_pesos_orden_items(BIGINT, NUMERIC);
+DROP FUNCTION IF EXISTS mes.actualizar_pesos_partida_items(BIGINT, NUMERIC);
 DROP FUNCTION IF EXISTS inventario.corregir_pesaje_produccion(BIGINT, NUMERIC, NUMERIC);
 
 CREATE OR REPLACE FUNCTION inventario.corregir_pesaje_produccion(
@@ -952,9 +946,9 @@ AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id            int := get_user_id();
-    v_estado            partida_estado_enum;
-    v_count_regular     int;
-    v_count_rib         int;
+    v_estado            partida_estado_produccion_enum;
+    v_cantidad_regular     int;
+    v_cantidad_rib         int;
     v_peso_por_regular  numeric;
     v_peso_por_rib      numeric;
     v_count             int;
@@ -967,7 +961,7 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    SELECT estado INTO v_estado
+    SELECT estado_produccion INTO v_estado
     FROM mes.partida WHERE id = p_partida_id;
 
     IF NOT FOUND THEN
@@ -981,30 +975,30 @@ BEGIN
     SELECT
         COUNT(*) FILTER (WHERE ird.flg_rib = false),
         COUNT(*) FILTER (WHERE ird.flg_rib = true)
-    INTO v_count_regular, v_count_rib
+    INTO v_cantidad_regular, v_cantidad_rib
     FROM mes.partida_componente opi
-    JOIN inventario.lote l      ON l.id = opi.lote_id AND l.flg_elm = false
+    JOIN inventario.lote l      ON l.id = opi.lote_id AND l.fyh_elm IS NULL
     JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
     WHERE opi.partida_id = p_partida_id;
 
-    IF v_count_regular = 0 AND v_count_rib = 0 THEN
+    IF v_cantidad_regular = 0 AND v_cantidad_rib = 0 THEN
         RAISE EXCEPTION 'La orden % no tiene items', p_partida_id;
     END IF;
-    IF p_peso_regular IS NOT NULL AND v_count_regular = 0 THEN
+    IF p_peso_regular IS NOT NULL AND v_cantidad_regular = 0 THEN
         RAISE EXCEPTION 'Se proporcionó peso_regular pero la orden #% no tiene rollos regulares asignados.', p_partida_id;
     END IF;
-    IF p_peso_rib IS NOT NULL AND v_count_rib = 0 THEN
+    IF p_peso_rib IS NOT NULL AND v_cantidad_rib = 0 THEN
         RAISE EXCEPTION 'Se proporcionó peso_rib pero la orden #% no tiene rollos rib asignados.', p_partida_id;
     END IF;
 
-    v_peso_por_regular := CASE WHEN v_count_regular > 0 AND p_peso_regular IS NOT NULL
-                               THEN ROUND(p_peso_regular / v_count_regular, 4) END;
-    v_peso_por_rib     := CASE WHEN v_count_rib > 0 AND p_peso_rib IS NOT NULL
-                               THEN ROUND(p_peso_rib / v_count_rib, 4) END;
+    v_peso_por_regular := CASE WHEN v_cantidad_regular > 0 AND p_peso_regular IS NOT NULL
+                               THEN ROUND(p_peso_regular / v_cantidad_regular, 4) END;
+    v_peso_por_rib     := CASE WHEN v_cantidad_rib > 0 AND p_peso_rib IS NOT NULL
+                               THEN ROUND(p_peso_rib / v_cantidad_rib, 4) END;
 
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('corregir_pesaje_produccion', v_usr_id,
-            jsonb_build_object('orden_id', p_partida_id, 'peso_regular', p_peso_regular, 'peso_rib', p_peso_rib));
+            jsonb_build_object('partida_id', p_partida_id, 'peso_regular', p_peso_regular, 'peso_rib', p_peso_rib));
 
     SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
     SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
@@ -1019,7 +1013,7 @@ BEGIN
             ird.flg_rib,
             CASE WHEN ird.flg_rib THEN v_peso_por_rib ELSE v_peso_por_regular END AS peso_nuevo
         FROM mes.partida_componente opi
-        JOIN inventario.lote l      ON l.id = opi.lote_id AND l.flg_elm = false
+        JOIN inventario.lote l      ON l.id = opi.lote_id AND l.fyh_elm IS NULL
         JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
         JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
         WHERE opi.partida_id = p_partida_id
@@ -1063,8 +1057,8 @@ BEGIN
     RETURN format(
         '%s pesos corregidos para orden #%s (%s regulares × %s kg, %s rib × %s kg).',
         v_count, p_partida_id,
-        COALESCE(v_count_regular, 0), COALESCE(v_peso_por_regular::text, 'sin cambio'),
-        COALESCE(v_count_rib, 0),     COALESCE(v_peso_por_rib::text,     'sin cambio')
+        COALESCE(v_cantidad_regular, 0), COALESCE(v_peso_por_regular::text, 'sin cambio'),
+        COALESCE(v_cantidad_rib, 0),     COALESCE(v_peso_por_rib::text,     'sin cambio')
     );
 
 EXCEPTION WHEN OTHERS THEN

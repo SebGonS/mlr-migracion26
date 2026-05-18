@@ -99,16 +99,16 @@ BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('registrar_factura_proveedor', v_usr_id, p_datos);
 
-    -- subtotal + igv must equal total (within rounding tolerance)
+    -- subtotal + igv must equal total (tolerance matches table CHECK: < 0.01)
     IF ABS(
         (p_datos->>'total')::NUMERIC -
-        ((p_datos->>'subtotal')::NUMERIC + (p_datos->>'igv')::NUMERIC)
-    ) > 0.02 THEN
+        (COALESCE((p_datos->>'subtotal')::NUMERIC, 0) + COALESCE((p_datos->>'igv')::NUMERIC, 0))
+    ) > 0.01 THEN
         RAISE EXCEPTION 'Total (%) no coincide con subtotal + IGV (% + % = %)',
             p_datos->>'total',
             p_datos->>'subtotal',
             p_datos->>'igv',
-            (p_datos->>'subtotal')::NUMERIC + (p_datos->>'igv')::NUMERIC;
+            COALESCE((p_datos->>'subtotal')::NUMERIC, 0) + COALESCE((p_datos->>'igv')::NUMERIC, 0);
     END IF;
 
     -- tipo_cambio required for USD invoices
@@ -159,14 +159,17 @@ BEGIN
 
     -- Link to compra if provided
     IF v_compra_id IS NOT NULL THEN
-        UPDATE doc.compra
-        SET factura_proveedor_id = v_factura_id,
-            usr_mod = v_usr_id, fyh_mod = NOW()
-        WHERE id = v_compra_id;
-
-        IF NOT FOUND THEN
-            RAISE EXCEPTION 'Compra #% no encontrada.', v_compra_id;
+        IF NOT EXISTS (
+            SELECT 1 FROM doc.compra
+            WHERE id = v_compra_id
+              AND tercero_id = (p_datos->>'tercero_id')::INT
+        ) THEN
+            RAISE EXCEPTION 'Compra #% no encontrada o no pertenece al mismo proveedor.', v_compra_id;
         END IF;
+
+        INSERT INTO doc.compra_factura_proveedor(compra_id, factura_proveedor_id, usr_cre)
+        VALUES (v_compra_id, v_factura_id, v_usr_id)
+        ON CONFLICT DO NOTHING;
     END IF;
 
     RETURN v_factura_id;
@@ -230,6 +233,17 @@ BEGIN
             AND fp.tercero_id IS DISTINCT FROM v_tercero_id
         ) THEN
             RAISE EXCEPTION 'Una o más facturas no pertenecen al tercero indicado (%).', v_tercero_id;
+        END IF;
+
+        IF EXISTS (
+            SELECT 1 FROM doc.factura_proveedor fp
+            WHERE fp.id IN (
+                SELECT (f->>'factura_proveedor_id')::bigint
+                FROM jsonb_array_elements(p_datos->'facturas') f
+            )
+            AND fp.estado_pago IN ('total', 'anulado')
+        ) THEN
+            RAISE EXCEPTION 'Una o más facturas ya están completamente pagadas o anuladas.';
         END IF;
     END IF;
 
@@ -459,7 +473,7 @@ BEGIN
         RAISE EXCEPTION 'Factura #% no encontrada.', p_factura_id;
     END IF;
 
-    IF v_compra_prov <> v_factura_prov THEN
+    IF v_compra_prov IS DISTINCT FROM v_factura_prov THEN
         RAISE EXCEPTION 'Proveedor de compra (%) y factura (%) no coinciden.',
             v_compra_prov, v_factura_prov;
     END IF;
@@ -468,7 +482,7 @@ BEGIN
     VALUES (p_compra_id, p_factura_id, p_nota, v_usr_id)
     ON CONFLICT DO NOTHING;
 
-    RETURN format('Factura #% vinculada a compra #%.', p_factura_id, p_compra_id);
+    RETURN format('Factura #%s vinculada a compra #%s.', p_factura_id, p_compra_id);
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
@@ -495,10 +509,14 @@ DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id int := get_user_id();
 BEGIN
-    IF NOT jwt_has_permission('comercial.crear') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('desvincular_factura_compra', v_usr_id,
+            jsonb_build_object('compra_id', p_compra_id, 'factura_id', p_factura_id));
 
     DELETE FROM doc.compra_factura_proveedor
     WHERE compra_id = p_compra_id AND factura_proveedor_id = p_factura_id;
@@ -507,7 +525,7 @@ BEGIN
         RAISE EXCEPTION 'Vínculo entre compra #% y factura #% no encontrado.', p_compra_id, p_factura_id;
     END IF;
 
-    RETURN format('Factura #% desvinculada de compra #%.', p_factura_id, p_compra_id);
+    RETURN format('Factura #%s desvinculada de compra #%s.', p_factura_id, p_compra_id);
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
@@ -517,5 +535,414 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $function$;
 
+GRANT EXECUTE ON FUNCTION doc.crear_compra(jsonb)                           TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.registrar_factura_proveedor(jsonb)            TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.registrar_letra(jsonb)                        TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.pagar_letra(bigint, date)                     TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.vincular_guias_compra(bigint, jsonb)          TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.vincular_factura_compra(bigint, bigint, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.desvincular_factura_compra(bigint, bigint)    TO authenticated;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- get_compra
+-- Full read: compra header + line items + linked guias + linked
+-- supplier invoices. Designed for document-detail screens.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.get_compra(p_compra_id BIGINT)
+RETURNS JSONB
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'doc', 'public'
+AS $$
+SELECT jsonb_build_object(
+    'id',          c.id,
+    'tercero_id',  c.tercero_id,
+    'proveedor',   t.nombre,
+    'fecha',       c.fecha,
+    'observacion', c.observacion,
+    'fyh_elm',     c.fyh_elm,
+    'fyh_cre',     c.fyh_cre,
+    'detalle', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'id',               cd.id,
+            'item_id',          cd.item_id,
+            'item_codigo',      i.codigo,
+            'item_nombre',      i.nombre,
+            'cantidad',         cd.cantidad,
+            'precio_unitario',  cd.precio_unitario
+        ) ORDER BY cd.id)
+        FROM doc.compra_detalle cd
+        JOIN item i ON i.id = cd.item_id
+        WHERE cd.compra_id = c.id
+    ), '[]'::jsonb),
+    'guias', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'guia_remision_id', gr.id,
+            'serie',            gr.serie,
+            'correlativo',      gr.correlativo,
+            'fecha_emision',    gr.fecha_emision,
+            'tipo',             grt.nombre
+        ) ORDER BY gr.fecha_emision, gr.id)
+        FROM doc.compra_guia_remision cgr
+        JOIN doc.guia_remision gr         ON gr.id = cgr.guia_remision_id
+        JOIN doc.guia_remision_tipo grt   ON grt.id = gr.guia_remision_tipo_id
+        WHERE cgr.compra_id = c.id
+    ), '[]'::jsonb),
+    'facturas', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'factura_proveedor_id', fp.id,
+            'serie',                fp.serie,
+            'numero',               fp.numero,
+            'fecha_emision',        fp.fecha_emision,
+            'total',                fp.total,
+            'moneda',               fp.moneda,
+            'estado_pago',          fp.estado_pago,
+            'nota',                 cfp.nota
+        ) ORDER BY fp.fecha_emision, fp.id)
+        FROM doc.compra_factura_proveedor cfp
+        JOIN doc.factura_proveedor fp ON fp.id = cfp.factura_proveedor_id
+        WHERE cfp.compra_id = c.id
+    ), '[]'::jsonb)
+)
+FROM doc.compra c
+JOIN tercero t ON t.id = c.tercero_id
+WHERE c.id = p_compra_id;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- get_factura_proveedor
+-- Full read: supplier invoice header + line items + linked letras
+-- (with monto_aplicado) + linked compras.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.get_factura_proveedor(p_factura_id BIGINT)
+RETURNS JSONB
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'doc', 'public'
+AS $$
+SELECT jsonb_build_object(
+    'id',                fp.id,
+    'tercero_id',        fp.tercero_id,
+    'proveedor',         t.nombre,
+    'serie',             fp.serie,
+    'numero',            fp.numero,
+    'fecha_emision',     fp.fecha_emision,
+    'fecha_vencimiento', fp.fecha_vencimiento,
+    'tipo_pago',         fp.tipo_pago,
+    'moneda',            fp.moneda,
+    'tipo_cambio',       fp.tipo_cambio,
+    'subtotal',          fp.subtotal,
+    'igv',               fp.igv,
+    'total',             fp.total,
+    'estado_pago',       fp.estado_pago,
+    'observacion',       fp.observacion,
+    'lineas', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'id',              fpd.id,
+            'item_id',         fpd.item_id,
+            'item_codigo',     i.codigo,
+            'item_nombre',     i.nombre,
+            'cantidad',        fpd.cantidad,
+            'precio_unitario', fpd.precio_unitario,
+            'igv_porcentaje',  fpd.igv_porcentaje,
+            'subtotal_linea',  fpd.subtotal_linea,
+            'igv_linea',       fpd.igv_linea,
+            'total_linea',     fpd.total_linea
+        ) ORDER BY fpd.id)
+        FROM doc.factura_proveedor_detalle fpd
+        JOIN item i ON i.id = fpd.item_id
+        WHERE fpd.factura_proveedor_id = fp.id
+    ), '[]'::jsonb),
+    'letras', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'letra_id',           l.id,
+            'numero',             l.numero,
+            'monto',              l.monto,
+            'monto_aplicado',     lf.monto_aplicado,
+            'fecha_vencimiento',  l.fecha_vencimiento,
+            'fecha_pago',         l.fecha_pago,
+            'banco',              l.banco,
+            'estado',             l.estado
+        ) ORDER BY l.fecha_vencimiento, l.id)
+        FROM doc.letra_factura lf
+        JOIN doc.letra l ON l.id = lf.letra_id
+        WHERE lf.factura_proveedor_id = fp.id
+    ), '[]'::jsonb),
+    'compras', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'compra_id',   c.id,
+            'fecha',       c.fecha,
+            'observacion', c.observacion,
+            'nota',        cfp.nota
+        ) ORDER BY c.fecha, c.id)
+        FROM doc.compra_factura_proveedor cfp
+        JOIN doc.compra c ON c.id = cfp.compra_id
+        WHERE cfp.factura_proveedor_id = fp.id
+    ), '[]'::jsonb)
+)
+FROM doc.factura_proveedor fp
+JOIN tercero t ON t.id = fp.tercero_id
+WHERE fp.id = p_factura_id;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- get_letra
+-- Full read: letra header + all linked facturas with monto_aplicado.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.get_letra(p_letra_id BIGINT)
+RETURNS JSONB
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'doc', 'public'
+AS $$
+SELECT jsonb_build_object(
+    'id',                l.id,
+    'tercero_id',        l.tercero_id,
+    'proveedor',         t.nombre,
+    'numero',            l.numero,
+    'monto',             l.monto,
+    'fecha_giro',        l.fecha_giro,
+    'fecha_vencimiento', l.fecha_vencimiento,
+    'fecha_pago',        l.fecha_pago,
+    'banco',             l.banco,
+    'estado',            l.estado,
+    'observacion',       l.observacion,
+    'facturas', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'factura_proveedor_id', fp.id,
+            'serie',                fp.serie,
+            'numero',               fp.numero,
+            'fecha_emision',        fp.fecha_emision,
+            'total',                fp.total,
+            'moneda',               fp.moneda,
+            'monto_aplicado',       lf.monto_aplicado,
+            'estado_pago',          fp.estado_pago
+        ) ORDER BY fp.fecha_emision, fp.id)
+        FROM doc.letra_factura lf
+        JOIN doc.factura_proveedor fp ON fp.id = lf.factura_proveedor_id
+        WHERE lf.letra_id = l.id
+    ), '[]'::jsonb)
+)
+FROM doc.letra l
+JOIN tercero t ON t.id = l.tercero_id
+WHERE l.id = p_letra_id;
+$$;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- anular_compra
+-- Soft-deletes a compra (sets fyh_elm).
+-- Blocked if any linked factura_proveedor is not anulada.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.anular_compra(p_compra_id BIGINT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+    v_found  boolean;
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('anular_compra', v_usr_id, jsonb_build_object('compra_id', p_compra_id));
+
+    SELECT (fyh_elm IS NOT NULL) INTO v_found
+    FROM doc.compra WHERE id = p_compra_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Compra #% no encontrada.', p_compra_id;
+    END IF;
+    IF v_found THEN
+        RAISE EXCEPTION 'Compra #% ya está anulada.', p_compra_id;
+    END IF;
+
+    -- Block if any linked factura is still active
+    IF EXISTS (
+        SELECT 1
+        FROM doc.compra_factura_proveedor cfp
+        JOIN doc.factura_proveedor fp ON fp.id = cfp.factura_proveedor_id
+        WHERE cfp.compra_id = p_compra_id
+          AND fp.estado_pago <> 'anulado'
+    ) THEN
+        RAISE EXCEPTION 'No se puede anular la compra #%: tiene facturas activas vinculadas. Anule primero las facturas.', p_compra_id;
+    END IF;
+
+    UPDATE doc.compra
+    SET usr_elm = v_usr_id, fyh_elm = NOW()
+    WHERE id = p_compra_id;
+
+    RETURN format('Compra #%s anulada.', p_compra_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in anular_compra - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
+    RAISE;
+END;
+$function$;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- anular_factura_proveedor
+-- Cancels a supplier invoice. Blocked if any linked letra is 'pagada'
+-- (money already moved). Letters in other states (emitida, vencida,
+-- protestada) are left as-is; the UI can show them as clearing a
+-- cancelled invoice.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.anular_factura_proveedor(p_factura_id BIGINT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id     int := get_user_id();
+    v_estado_pago estado_pago_enum;
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('anular_factura_proveedor', v_usr_id, jsonb_build_object('factura_id', p_factura_id));
+
+    SELECT estado_pago INTO v_estado_pago
+    FROM doc.factura_proveedor WHERE id = p_factura_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Factura #% no encontrada.', p_factura_id;
+    END IF;
+    IF v_estado_pago = 'anulado' THEN
+        RAISE EXCEPTION 'Factura #% ya está anulada.', p_factura_id;
+    END IF;
+
+    -- Block if any letra that cleared this invoice is already paid
+    IF EXISTS (
+        SELECT 1
+        FROM doc.letra_factura lf
+        JOIN doc.letra l ON l.id = lf.letra_id
+        WHERE lf.factura_proveedor_id = p_factura_id
+          AND l.estado = 'pagada'
+    ) THEN
+        RAISE EXCEPTION 'No se puede anular la factura #%: tiene letras pagadas vinculadas. Revisar con contabilidad.', p_factura_id;
+    END IF;
+
+    UPDATE doc.factura_proveedor
+    SET estado_pago = 'anulado', usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE id = p_factura_id;
+
+    RETURN format('Factura proveedor #%s anulada.', p_factura_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in anular_factura_proveedor - User: %, factura: %, Error: %', v_usr_id, p_factura_id, v_message;
+    RAISE;
+END;
+$function$;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- anular_letra
+-- Cancels a payment letter. Blocked if already pagada/anulada.
+-- Cascades to recalculate estado_pago on every linked factura:
+--   no pagada letras remain → 'pendiente'
+--   all non-anulada letras pagada → 'total'
+--   mix of paid and unpaid → 'parcial'
+-- Facturas already anuladas are skipped.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.anular_letra(p_letra_id BIGINT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id       int := get_user_id();
+    v_estado_actual letra_estado_enum;
+    v_facturas_count int;
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('anular_letra', v_usr_id, jsonb_build_object('letra_id', p_letra_id));
+
+    SELECT estado INTO v_estado_actual
+    FROM doc.letra WHERE id = p_letra_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Letra #% no encontrada.', p_letra_id;
+    END IF;
+    IF v_estado_actual = 'pagada' THEN
+        RAISE EXCEPTION 'No se puede anular la letra #%: ya fue pagada. Revisar con contabilidad.', p_letra_id;
+    END IF;
+    IF v_estado_actual = 'anulada' THEN
+        RAISE EXCEPTION 'Letra #% ya está anulada.', p_letra_id;
+    END IF;
+
+    UPDATE doc.letra
+    SET estado = 'anulada', usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE id = p_letra_id;
+
+    -- Cascade: recalculate estado_pago for every factura cleared by this letra.
+    -- Skip facturas already anuladas.
+    UPDATE doc.factura_proveedor fp
+    SET estado_pago = CASE
+            -- No paid letra at all → fully unpaid again
+            WHEN NOT EXISTS (
+                SELECT 1
+                FROM doc.letra_factura lf2
+                JOIN doc.letra l2 ON l2.id = lf2.letra_id
+                WHERE lf2.factura_proveedor_id = fp.id
+                  AND l2.estado = 'pagada'
+            ) THEN 'pendiente'
+            -- All non-anulada letras are paid → fully settled
+            WHEN NOT EXISTS (
+                SELECT 1
+                FROM doc.letra_factura lf2
+                JOIN doc.letra l2 ON l2.id = lf2.letra_id
+                WHERE lf2.factura_proveedor_id = fp.id
+                  AND l2.estado NOT IN ('pagada', 'anulada')
+            ) THEN 'total'
+            -- Mix: some paid, some still open
+            ELSE 'parcial'
+        END,
+        usr_mod = v_usr_id,
+        fyh_mod = NOW()
+    WHERE fp.id IN (
+        SELECT factura_proveedor_id FROM doc.letra_factura WHERE letra_id = p_letra_id
+    )
+    AND fp.estado_pago <> 'anulado';
+
+    GET DIAGNOSTICS v_facturas_count = ROW_COUNT;
+
+    RETURN format('Letra #%s anulada. %s factura(s) recalculada(s).', p_letra_id, v_facturas_count);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in anular_letra - User: %, letra: %, Error: %', v_usr_id, p_letra_id, v_message;
+    RAISE;
+END;
+$function$;
+
+
+GRANT EXECUTE ON FUNCTION doc.get_compra(bigint)                   TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.get_factura_proveedor(bigint)        TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.get_letra(bigint)                    TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.anular_compra(bigint)                TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.anular_factura_proveedor(bigint)     TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.anular_letra(bigint)                 TO authenticated;

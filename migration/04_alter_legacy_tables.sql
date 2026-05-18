@@ -53,8 +53,8 @@ ALTER TABLE estado
     DROP COLUMN IF EXISTS estado_produccion,
     DROP COLUMN IF EXISTS estado_comercial;
 ALTER TABLE estado
-    ADD COLUMN IF NOT EXISTS estado_produccion partida_estado_enum,
-    ADD COLUMN IF NOT EXISTS estado_comercial  partida_estado_enum;
+    ADD COLUMN IF NOT EXISTS estado_produccion partida_estado_produccion_enum,
+    ADD COLUMN IF NOT EXISTS estado_comercial  partida_estado_comercial_enum;
 
 -- ═══════════════════════════════════════════════════════════════
 -- articulo_tipo (prod table: tipo_articulo) and articulo
@@ -214,6 +214,7 @@ DO $$ BEGIN
         ALTER TABLE public.usuario RENAME COLUMN last_name TO apellido;
     END IF;
 END $$;
+
 
 
 GRANT USAGE ON SCHEMA iam TO service_role;

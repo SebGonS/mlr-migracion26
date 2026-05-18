@@ -225,19 +225,19 @@ ALTER TABLE mes.ruta_plantilla               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.ruta_plantilla_detalle       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.partida_componente           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.partida_paso                 ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.paso_ejecucion               ENABLE ROW LEVEL SECURITY;
-ALTER TABLE mes.ejecucion_componente         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mes.partida_paso_ejecucion       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.programacion                 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.lavado_maquina               ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "produccion_ver" ON mes.maquina                    FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver"        ON mes.maquina FOR SELECT TO authenticated USING     (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_configurar_insert" ON mes.maquina FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('produccion.configurar'));
+CREATE POLICY "produccion_configurar_update" ON mes.maquina FOR UPDATE TO authenticated USING     (jwt_has_permission('produccion.configurar'));
 CREATE POLICY "produccion_ver" ON mes.empleado                   FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.ruta_plantilla             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.ruta_plantilla_detalle     FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.partida_componente         FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.partida_paso               FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.paso_ejecucion             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "produccion_ver" ON mes.ejecucion_componente       FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
+CREATE POLICY "produccion_ver" ON mes.partida_paso_ejecucion     FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.programacion               FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.lavado_maquina             FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 
@@ -288,7 +288,8 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- │ Function                                    │ Permission                 │
 -- ├─────────────────────────────────────────────┼────────────────────────────┤
 -- │ COMERCIAL                                                                │
--- │  crear/editar partida                        │ comercial.crear/editar     │
+-- │  crear_partida (header+steps+rolls, atomic)  │ comercial.crear            │
+-- │  actualizar_partida                          │ comercial.editar           │
 -- │  registrar/anular guia_remision              │ comercial.crear/editar     │
 -- │  crear_compra, vincular_*                    │ comercial.crear            │
 -- │  registrar_factura_proveedor                 │ comercial.crear            │
@@ -301,20 +302,33 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- │  actualizar_pesos_*                          │ inventario.editar          │
 -- ├─────────────────────────────────────────────┼────────────────────────────┤
 -- │ PRODUCCIÓN                                                               │
--- │  iniciar_ejecucion                           │ produccion.crear           │
--- │  actualizar_pasos_partida                    │ produccion.editar          │
--- │  finalizar_ejecucion                         │ produccion.ejecutar        │
--- │  registrar_consumo_ejecucion                 │ produccion.ejecutar        │
+-- │  iniciar_paso                                │ produccion.ejecutar        │
+-- │  actualizar_pasos_partida (post-creation)    │ produccion.editar          │
+-- │  actualizar_componentes_partida (post-creat.)│ produccion.editar          │
+-- │  omitir_paso                                 │ produccion.editar          │
+-- │  finalizar_paso                              │ produccion.ejecutar        │
+-- │  registrar_consumo_paso, registrar_matizado  │ produccion.ejecutar        │
 -- │  registrar_produccion                        │ produccion.ejecutar        │
 -- │  guardar_programacion                        │ produccion.programar       │
 -- │  iniciar_lavado, finalizar_lavado            │ produccion.ejecutar        │
+-- │  registrar_ejecucion_partida                   │ produccion.ejecutar        │
+-- │  cerrar_partida                              │ produccion.administrar     │
+-- │  anular_produccion                           │ produccion.ejecutar        │
 -- ├─────────────────────────────────────────────┼────────────────────────────┤
 -- │ CALIDAD                                                                  │
 -- │  crear/editar inspeccion                     │ calidad.crear/editar       │
 -- ├─────────────────────────────────────────────┼────────────────────────────┤
--- │ CONFIGURACIÓN                                                            │
+-- │ CONFIGURACIÓN OPERACIONAL                                                │
+-- │  receta.crear/actualizar/transicionar_tenido │ produccion.configurar      │
+-- │  receta.crear/activar/actualizar_lavado      │ produccion.configurar      │
+-- │  crear_plantilla, actualizar_plantilla       │ produccion.configurar      │
+-- │  set_tiempo_estandar_tenido/lavado           │ produccion.configurar      │
+-- │  maquina INSERT/UPDATE (RLS)                 │ produccion.configurar      │
+-- ├─────────────────────────────────────────────┼────────────────────────────┤
+-- │ CONFIGURACIÓN SISTEMA                                                    │
 -- │  gestión de usuarios/roles                   │ configuracion.admin        │
--- │  crear maquina, operacion, ruta_plantilla    │ configuracion.admin        │
+-- │  crear/modificar/eliminar almacen/ubicacion  │ configuracion.admin        │
+-- │  INSERT/UPDATE operacion, maquina_tipo (RLS) │ configuracion.admin        │
 -- └─────────────────────────────────────────────┴────────────────────────────┘
 
 -- =============================================================================
@@ -350,7 +364,54 @@ CREATE TRIGGER trg_bi_auth_users_usuario
 -- IAM: permisos and rol_permiso seed
 -- Idempotent — ON CONFLICT DO NOTHING on both tables.
 -- Covers every permission code referenced in RLS policies and function guards.
+--
+-- ── Role design guidelines ───────────────────────────────────────────────────
+--
+-- Permissions are scoped to domain × action (e.g. produccion.ejecutar).
+-- Roles are job functions, not job titles — each role owns a coherent set of
+-- capabilities. A user can hold multiple roles (additive union in the JWT hook).
+--
+-- Cross-domain READ overlap is intentional and not a "fat role" smell:
+--   • Production actors need comercial.ver to see partidas.
+--   • Inventory actors need produccion.ver to see consumption context.
+--   Reading outside your primary domain is normal; writing outside it is not.
+--
+-- Fat-role test: "Would a real person in this role be harmed by losing this
+-- permission?" If no, it should not be on the role.
+--
+-- Roles and their primary domain:
+--   admin               → all permissions; system owner only
+--   jefe_planta         → full plant ops (production all axes incl. configurar,
+--                         inventory, quality); read-only commercial; no user/system mgmt
+--   supervisor_produccion → plan + execute + configure production; read-only elsewhere
+--   operador_produccion → execute-only (steps, consumptions, weighing reads)
+--   calidad             → QC inspections (create/edit); reads production/stock
+--   inventario          → stock management (create/edit items, adjustments,
+--                         catalog master data); reads commercial + production
+--   compras             → procurement (create/edit docs, invoices, letters);
+--                         reads inventory; creates catalog items (new suppliers)
+--   sistema             → automated processes (pg_cron, webhooks); broad read
+--                         + execute; never assigned to human users
+--
+-- Drift prevention:
+--   The dangerous pattern is adding *.editar to a role that only needs *.ver
+--   for cross-domain context. Before adding a write permission to a role, ask:
+--   does the function description of that role include ownership of that action?
 -- ============================================================================
+
+INSERT INTO iam.rol (code, nombre, descripcion)
+SELECT v.code, v.nombre, v.descripcion
+FROM (VALUES
+    ('admin',                 'Administrador',           'Acceso total al sistema'),
+    ('jefe_planta',           'Jefe de Planta',          'Gestión completa de operaciones de planta'),
+    ('supervisor_produccion', 'Supervisor de Producción','Planificación, ejecución y configuración de producción'),
+    ('operador_produccion',   'Operador de Producción',  'Ejecución de pasos y registro de consumos'),
+    ('calidad',               'Control de Calidad',      'Inspecciones y resultados de calidad'),
+    ('inventario',            'Inventario',              'Gestión de stock, lotes y movimientos'),
+    ('compras',               'Compras',                 'Gestión de compras, proveedores y documentos de ingreso'),
+    ('sistema',               'Sistema',                 'Procesos automatizados; no asignar a usuarios humanos')
+) AS v(code, nombre, descripcion)
+WHERE NOT EXISTS (SELECT 1 FROM iam.rol r WHERE r.code = v.code);
 
 INSERT INTO iam.permiso (code, descripcion) VALUES
     ('comercial.ver',        'Ver partidas, guías, compras y documentos comerciales'),
@@ -359,11 +420,13 @@ INSERT INTO iam.permiso (code, descripcion) VALUES
     ('inventario.ver',       'Ver stock, lotes, movimientos e ítems'),
     ('inventario.crear',     'Crear ítems e ingresar stock'),
     ('inventario.editar',    'Ajustar stock, actualizar pesos y valoraciones'),
-    ('produccion.ver',       'Ver órdenes, pasos, programación y lavados'),
-    ('produccion.crear',     'Crear órdenes de producción'),
-    ('produccion.editar',    'Editar pasos y estructura de órdenes'),
-    ('produccion.ejecutar',  'Iniciar y finalizar pasos y lavados, registrar consumos'),
-    ('produccion.programar', 'Guardar y modificar la programación de máquinas'),
+    ('produccion.ver',          'Ver órdenes, pasos, programación y lavados'),
+    ('produccion.crear',        'Crear órdenes de producción'),
+    ('produccion.editar',       'Editar pasos y estructura de órdenes'),
+    ('produccion.ejecutar',     'Iniciar y finalizar pasos y lavados, registrar consumos'),
+    ('produccion.programar',    'Guardar y modificar la programación de máquinas'),
+    ('produccion.administrar',  'Cerrar órdenes de producción (requiere los tres ejes liquidados)'),
+    ('produccion.configurar',   'Gestionar recetas, plantillas de ruta, máquinas y tiempos estándar'),
     ('calidad.ver',          'Ver inspecciones y resultados de calidad'),
     ('calidad.crear',        'Registrar inspecciones de calidad'),
     ('calidad.editar',       'Editar inspecciones existentes'),
@@ -377,6 +440,7 @@ INSERT INTO iam.rol_permiso (rol_id, permiso_id)
 SELECT r.id, p.id
 FROM (VALUES
     -- ── admin: todo ──────────────────────────────────────────
+    ('admin', 'produccion.configurar'),
     ('admin', 'comercial.ver'),
     ('admin', 'comercial.crear'),
     ('admin', 'comercial.editar'),
@@ -388,6 +452,7 @@ FROM (VALUES
     ('admin', 'produccion.editar'),
     ('admin', 'produccion.ejecutar'),
     ('admin', 'produccion.programar'),
+    ('admin', 'produccion.administrar'),
     ('admin', 'calidad.ver'),
     ('admin', 'calidad.crear'),
     ('admin', 'calidad.editar'),
@@ -395,6 +460,7 @@ FROM (VALUES
     ('admin', 'configuracion.admin'),
     ('admin', 'catalogos.editar'),
     -- ── jefe_planta: full operations, no user/config mgmt ────
+    ('jefe_planta', 'produccion.configurar'),
     ('jefe_planta', 'comercial.ver'),
     ('jefe_planta', 'inventario.ver'),
     ('jefe_planta', 'inventario.crear'),
@@ -404,11 +470,13 @@ FROM (VALUES
     ('jefe_planta', 'produccion.editar'),
     ('jefe_planta', 'produccion.ejecutar'),
     ('jefe_planta', 'produccion.programar'),
+    ('jefe_planta', 'produccion.administrar'),
     ('jefe_planta', 'calidad.ver'),
     ('jefe_planta', 'calidad.crear'),
     ('jefe_planta', 'calidad.editar'),
     ('jefe_planta', 'configuracion.ver'),
     -- ── supervisor_produccion: plan + execute, read-only elsewhere
+    ('supervisor_produccion', 'produccion.configurar'),
     ('supervisor_produccion', 'comercial.ver'),
     ('supervisor_produccion', 'inventario.ver'),
     ('supervisor_produccion', 'produccion.ver'),

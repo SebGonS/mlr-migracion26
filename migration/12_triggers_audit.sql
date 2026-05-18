@@ -191,22 +191,12 @@ CREATE TRIGGER trg_bu_ruta_plantilla_elm   BEFORE UPDATE ON mes.ruta_plantilla
 CREATE TRIGGER trg_biud_ruta_plantilla_detalle_audit BEFORE INSERT OR UPDATE OR DELETE ON mes.ruta_plantilla_detalle
     FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
 
------ORDEN DE PRODUCCION
-CREATE TRIGGER trg_bi_partida_audit BEFORE INSERT ON mes.partida
-    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-
 -----ORDEN PRODUCCION PASO
 CREATE TRIGGER trg_biud_partida_paso_audit BEFORE INSERT OR UPDATE OR DELETE ON mes.partida_paso
     FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
 CREATE TRIGGER trg_bi_partida_paso_audit BEFORE INSERT ON mes.partida_paso
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 CREATE TRIGGER trg_bu_partida_paso_audit BEFORE UPDATE ON mes.partida_paso
-    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
-
------ORDEN PRODUCCION PASO ITEM
-CREATE TRIGGER trg_bi_partida_paso_item_audit BEFORE INSERT ON mes.partida_paso_item
-    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_partida_paso_item_audit BEFORE UPDATE ON mes.partida_paso_item
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 ---PROGRAMACION
@@ -222,6 +212,12 @@ CREATE TRIGGER trg_bi_inspeccion_audit BEFORE INSERT ON calidad.inspeccion
 ---INSPECCION FOTO
 CREATE TRIGGER trg_bi_inspeccion_foto_audit BEFORE INSERT ON calidad.inspeccion_foto
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+-----PARTIDA PASO EJECUCION
+CREATE TRIGGER trg_bi_partida_paso_ejecucion_audit BEFORE INSERT ON mes.partida_paso_ejecucion
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+CREATE TRIGGER trg_bu_partida_paso_ejecucion_audit BEFORE UPDATE ON mes.partida_paso_ejecucion
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
 -- ── Compras ───────────────────────────────────────────────────────────────────
 
@@ -276,9 +272,40 @@ CREATE TRIGGER trg_bi_factura_audit BEFORE INSERT ON doc.factura
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 CREATE TRIGGER trg_bu_factura_audit BEFORE UPDATE ON doc.factura
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
-CREATE TRIGGER trg_bu_factura_elm   BEFORE UPDATE ON doc.factura
-    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_elm_fields();
+-- trg_bu_factura_elm removed: doc.factura uses estado enum for cancellation, not fyh_elm
 
 -----FACTURA DETALLE
 CREATE TRIGGER trg_bi_factura_detalle_audit BEFORE INSERT ON doc.factura_detalle
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+
+-- ── Stock balance maintenance ──────────────────────────────────────────────────
+-- Keeps inventario.lote.cantidad_actual in sync with every posted movement.
+-- Allows vw_stock_actual to be a simple indexed scan instead of aggregating
+-- all of item_movimientos at query time (SAP MCHB / Odoo stock.quant pattern).
+CREATE OR REPLACE FUNCTION inventario.fn_trg_sync_cantidad_actual()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    v_delta NUMERIC;
+BEGIN
+    v_delta := NEW.cantidad * (
+        SELECT factor FROM inventario.item_movimiento_tipo WHERE id = NEW.item_movimiento_tipo_id
+    );
+    IF NEW.lote_id IS NULL THEN
+        -- lot-less item (insumo): maintain saldo_item
+        INSERT INTO inventario.saldo_item (item_id, cantidad_actual)
+        VALUES (NEW.item_id, v_delta)
+        ON CONFLICT (item_id) DO UPDATE
+            SET cantidad_actual = inventario.saldo_item.cantidad_actual + EXCLUDED.cantidad_actual;
+    ELSE
+        -- lot-tracked item (rollo): maintain lote.cantidad_actual
+        UPDATE inventario.lote
+        SET cantidad_actual = cantidad_actual + v_delta
+        WHERE id = NEW.lote_id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_ai_im_sync_cantidad_actual
+    AFTER INSERT ON inventario.item_movimientos
+    FOR EACH ROW EXECUTE FUNCTION inventario.fn_trg_sync_cantidad_actual();

@@ -17,6 +17,7 @@ DO $$ DECLARE t TEXT; BEGIN
         'public.articulo',
         'public.color',
         'inventario.item_movimiento_tipo',
+        'inventario.item_movimiento_motivo',
         'inventario.almacen',
         'inventario.ubicacion',
         'doc.guia_remision_tipo',
@@ -25,7 +26,8 @@ DO $$ DECLARE t TEXT; BEGIN
         'mes.maquina',
         'mes.empleado_rol',
         'calidad.tipo_defecto',
-        'public.tercero'
+        'public.tercero',
+        'receta.operacion'
     ] LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS trg_bu_immutable_codigo ON %s;
@@ -38,11 +40,12 @@ DO $$ DECLARE t TEXT; BEGIN
 END $$;
 
 -- ── Hard-delete prevention triggers (apply after all tables exist) ────────────
--- Core business documents must never be hard-deleted — use flg_elm = true instead.
+-- Core business documents must never be hard-deleted — set fyh_elm instead.
 DO $$ DECLARE t TEXT; BEGIN
     FOREACH t IN ARRAY ARRAY[
         'mes.partida',
         'doc.guia_remision',
+        'doc.compra',
         'inventario.lote'
     ] LOOP
         EXECUTE format(
@@ -181,6 +184,9 @@ REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.partida FROM anon, aut
 -- Identity fields are CREADA-only via actualizar_partida; block direct UPDATE to enforce the state gate
 REVOKE UPDATE (tercero_id, color_x_cliente_id, tenido_id, articulo_tipo_id, fibra, flg_antipilling)
     ON mes.partida FROM anon, authenticated;
+-- State columns only writable through actualizar_estado_partida (SECURITY DEFINER)
+REVOKE UPDATE (estado_produccion, estado_comercial, estado_facturacion)
+    ON mes.partida FROM anon, authenticated;
 
 -----PARTIDA DETALLE
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.partida_detalle FROM anon, authenticated;
@@ -234,11 +240,9 @@ REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.partida_paso FROM anon
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.partida_paso FROM anon, authenticated;
 
 -----PASO EJECUCION
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.paso_ejecucion FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.paso_ejecucion FROM anon, authenticated;
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.partida_paso_ejecucion FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.partida_paso_ejecucion FROM anon, authenticated;
 
------EJECUCION COMPONENTE
-REVOKE INSERT (usr_cre, fyh_cre) ON mes.ejecucion_componente FROM anon, authenticated;
 
 ---PROGRAMACION
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.programacion FROM anon, authenticated;
@@ -247,6 +251,10 @@ REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.programacion FROM anon
 ---INSPECCION
 REVOKE INSERT (usr_cre, fyh_cre) ON calidad.inspeccion FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre) ON calidad.inspeccion FROM anon, authenticated;
+-- One inspection per roll per execution run — prevents duplicate QC records
+ALTER TABLE calidad.inspeccion
+    ADD CONSTRAINT uq_inspeccion_lote_ejecucion
+    UNIQUE (lote_id, partida_paso_ejecucion_id);
 
 ---INSPECCION FOTO
 REVOKE INSERT (usr_cre, fyh_cre) ON calidad.inspeccion_foto FROM anon, authenticated;
@@ -300,16 +308,42 @@ REVOKE UPDATE (usr_cre, fyh_cre)                                      ON doc.fac
 -----FACTURA DETALLE
 REVOKE INSERT (usr_cre, fyh_cre) ON doc.factura_detalle FROM anon, authenticated;
 
+-----RECETA TENIDO
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON receta.tenido FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON receta.tenido FROM anon, authenticated;
+
+-----RECETA LAVADO MAQUINA
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON receta.lavado_maquina FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON receta.lavado_maquina FROM anon, authenticated;
+
+-----MES LAVADO MAQUINA
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.lavado_maquina FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.lavado_maquina FROM anon, authenticated;
+
+-----TIEMPOS ESTANDAR TENIDO
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.tiempos_estandar_tenido FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.tiempos_estandar_tenido FROM anon, authenticated;
+
+-----TIEMPOS ESTANDAR LAVADO
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.tiempos_estandar_lavado FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.tiempos_estandar_lavado FROM anon, authenticated;
+
+-----CUADRE
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON inventario.cuadre FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON inventario.cuadre FROM anon, authenticated;
+
+-----CUADRE DETALLE
+REVOKE UPDATE (usr_mod, fyh_mod) ON inventario.cuadre_detalle FROM anon, authenticated;
+
 -- ── Performance indexes ───────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_partida_paso_partida_id  ON mes.partida_paso(partida_id);
 CREATE INDEX IF NOT EXISTS idx_partida_comp_partida_id  ON mes.partida_componente(partida_id);
-CREATE INDEX IF NOT EXISTS idx_paso_ejec_paso_id        ON mes.paso_ejecucion(paso_id);
-CREATE INDEX IF NOT EXISTS idx_ejec_comp_ejecucion_id   ON mes.ejecucion_componente(ejecucion_id);
-CREATE INDEX IF NOT EXISTS idx_ejec_comp_componente_id  ON mes.ejecucion_componente(componente_id);
+CREATE INDEX IF NOT EXISTS idx_paso_ejec_paso_id        ON mes.partida_paso_ejecucion(partida_paso_id);
 CREATE INDEX IF NOT EXISTS idx_lote_doc             ON inventario.lote(documento_tipo, documento_id);
 CREATE INDEX IF NOT EXISTS idx_im_lote_id           ON inventario.item_movimientos(lote_id);
 CREATE INDEX IF NOT EXISTS idx_im_item_id           ON inventario.item_movimientos(item_id);
 CREATE INDEX IF NOT EXISTS idx_im_fecha_hora        ON inventario.item_movimientos(fecha_hora);
+CREATE INDEX IF NOT EXISTS idx_im_documento         ON inventario.item_movimientos(documento_tipo, documento_id);
 CREATE INDEX IF NOT EXISTS idx_letra_factura_factura     ON doc.letra_factura(factura_proveedor_id);
 CREATE INDEX IF NOT EXISTS idx_compra_factura_factura_id ON doc.compra_factura_proveedor(factura_proveedor_id);
 
