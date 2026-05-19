@@ -128,6 +128,23 @@ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+-- ── vw_enums ──────────────────────────────────────────────────
+-- Exposes all application enum types and their ordered values.
+-- Frontend uses this at boot to populate filter dropdowns without hardcoding.
+CREATE OR REPLACE VIEW public.vw_enums AS
+SELECT
+    n.nspname                          AS schema,
+    t.typname                          AS enum_type,
+    e.enumlabel                        AS value,
+    e.enumsortorder::int               AS sort_order
+FROM pg_enum e
+JOIN pg_type t     ON t.oid = e.enumtypid
+JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE n.nspname = 'public'
+ORDER BY t.typname, e.enumsortorder;
+
+GRANT SELECT ON public.vw_enums TO anon, authenticated;
+
 -- ── medida_enum ────────────────────────────────────────────────
 -- NOTE: This type likely already exists as a legacy type in your DB.
 -- If applying to a FRESH DB, uncomment the block below.

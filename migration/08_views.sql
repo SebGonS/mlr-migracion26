@@ -145,10 +145,13 @@ SELECT
         || '-' || LPAD(p.numero::TEXT, 4, '0')                            AS codigo,
     p.estado_produccion                                                    AS estado,
     p.estado_comercial,
+    p.estado_facturacion,
     p.partida_origen_id,
     p.fyh_cre,
+    p.fyh_programacion,
     p.fyh_inicio,
     p.fyh_fin,
+    p.fecha_acordada,
     p.tercero_id,
     c.nombre                                                               AS cliente,
     vc.color_id,
@@ -157,6 +160,15 @@ SELECT
     vc.color_hex,
     p.tenido_id,
     t.tenido,
+    p.articulo_tipo_id,
+    at.nombre                                                              AS articulo_tipo,
+    p.fibra,
+    p.flg_antipilling,
+    p.malla,
+    p.rendimiento,
+    p.ancho,
+    p.prioridad_id,
+    pr.prioridad,
     COALESCE(pasos_stats.total_pasos, 0)                                   AS total_pasos,
     COALESCE(pasos_stats.pasos_completados, 0)                             AS pasos_completados,
     COALESCE(pasos_stats.pasos_en_proceso, 0)                              AS pasos_en_proceso,
@@ -180,12 +192,17 @@ SELECT
         ELSE NULL
     END                                                                    AS duracion_horas,
     p.usr_cre,
-    prof.nombre || ' ' || prof.apellido                                    AS creado_por
+    prof.nombre || ' ' || prof.apellido                                    AS creado_por,
+    p.usr_mod,
+    p.fyh_mod,
+    p.fyh_elm
 FROM mes.partida p
-LEFT JOIN tercero c     ON c.id  = p.tercero_id
-LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
-LEFT JOIN tenido t      ON t.id  = p.tenido_id
-LEFT JOIN usuario prof  ON prof.id = p.usr_cre
+LEFT JOIN tercero c        ON c.id  = p.tercero_id
+LEFT JOIN vw_colores vc    ON vc.color_x_cliente_id = p.color_x_cliente_id
+LEFT JOIN tenido t         ON t.id  = p.tenido_id
+LEFT JOIN articulo_tipo at ON at.id = p.articulo_tipo_id
+LEFT JOIN prioridad pr     ON pr.id = p.prioridad_id
+LEFT JOIN usuario prof     ON prof.id = p.usr_cre
 LEFT JOIN LATERAL (
     -- Paso completion is derived: a paso is COMPLETADO when it has a COMPLETADO ejecucion.
     -- PENDIENTE = no ejecucion rows at all. EN_PROCESO = ejecucion with EN_PROCESO estado.
@@ -283,6 +300,98 @@ LEFT JOIN LATERAL (
 ) letras ON true;
 
 GRANT SELECT ON doc.vw_compras TO authenticated;
+
+-- ── doc.vw_facturas_proveedor ──────────────────────────────────
+-- Hydrated list view for supplier invoices.
+-- Adds proveedor name, line count, letter coverage, and open balance.
+CREATE OR REPLACE VIEW doc.vw_facturas_proveedor AS
+SELECT
+    fp.id,
+    fp.tercero_id,
+    t.nombre                                             AS proveedor_nombre,
+    fp.serie,
+    fp.numero,
+    fp.serie || '-' || fp.numero::text                   AS numero_completo,
+    fp.fecha_emision,
+    fp.fecha_vencimiento,
+    fp.tipo_pago,
+    fp.moneda,
+    fp.tipo_cambio,
+    fp.subtotal,
+    fp.igv,
+    fp.total,
+    fp.estado_pago,
+    fp.observacion,
+    COALESCE(lineas.total_lineas, 0)                     AS total_lineas,
+    COALESCE(letras.total_letras, 0)                     AS total_letras,
+    COALESCE(letras.monto_aplicado_total, 0)             AS monto_aplicado_total,
+    fp.total - COALESCE(letras.monto_aplicado_total, 0)  AS saldo_pendiente,
+    CASE
+        WHEN fp.estado_pago IN ('total', 'anulado') THEN NULL
+        ELSE GREATEST(0, CURRENT_DATE - fp.fecha_vencimiento)
+    END                                                  AS dias_vencido,
+    COALESCE(compras.total_compras, 0)                   AS total_compras,
+    fp.fyh_cre,
+    fp.usr_cre
+FROM doc.factura_proveedor fp
+JOIN tercero t ON t.id = fp.tercero_id
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS total_lineas
+    FROM doc.factura_proveedor_detalle fpd
+    WHERE fpd.factura_proveedor_id = fp.id
+) lineas ON true
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(DISTINCT lf.letra_id)                                      AS total_letras,
+        SUM(lf.monto_aplicado) FILTER (WHERE l.estado != 'anulada')      AS monto_aplicado_total
+    FROM doc.letra_factura lf
+    JOIN doc.letra l ON l.id = lf.letra_id
+    WHERE lf.factura_proveedor_id = fp.id
+) letras ON true
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS total_compras
+    FROM doc.compra_factura_proveedor cfp
+    WHERE cfp.factura_proveedor_id = fp.id
+) compras ON true;
+
+GRANT SELECT ON doc.vw_facturas_proveedor TO authenticated;
+
+-- ── doc.vw_letras ──────────────────────────────────────────────
+-- Hydrated list view for payment letters.
+-- Adds proveedor name, invoice count, applied amount, and free balance.
+CREATE OR REPLACE VIEW doc.vw_letras AS
+SELECT
+    l.id,
+    l.tercero_id,
+    t.nombre                                             AS proveedor_nombre,
+    l.numero,
+    l.monto,
+    l.fecha_giro,
+    l.fecha_vencimiento,
+    l.fecha_pago,
+    l.banco,
+    l.estado,
+    l.observacion,
+    COALESCE(facturas.total_facturas, 0)                 AS total_facturas,
+    COALESCE(facturas.monto_aplicado_total, 0)           AS monto_aplicado_total,
+    l.monto - COALESCE(facturas.monto_aplicado_total, 0) AS monto_libre,
+    CASE
+        WHEN l.estado IN ('pagada', 'anulada') THEN NULL
+        ELSE GREATEST(0, CURRENT_DATE - l.fecha_vencimiento)
+    END                                                  AS dias_vencido,
+    l.fyh_cre,
+    l.usr_cre
+FROM doc.letra l
+JOIN tercero t ON t.id = l.tercero_id
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*)              AS total_facturas,
+        SUM(lf.monto_aplicado) AS monto_aplicado_total
+    FROM doc.letra_factura lf
+    WHERE lf.letra_id = l.id
+) facturas ON true;
+
+GRANT SELECT ON doc.vw_letras TO authenticated;
 
 -- ── inventario.vw_item_proveedor_guia ─────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_item_proveedor_guia AS
@@ -788,38 +897,70 @@ WHERE e.activo = true;
 -- maquina_planificada_id replaces the dropped maquina_asignada_id on partida_paso.
 CREATE OR REPLACE VIEW mes.vw_pasos AS
 SELECT
-    pp.id AS paso_id,
+    pp.id                                                                  AS paso_id,
     pp.secuencia,
     pp.partida_id,
-    p.numero AS partida_numero,
-    EXTRACT(YEAR FROM p.fyh_cre) || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
+    p.numero                                                               AS partida_numero,
+    EXTRACT(YEAR FROM p.fyh_cre) || '-' || LPAD(p.numero::TEXT, 4, '0')  AS partida_codigo,
+    p.tercero_id,
+    c.nombre                                                               AS cliente,
+    p.color_x_cliente_id,
+    vc.color,
+    vc.color_hex,
     pp.operacion_id,
-    o.codigo AS operacion_codigo,
-    o.nombre AS operacion_nombre,
+    o.codigo                                                               AS operacion_codigo,
+    o.nombre                                                               AS operacion_nombre,
     o.requiere_receta,
     o.requiere_maquina,
     pp.maquina_planificada_id,
     pp.receta_id,
-    m.codigo AS maquina_codigo,
-    m.nombre AS maquina_nombre,
+    -- Planning targets
+    pp.ph_objetivo,
+    pp.temperatura_objetivo,
+    pp.relacion_bano_objetivo,
+    pp.tiempo_estandar,
+    -- Active machine: actual (from ejecucion) falls back to planned
+    m.id                                                                   AS maquina_id,
+    m.codigo                                                               AS maquina_codigo,
+    m.nombre                                                               AS maquina_nombre,
+    -- Execution data from latest ejecucion run
+    pe.id                                                                  AS ejecucion_id,
+    pe.empleado_id,
+    pe.fyh_inicio,
+    pe.fyh_fin,
+    pe.ph_real,
+    pe.temperatura_real,
+    pe.relacion_bano_real,
+    pe.cantidad,
+    pe.notas,
+    -- Scheduling context
+    prog.id                                                                AS programacion_id,
+    prog.fecha                                                             AS fecha_programada,
+    prog.secuencia                                                         AS secuencia_programada,
     -- Derived execution state: PENDIENTE when no ejecucion rows exist
     CASE
         WHEN pe.id IS NOT NULL AND pe.estado = 'COMPLETADO' THEN 'COMPLETADO'
         WHEN pe.id IS NOT NULL AND pe.estado = 'EN_PROCESO' THEN 'EN_PROCESO'
         WHEN pe.id IS NOT NULL AND pe.estado = 'OMITIDO'    THEN 'OMITIDO'
         ELSE 'PENDIENTE'
-    END AS estado
+    END                                                                    AS estado
 FROM mes.partida_paso pp
-JOIN mes.partida p ON p.id = pp.partida_id
-JOIN mes.operacion o ON o.id = pp.operacion_id
+JOIN mes.partida p      ON p.id  = pp.partida_id
+JOIN mes.operacion o    ON o.id  = pp.operacion_id
+LEFT JOIN tercero c     ON c.id  = p.tercero_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
 LEFT JOIN LATERAL (
-    SELECT id, estado, maquina_id
+    SELECT id, estado, maquina_id, empleado_id,
+           fyh_inicio, fyh_fin, ph_real, temperatura_real,
+           relacion_bano_real, cantidad, notas
     FROM mes.partida_paso_ejecucion
     WHERE partida_paso_id = pp.id
     ORDER BY fyh_inicio DESC NULLS LAST
     LIMIT 1
 ) pe ON true
-LEFT JOIN mes.maquina m ON m.id = COALESCE(pe.maquina_id, pp.maquina_planificada_id);
+LEFT JOIN mes.maquina m ON m.id = COALESCE(pe.maquina_id, pp.maquina_planificada_id)
+LEFT JOIN mes.programacion prog ON prog.actividad_tipo = 'partida_paso'
+                                AND prog.actividad_id  = pp.id;
 
 -- ── inventario.vw_items_movimientos ───────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_items_movimientos AS
@@ -1130,6 +1271,8 @@ DROP VIEW IF EXISTS inventario.vw_stock_lotes_ubicacion    CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_lotes              CASCADE;
 
 -- doc views
+DROP VIEW IF EXISTS doc.vw_letras                          CASCADE;
+DROP VIEW IF EXISTS doc.vw_facturas_proveedor              CASCADE;
 DROP VIEW IF EXISTS doc.vw_compras                         CASCADE;
 
 -- public base views (other views may depend — drop last)

@@ -2970,12 +2970,13 @@ WHERE l.documento_tipo = 'GUIA_REMISION'
 
 UNION ALL
 
--- Dyed rolls — full roll identity from partida; guia traced through production chain
+-- Dyed rolls — spec fields from partida directly; no guia for legacy PARTIDA-origin rolls
+-- (legacy fabric rolls arrived via partida flow, not guia_remision, so guia_remision_id = NULL)
 -- At insert time documento_tipo = 'partida_paso'; end-of-migration re-stamp updates
 -- these lotes to 'partida_paso_ejecucion' after ejecucion rows are created.
 SELECT
     l.id,
-    gr.id,
+    NULL::bigint,
     op.ancho,
     op.malla,
     op.rendimiento,
@@ -2987,12 +2988,8 @@ SELECT
 FROM inventario.lote l
 JOIN item i       ON i.id = l.item_id
 JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
-JOIN mes.partida_paso opp  ON opp.id = l.documento_id
-JOIN mes.partida op        ON op.id = opp.partida_id
-JOIN mes.partida_componente opi  ON opi.partida_id = op.id
-JOIN inventario.lote l_orig         ON l_orig.id = opi.lote_id
-JOIN doc.guia_remision_detalle grd  ON grd.lote_id = l_orig.id
-JOIN doc.guia_remision gr           ON gr.id = grd.guia_remision_id
+JOIN mes.partida_paso opp ON opp.id = l.documento_id
+JOIN mes.partida op       ON op.id = opp.partida_id
 WHERE l.documento_tipo = 'partida_paso'
   AND l.fyh_elm IS NULL
 

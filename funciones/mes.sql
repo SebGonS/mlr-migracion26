@@ -1630,6 +1630,7 @@ DECLARE
     v_paso_id          BIGINT;
     v_ejecucion_id     BIGINT;
     v_paso_count       INT := 0;
+    v_already_executed BIGINT;
 BEGIN
     IF NOT jwt_has_permission('produccion.ejecutar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
@@ -1648,15 +1649,18 @@ BEGIN
         RAISE EXCEPTION 'Se requiere al menos un paso en p_data.pasos.';
     END IF;
 
-    -- Idempotency guard: reject if any paso already has an ejecucion.
-    IF EXISTS (
-        SELECT 1 FROM mes.partida_paso_ejecucion pe
-        JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
-        WHERE pp.partida_id = v_partida_id
-    ) THEN
+    -- Batch idempotency guard: one query against all submitted paso_ids.
+    SELECT pe.partida_paso_id INTO v_already_executed
+    FROM mes.partida_paso_ejecucion pe
+    WHERE pe.partida_paso_id IN (
+        SELECT (el->>'paso_id')::BIGINT FROM jsonb_array_elements(p_data->'pasos') el
+    )
+    LIMIT 1;
+
+    IF v_already_executed IS NOT NULL THEN
         RAISE EXCEPTION
-            'La partida % ya tiene ejecuciones registradas. Para corregir una ejecución use anular_produccion.',
-            v_partida_id;
+            'El paso % ya tiene una ejecución registrada. Para corregir use anular_produccion.',
+            v_already_executed;
     END IF;
 
     FOR v_paso IN SELECT * FROM jsonb_array_elements(p_data->'pasos') LOOP
