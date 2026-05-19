@@ -3183,21 +3183,27 @@ SELECT setval(pg_get_serial_sequence('notification.notifications',           'id
 -- ── Initialize maintained stock balances from movement history ─
 -- Runs after all movements are migrated. Trigger (step 12) takes over from here.
 
--- lote.cantidad_actual: one UPDATE per lote (lot-tracked items — rollos)
-UPDATE inventario.lote l
-SET cantidad_actual = COALESCE((
-    SELECT SUM(im.cantidad * imt.factor)
-    FROM inventario.item_movimientos im
-    JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-    WHERE im.lote_id = l.id
-), 0);
-
--- saldo_item.cantidad_actual: one row per item (lot-less items — insumos)
-INSERT INTO inventario.saldo_item (item_id, cantidad_actual)
-SELECT im.item_id, SUM(im.cantidad * imt.factor)
+-- lote_saldo (MCHB): one row per (lote, ubicacion).
+-- Ingress always has destino_ubicacion_id set; egress destino is NULL (consumed stock
+-- has no destination). COALESCE(destino, origen) resolves the effective location for both.
+INSERT INTO inventario.lote_saldo (lote_id, ubicacion_id, cantidad_actual)
+SELECT
+    im.lote_id,
+    COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
+    SUM(im.cantidad * imt.factor)                             AS cantidad_actual
 FROM inventario.item_movimientos im
 JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-WHERE im.lote_id IS NULL
-GROUP BY im.item_id
-ON CONFLICT (item_id) DO UPDATE SET cantidad_actual = EXCLUDED.cantidad_actual;
+WHERE im.lote_id IS NOT NULL
+GROUP BY im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id)
+ON CONFLICT (lote_id, ubicacion_id) DO UPDATE
+    SET cantidad_actual = inventario.lote_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
+
+-- saldo_item (MARD): aggregate lote_saldo by (item, ubicacion).
+INSERT INTO inventario.saldo_item (item_id, ubicacion_id, cantidad_actual)
+SELECT l.item_id, ls.ubicacion_id, SUM(ls.cantidad_actual)
+FROM inventario.lote_saldo ls
+JOIN inventario.lote l ON l.id = ls.lote_id
+GROUP BY l.item_id, ls.ubicacion_id
+ON CONFLICT (item_id, ubicacion_id) DO UPDATE
+    SET cantidad_actual = EXCLUDED.cantidad_actual;
 

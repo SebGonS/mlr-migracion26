@@ -531,7 +531,7 @@ BEGIN
         ))
         INTO v_error_payload
         FROM solicitado s
-        LEFT JOIN inventario.vw_stock_actual sa ON sa.lote_id = s.lote_id
+        LEFT JOIN inventario.vw_stock_lotes sa ON sa.lote_id = s.lote_id
         WHERE COALESCE(sa.cantidad_disponible, 0) < s.cantidad;
 
         IF v_error_payload IS NOT NULL THEN
@@ -1236,10 +1236,9 @@ IF v_guia_tipo.flg_emitida THEN
         items.cantidad,
         COALESCE(sa.cantidad_disponible, 0) AS cantidad_disponible
     FROM guia_items items
-    LEFT JOIN inventario.vw_stock_actual sa
+    LEFT JOIN inventario.vw_stock_lotes sa
         ON sa.item_id = items.item_id
         AND sa.lote_id = items.lote_id
-        AND sa.ubicacion_id = items.ubicacion_id
     JOIN item ON item.id = items.item_id
     WHERE COALESCE(sa.cantidad_disponible, 0) < items.cantidad
 )
@@ -1495,7 +1494,7 @@ SELECT jsonb_build_object(
                 'almacen_nombre', al.nombre,
                 'saldo_actual', (
                     SELECT ROUND(SUM(sa.cantidad_disponible)::NUMERIC, 4)
-                    FROM inventario.vw_stock_actual sa
+                    FROM inventario.vw_stock_lotes sa
                     WHERE sa.lote_id = grd.lote_id
                 )
             ) ORDER BY grd.id

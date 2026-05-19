@@ -279,29 +279,43 @@ CREATE TRIGGER trg_bi_factura_detalle_audit BEFORE INSERT ON doc.factura_detalle
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 
 -- ── Stock balance maintenance ──────────────────────────────────────────────────
--- Keeps inventario.lote.cantidad_actual in sync with every posted movement.
--- Allows vw_stock_actual to be a simple indexed scan instead of aggregating
--- all of item_movimientos at query time (SAP MCHB / Odoo stock.quant pattern).
+-- Maintains lote_saldo (MCHB) and saldo_item (MARD) on every posted movement.
+-- Effective location follows SAP MSEG pattern: destino for inflows, origen for outflows.
+-- Both tables are updated in the same transaction regardless of lote_id.
 CREATE OR REPLACE FUNCTION inventario.fn_trg_sync_cantidad_actual()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
-    v_delta NUMERIC;
+    v_factor       NUMERIC;
+    v_delta        NUMERIC;
+    v_ubicacion_id INT;
 BEGIN
-    v_delta := NEW.cantidad * (
-        SELECT factor FROM inventario.item_movimiento_tipo WHERE id = NEW.item_movimiento_tipo_id
-    );
-    IF NEW.lote_id IS NULL THEN
-        -- lot-less item (insumo): maintain saldo_item
-        INSERT INTO inventario.saldo_item (item_id, cantidad_actual)
-        VALUES (NEW.item_id, v_delta)
-        ON CONFLICT (item_id) DO UPDATE
-            SET cantidad_actual = inventario.saldo_item.cantidad_actual + EXCLUDED.cantidad_actual;
+    SELECT factor INTO v_factor
+    FROM inventario.item_movimiento_tipo
+    WHERE id = NEW.item_movimiento_tipo_id;
+
+    v_delta := NEW.cantidad * v_factor;
+
+    -- Effective location: destino for inflows (+), origen for outflows (-)
+    IF v_delta >= 0 THEN
+        v_ubicacion_id := NEW.destino_ubicacion_id;
     ELSE
-        -- lot-tracked item (rollo): maintain lote.cantidad_actual
-        UPDATE inventario.lote
-        SET cantidad_actual = cantidad_actual + v_delta
-        WHERE id = NEW.lote_id;
+        v_ubicacion_id := NEW.origen_ubicacion_id;
     END IF;
+
+    -- MCHB: lot-level balance at location
+    IF NEW.lote_id IS NOT NULL THEN
+        INSERT INTO inventario.lote_saldo (lote_id, ubicacion_id, cantidad_actual)
+        VALUES (NEW.lote_id, v_ubicacion_id, v_delta)
+        ON CONFLICT (lote_id, ubicacion_id) DO UPDATE
+            SET cantidad_actual = inventario.lote_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
+    END IF;
+
+    -- MARD: item-level balance at location (always)
+    INSERT INTO inventario.saldo_item (item_id, ubicacion_id, cantidad_actual)
+    VALUES (NEW.item_id, v_ubicacion_id, v_delta)
+    ON CONFLICT (item_id, ubicacion_id) DO UPDATE
+        SET cantidad_actual = inventario.saldo_item.cantidad_actual + EXCLUDED.cantidad_actual;
+
     RETURN NEW;
 END;
 $$;

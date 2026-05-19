@@ -36,31 +36,38 @@ JOIN unidad u ON i.unidad_id = u.id;
 -- ── inventario.vw_item_movimiento_categoria ───────────────────
 -- Already created in 05 before the table — kept here for view-only reference.
 
--- ── inventario.vw_stock_actual ────────────────────────────────
--- Two branches unioned, both fully maintained — no aggregation at query time.
---   Lot-tracked (rollos): reads lote.cantidad_actual  (≈ SAP MCHB)
---   Lot-less (insumos):   reads saldo_item.cantidad_actual (≈ SAP MARD)
-CREATE OR REPLACE VIEW inventario.vw_stock_actual AS
+-- ── inventario.vw_stock_lotes ─────────────────────────────────
+-- Per-lot stock, location-agnostic — sums lote_saldo across locations (≈ SAP MCHB view).
+-- Used by FIFO (calcular_fifo), lot-level gate checks, and roll stock views.
+DROP VIEW IF EXISTS inventario.vw_stock_actual CASCADE;
+CREATE OR REPLACE VIEW inventario.vw_stock_lotes AS
 SELECT
-    l.id                AS lote_id,
+    l.id                    AS lote_id,
     l.item_id,
-    NULL::INT           AS ubicacion_id,
-    l.cantidad_actual   AS cantidad_disponible,
-    l.fyh_cre           AS fecha_hora_ingreso
+    SUM(ls.cantidad_actual) AS cantidad_disponible,
+    l.fyh_cre               AS fecha_hora_ingreso
 FROM inventario.lote l
-WHERE l.cantidad_actual > 0
-  AND l.fyh_elm IS NULL
-UNION ALL
-SELECT
-    NULL::INT           AS lote_id,
-    si.item_id,
-    NULL::INT           AS ubicacion_id,
-    si.cantidad_actual  AS cantidad_disponible,
-    NULL::TIMESTAMPTZ   AS fecha_hora_ingreso
-FROM inventario.saldo_item si
-WHERE si.cantidad_actual > 0;
+JOIN inventario.lote_saldo ls ON ls.lote_id = l.id
+WHERE l.fyh_elm IS NULL
+GROUP BY l.id, l.item_id, l.fyh_cre
+HAVING SUM(ls.cantidad_actual) > 0;
 
-GRANT SELECT ON inventario.vw_stock_actual TO anon, authenticated;
+-- ── inventario.vw_stock_lotes_ubicacion ───────────────────────
+-- Per-(lot, location) stock — exposes ubicacion_id for picking and location display.
+CREATE OR REPLACE VIEW inventario.vw_stock_lotes_ubicacion AS
+SELECT
+    l.id               AS lote_id,
+    l.item_id,
+    ls.ubicacion_id,
+    ls.cantidad_actual AS cantidad_disponible,
+    l.fyh_cre          AS fecha_hora_ingreso
+FROM inventario.lote l
+JOIN inventario.lote_saldo ls ON ls.lote_id = l.id
+WHERE l.fyh_elm IS NULL
+  AND ls.cantidad_actual > 0;
+
+GRANT SELECT ON inventario.vw_stock_lotes           TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_lotes_ubicacion TO anon, authenticated;
 
 
 -- ── inventario.vw_lotes_rollos_stock ─────────────────────────
@@ -109,15 +116,15 @@ SELECT
     lrd.guia_remision_id,
     gr.serie                        AS guia_serie,
     gr.correlativo                  AS guia_correlativo
-FROM inventario.vw_stock_actual sa
+FROM inventario.vw_stock_lotes_ubicacion sa
 JOIN inventario.lote l                  ON l.id = sa.lote_id
 JOIN item i                             ON i.id = sa.item_id
 JOIN item_tipo it                       ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
 JOIN item_rollo_detalle ird             ON ird.item_id = i.id
 JOIN articulo art                       ON art.id = ird.articulo_id
 JOIN unidad un                          ON un.id = i.unidad_id
-JOIN inventario.ubicacion u             ON u.id = sa.ubicacion_id
-JOIN inventario.almacen a               ON a.id = u.almacen_id
+LEFT JOIN inventario.ubicacion u         ON u.id = sa.ubicacion_id
+LEFT JOIN inventario.almacen a           ON a.id = u.almacen_id
 LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = sa.lote_id
 LEFT JOIN doc.guia_remision gr          ON gr.id = lrd.guia_remision_id
 LEFT JOIN tercero t                     ON t.id = l.propietario_id
@@ -404,20 +411,34 @@ JOIN mes.partida p ON p.id = pp.partida_id
 WHERE l.documento_tipo = 'partida_paso_ejecucion'
 GROUP BY p.id, l.item_id, vi.item_codigo, vi.item_nombre;
 
--- ── inventario.vw_stock_general ───────────────────────────────
-CREATE OR REPLACE VIEW inventario.vw_stock_general AS
+-- ── inventario.vw_stock_items ─────────────────────────────────
+-- Item-level stock totals, location-agnostic — reads saldo_item (≈ SAP MARD).
+-- O(1) per item: no aggregation over lot history. Used by availability gates.
+DROP VIEW IF EXISTS inventario.vw_stock_general CASCADE;
+CREATE OR REPLACE VIEW inventario.vw_stock_items AS
 SELECT
-    vi.item_id,
-    vi.item_codigo,
-    vi.item_nombre,
-    vi.item_tipo_id,
-    vi.item_tipo_codigo,
-    SUM(sa.cantidad_disponible) AS cantidad_total,
-    vi.unidad_id,
-    vi.unidad_codigo
-FROM inventario.vw_stock_actual sa
-LEFT JOIN vw_items vi ON vi.item_id = sa.item_id
-GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre, vi.item_tipo_id, vi.item_tipo_codigo, vi.unidad_id, vi.unidad_codigo;
+    vi.item_id, vi.item_codigo, vi.item_nombre,
+    vi.item_tipo_id, vi.item_tipo_codigo,
+    SUM(si.cantidad_actual) AS cantidad_total,
+    vi.unidad_id, vi.unidad_codigo
+FROM inventario.saldo_item si
+JOIN vw_items vi ON vi.item_id = si.item_id
+WHERE si.cantidad_actual > 0
+GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre,
+         vi.item_tipo_id, vi.item_tipo_codigo, vi.unidad_id, vi.unidad_codigo;
+
+-- ── inventario.vw_stock_items_ubicacion ───────────────────────
+-- Item stock by location — exposes ubicacion_id for location-scoped checks.
+CREATE OR REPLACE VIEW inventario.vw_stock_items_ubicacion AS
+SELECT
+    vi.item_id, vi.item_codigo, vi.item_nombre,
+    vi.item_tipo_id, vi.item_tipo_codigo,
+    si.ubicacion_id,
+    si.cantidad_actual AS cantidad_total,
+    vi.unidad_id, vi.unidad_codigo
+FROM inventario.saldo_item si
+JOIN vw_items vi ON vi.item_id = si.item_id
+WHERE si.cantidad_actual > 0;
 
 -- ── inventario.vw_stock_rollos ────────────────────────────────
 -- Kept as combined base view in case any function needs a single roll stock source.
@@ -491,7 +512,7 @@ SELECT
     c.nombre                    AS propietario,
     COUNT(sa.lote_id)           AS cantidad_rollos,
     SUM(sa.cantidad_disponible) AS cantidad_total
-FROM inventario.vw_stock_actual sa
+FROM inventario.vw_stock_lotes sa
 JOIN inventario.lote l              ON l.id = sa.lote_id
 JOIN item i                         ON i.id = sa.item_id
 JOIN item_tipo it                   ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
@@ -540,7 +561,7 @@ SELECT
     c.nombre                    AS propietario,
     COUNT(sa.lote_id)           AS cantidad_rollos,
     SUM(sa.cantidad_disponible) AS cantidad_total
-FROM inventario.vw_stock_actual sa
+FROM inventario.vw_stock_lotes sa
 JOIN inventario.lote l              ON l.id = sa.lote_id
 JOIN item i                         ON i.id = sa.item_id
 JOIN item_tipo it                   ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
@@ -562,20 +583,21 @@ GROUP BY
 ORDER BY art.nombre, vc.color, i.nombre;
 
 -- ── inventario.vw_stock_insumos ───────────────────────────────
--- Reads from maintained saldo_item — no aggregation at query time.
+-- Insumo stock totals with tipo/colorante attributes, location-agnostic.
+-- Aggregates saldo_item across locations (saldo_item key is item_id + ubicacion_id).
 CREATE OR REPLACE VIEW inventario.vw_stock_insumos AS
 SELECT
     si.item_id,
-    i.codigo            AS item_codigo,
-    i.nombre            AS item_nombre,
-    si.cantidad_actual  AS cantidad_total,
-    un.codigo           AS unidad_codigo,
+    i.codigo                    AS item_codigo,
+    i.nombre                    AS item_nombre,
+    SUM(si.cantidad_actual)     AS cantidad_total,
+    un.codigo                   AS unidad_codigo,
     iid.insumo_tipo_id,
-    intp.codigo         AS insumo_tipo_codigo,
-    intp.nombre         AS insumo_tipo_nombre,
+    intp.codigo                 AS insumo_tipo_codigo,
+    intp.nombre                 AS insumo_tipo_nombre,
     iid.colorante_tipo_id,
-    ct.codigo           AS colorante_tipo_codigo,
-    ct.nombre           AS colorante_tipo_nombre
+    ct.codigo                   AS colorante_tipo_codigo,
+    ct.nombre                   AS colorante_tipo_nombre
 FROM inventario.saldo_item si
 JOIN item i        ON i.id = si.item_id
 JOIN item_tipo it  ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
@@ -583,7 +605,10 @@ JOIN unidad un     ON un.id = i.unidad_id
 LEFT JOIN item_insumo_detalle iid  ON iid.item_id = si.item_id
 LEFT JOIN insumo_tipo intp         ON intp.id = iid.insumo_tipo_id
 LEFT JOIN colorante_tipo ct        ON ct.id = iid.colorante_tipo_id
-WHERE si.cantidad_actual > 0;
+WHERE si.cantidad_actual > 0
+GROUP BY si.item_id, i.codigo, i.nombre, un.codigo,
+         iid.insumo_tipo_id, intp.codigo, intp.nombre,
+         iid.colorante_tipo_id, ct.codigo, ct.nombre;
 
 -- ── inventario.vw_precio_promedio_insumos ────────────────────
 -- Weighted average cost per insumo item.
@@ -648,7 +673,7 @@ SELECT
     sa.cantidad_disponible,
     vi.unidad_id,
     vi.unidad_codigo
-FROM inventario.vw_stock_actual sa
+FROM inventario.vw_stock_lotes_ubicacion sa
 LEFT JOIN vw_items vi ON vi.item_id = sa.item_id
 LEFT JOIN inventario.lote l ON l.id = sa.lote_id;
 
@@ -878,7 +903,7 @@ WITH
       COUNT(DISTINCT sa.lote_id) FILTER (
           WHERE l.fyh_cre >= (SELECT d FROM ini_ant)
             AND l.fyh_cre <  (SELECT d FROM ini_mes))                  AS recibidos_mes_anterior
-    FROM inventario.vw_stock_actual sa
+    FROM inventario.vw_stock_lotes sa
     JOIN inventario.lote l ON l.id = sa.lote_id
     JOIN item i             ON i.id  = sa.item_id
     JOIN item_tipo it       ON it.id = i.item_tipo_id
@@ -1024,21 +1049,22 @@ JOIN doc.guia_remision_tipo grt         ON grt.id = gr.guia_remision_tipo_id
 JOIN tercero t                          ON t.id = gr.tercero_id
 JOIN inventario.lote_rollo_detalle lrd  ON lrd.guia_remision_id = gr.id
 JOIN inventario.lote l                  ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
-LEFT JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+LEFT JOIN inventario.vw_stock_lotes sa ON sa.lote_id = l.id
 GROUP BY gr.id, gr.serie, gr.correlativo, gr.fecha_emision, gr.tercero_id,
          t.nombre, grt.codigo;
 
 -- ── Grants ────────────────────────────────────────────────────
-GRANT SELECT ON inventario.vw_rollos_por_guia         TO anon, authenticated;
-GRANT SELECT ON inventario.vw_lotes_rollos_stock      TO anon, authenticated;
--- GRANT SELECT ON inventario.vw_stock_rollos        TO anon, authenticated;
-GRANT SELECT ON inventario.vw_stock_rollos_crudos   TO anon, authenticated;
-GRANT SELECT ON inventario.vw_stock_rollos_tenidos  TO anon, authenticated;
-GRANT SELECT ON inventario.vw_stock_general       TO anon, authenticated;
-GRANT SELECT ON inventario.vw_stock_insumos       TO anon, authenticated;
-GRANT SELECT ON inventario.vw_lotes_disponibles   TO anon, authenticated;
-GRANT SELECT ON inventario.vw_lotes_rollos_despachados TO anon, authenticated;
-GRANT SELECT ON inventario.vw_items_movimientos   TO anon, authenticated;
+GRANT SELECT ON inventario.vw_rollos_por_guia              TO anon, authenticated;
+GRANT SELECT ON inventario.vw_lotes_rollos_stock           TO anon, authenticated;
+-- GRANT SELECT ON inventario.vw_stock_rollos              TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_rollos_crudos          TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_rollos_tenidos         TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_items                  TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_items_ubicacion        TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_insumos                TO anon, authenticated;
+GRANT SELECT ON inventario.vw_lotes_disponibles            TO anon, authenticated;
+GRANT SELECT ON inventario.vw_lotes_rollos_despachados     TO anon, authenticated;
+GRANT SELECT ON inventario.vw_items_movimientos            TO anon, authenticated;
 GRANT SELECT ON mes.vw_maquinas                   TO authenticated;
 GRANT SELECT ON mes.vw_empleados_activos          TO authenticated;
 GRANT SELECT ON mes.vw_pasos                      TO anon, authenticated;
@@ -1087,19 +1113,21 @@ DROP VIEW IF EXISTS mes.vw_partida_resumen_tenido          CASCADE;
 DROP VIEW IF EXISTS mes.vw_partida_produccion_rollos       CASCADE;
 DROP VIEW IF EXISTS mes.vw_partidas                        CASCADE;
 
--- inventario views (dependent on vw_stock_actual — drop before it)
+-- inventario views (dependent on vw_stock_lotes — drop before it)
 DROP VIEW IF EXISTS inventario.vw_rollos_por_guia          CASCADE;
 DROP VIEW IF EXISTS inventario.vw_lotes_rollos_despachados CASCADE;
 DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock       CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_rollos_tenidos     CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_rollos_crudos      CASCADE;
-DROP VIEW IF EXISTS inventario.vw_stock_general            CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_items_ubicacion    CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_items              CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_insumos            CASCADE;
 DROP VIEW IF EXISTS inventario.vw_lotes_disponibles        CASCADE;
 DROP VIEW IF EXISTS inventario.vw_precio_promedio_insumos  CASCADE;
 DROP VIEW IF EXISTS inventario.vw_item_proveedor_guia      CASCADE;
 DROP VIEW IF EXISTS inventario.vw_items_movimientos        CASCADE;
-DROP VIEW IF EXISTS inventario.vw_stock_actual             CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_lotes_ubicacion    CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_lotes              CASCADE;
 
 -- doc views
 DROP VIEW IF EXISTS doc.vw_compras                         CASCADE;

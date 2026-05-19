@@ -6,7 +6,7 @@
 --
 -- Key changes from legacy:
 --   • insumo_id → item_id
---   • stock snapshot sourced from inventario.vw_stock_general (INSUMO tipo)
+--   • stock snapshot sourced from inventario.vw_stock_items (INSUMO tipo)
 --     joined with inventario.item_valoracion for MAP + stock_valorado
 --   • adjustments posted directly to inventario.item_movimientos
 --     (AJUSTE_POS / AJUSTE_NEG) — no longer uses entrada/salida_inventario
@@ -74,7 +74,7 @@ BEGIN
          LIMIT 1)
     FROM item i
     JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
-    LEFT JOIN inventario.vw_stock_general  sg ON sg.item_id  = i.id
+    LEFT JOIN inventario.vw_stock_items  sg ON sg.item_id  = i.id
     LEFT JOIN inventario.item_valoracion   iv ON iv.item_id  = i.id
     WHERE i.fyh_elm IS NULL;
 
@@ -503,7 +503,7 @@ BEGIN
         FROM mes.partida_componente opi
         JOIN inventario.lote l             ON l.id = opi.lote_id AND l.fyh_elm IS NULL
         JOIN item_rollo_detalle ird        ON ird.item_id = l.item_id
-        JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+        JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
         WHERE opi.partida_id = p_partida_id
           AND CASE WHEN ird.flg_rib THEN v_peso_por_rib     IS NOT NULL
                    ELSE                  v_peso_por_regular IS NOT NULL END
@@ -671,7 +671,7 @@ BEGIN
         FROM inventario.lote_rollo_detalle lrd
         JOIN inventario.lote l             ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
         JOIN item_rollo_detalle ird        ON ird.item_id = l.item_id
-        JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+        JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
         WHERE lrd.guia_remision_id = p_guia_id
           AND CASE WHEN ird.flg_rib THEN v_peso_por_rib     IS NOT NULL
                    ELSE                  v_peso_por_regular IS NOT NULL END
@@ -815,7 +815,7 @@ BEGIN
             i.peso_nuevo
         FROM input i
         JOIN inventario.lote l             ON l.id = i.lote_id AND l.fyh_elm IS NULL
-        JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+        JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
     ),
     pesajes AS (
         INSERT INTO inventario.pesaje (lote_id, tipo, peso_real, usr_cre)
@@ -1015,7 +1015,7 @@ BEGIN
         FROM mes.partida_componente opi
         JOIN inventario.lote l      ON l.id = opi.lote_id AND l.fyh_elm IS NULL
         JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
-        JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+        JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
         WHERE opi.partida_id = p_partida_id
           AND CASE WHEN ird.flg_rib THEN v_peso_por_rib     IS NOT NULL
                    ELSE                  v_peso_por_regular IS NOT NULL END
@@ -1097,7 +1097,7 @@ GRANT EXECUTE ON FUNCTION inventario.corregir_pesaje_produccion(BIGINT, NUMERIC,
 --     FROM inventario.lote l
 --     LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
 --     LEFT JOIN item i ON i.id = lrd.item_id
---     JOIN inventario.vw_stock_general sg ON sg.lote_id = l.id
+--     JOIN inventario.vw_stock_items sg ON sg.lote_id = l.id
 --     WHERE l.flg_elm = false
 --       A
 --     GROUP BY l.id;

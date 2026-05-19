@@ -377,8 +377,7 @@ CREATE TABLE inventario.lote (
     usr_mod int,
     fyh_mod TIMESTAMPTZ,
     usr_elm INT,
-    fyh_elm TIMESTAMPTZ,
-    cantidad_actual NUMERIC(12,4) NOT NULL DEFAULT 0
+    fyh_elm TIMESTAMPTZ
 );
 
 CREATE TABLE inventario.lote_secuencia_anual (
@@ -412,14 +411,28 @@ FOR EACH ROW
 WHEN (NEW.secuencia IS NULL)
 EXECUTE FUNCTION inventario.trfn_generar_secuencia_lote();
 
--- ── inventario.saldo_item ─────────────────────────────────────
--- Maintained lot-less stock balance per item (≈ SAP MARD).
--- Updated synchronously by trg_ai_im_sync_cantidad_actual when lote_id IS NULL.
--- No audit fields — pure derived state, not a business entity.
-CREATE TABLE inventario.saldo_item (
-    item_id       INT PRIMARY KEY REFERENCES item(id),
-    cantidad_actual NUMERIC(12,4) NOT NULL DEFAULT 0
+-- ── inventario.lote_saldo ─────────────────────────────────────
+-- Trigger-maintained batch stock by location (≈ SAP MCHB).
+-- One row per (lote, ubicacion). Updated by trg_ai_im_sync_cantidad_actual.
+CREATE TABLE inventario.lote_saldo (
+    lote_id         INT  NOT NULL REFERENCES inventario.lote(id),
+    ubicacion_id    INT  REFERENCES inventario.ubicacion(id),
+    cantidad_actual NUMERIC(12,4) NOT NULL DEFAULT 0,
+    UNIQUE NULLS NOT DISTINCT (lote_id, ubicacion_id)
 );
+CREATE INDEX idx_lote_saldo_lote_id ON inventario.lote_saldo(lote_id);
+CREATE INDEX idx_lote_saldo_lote_ubicacion ON inventario.lote_saldo(lote_id, ubicacion_id);
+
+-- ── inventario.saldo_item ─────────────────────────────────────
+-- Trigger-maintained item stock by location (≈ SAP MARD).
+-- One row per (item, ubicacion). Updated by trg_ai_im_sync_cantidad_actual.
+CREATE TABLE inventario.saldo_item (
+    item_id         INT  NOT NULL REFERENCES item(id),
+    ubicacion_id    INT  REFERENCES inventario.ubicacion(id),
+    cantidad_actual NUMERIC(12,4) NOT NULL DEFAULT 0,
+    UNIQUE NULLS NOT DISTINCT (item_id, ubicacion_id)
+);
+CREATE INDEX idx_saldo_item_item_id ON inventario.saldo_item(item_id);
 
 -- ── inventario.item_movimientos ───────────────────────────────
 CREATE SEQUENCE IF NOT EXISTS inventario.mov_doc_seq START 1;

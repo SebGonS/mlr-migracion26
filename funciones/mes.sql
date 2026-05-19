@@ -626,14 +626,11 @@ errores AS (
         c.item_id,
         it.nombre AS item_nombre,
         c.cantidad,
-        COALESCE(SUM(sa.cantidad_disponible), 0) AS cantidad_disponible
+        COALESCE(sg.cantidad_total, 0) AS cantidad_disponible
     FROM consumos c
-    LEFT JOIN inventario.vw_stock_actual sa
-        ON sa.item_id = c.item_id
-    JOIN item it
-        ON it.id = c.item_id
-    GROUP BY c.item_id, it.nombre, c.cantidad
-    HAVING COALESCE(SUM(sa.cantidad_disponible), 0) < c.cantidad
+    LEFT JOIN inventario.vw_stock_items sg ON sg.item_id = c.item_id
+    JOIN item it ON it.id = c.item_id
+    WHERE COALESCE(sg.cantidad_total, 0) < c.cantidad
 )
 SELECT jsonb_agg(
     jsonb_build_object(
@@ -718,6 +715,7 @@ $function$;
 GRANT EXECUTE ON FUNCTION mes.registrar_matizado(BIGINT, jsonb) TO authenticated;
 
 
+
 CREATE OR REPLACE FUNCTION mes.calcular_fifo(p_items jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -739,7 +737,7 @@ BEGIN
             SUM(st.cantidad_disponible) OVER (
                 PARTITION BY st.item_id ORDER BY st.fecha_hora_ingreso
             ) AS cantidad_acumulada
-        FROM vw_stock_actual st
+        FROM inventario.vw_stock_lotes_ubicacion st
         JOIN jsonb_array_elements(p_items) i
             ON (i->>'item_id')::INT = st.item_id
     ),
@@ -841,7 +839,7 @@ BEGIN
         JOIN mes.partida_componente opi ON opi.id = ii.opi_id
             AND opi.partida_id = p_partida_id
         JOIN inventario.lote l ON l.id = opi.lote_id AND l.item_id = opi.item_id
-        JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+        JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
     ),
     pesajes AS (
         INSERT INTO inventario.pesaje (lote_id, tipo, peso_real, usr_cre)
@@ -1077,7 +1075,7 @@ BEGIN
     JOIN mes.partida_componente pc ON pc.lote_id = inp.lote_id AND pc.partida_id = v_partida_id
     JOIN inventario.lote l ON l.id = pc.lote_id
     LEFT JOIN LATERAL (
-        SELECT ubicacion_id FROM inventario.vw_stock_actual WHERE lote_id = pc.lote_id LIMIT 1
+        SELECT ubicacion_id FROM inventario.vw_stock_lotes_ubicacion WHERE lote_id = pc.lote_id LIMIT 1
     ) sa ON true;
 
     GET DIAGNOSTICS v_consumed = ROW_COUNT;
@@ -1522,12 +1520,11 @@ BEGIN
         ),
         errores AS (
             SELECT c.item_id, it.nombre AS item_nombre, c.cantidad,
-                   COALESCE(SUM(sa.cantidad_disponible), 0) AS cantidad_disponible
+                   COALESCE(sg.cantidad_total, 0) AS cantidad_disponible
             FROM consumos c
-            LEFT JOIN inventario.vw_stock_actual sa ON sa.item_id = c.item_id
+            LEFT JOIN inventario.vw_stock_items sg ON sg.item_id = c.item_id
             JOIN item it ON it.id = c.item_id
-            GROUP BY c.item_id, it.nombre, c.cantidad
-            HAVING COALESCE(SUM(sa.cantidad_disponible), 0) < c.cantidad
+            WHERE COALESCE(sg.cantidad_total, 0) < c.cantidad
         )
         SELECT jsonb_agg(jsonb_build_object(
             'item_id', item_id, 'item_nombre', item_nombre,
@@ -2215,7 +2212,7 @@ BEGIN
         'partida_paso_ejecucion',
         p_ejecucion_id
     FROM inventario.lote l
-    JOIN inventario.vw_stock_actual sa ON sa.lote_id = l.id
+    JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
     WHERE l.documento_tipo = 'partida_paso_ejecucion'
       AND l.documento_id   = p_ejecucion_id
       AND l.fyh_elm        IS NULL;
@@ -2924,7 +2921,7 @@ GRANT EXECUTE ON FUNCTION mes.get_partida(BIGINT) TO authenticated;
 -- GET COMPONENTES DISPONIBLES
 -- Returns rolls assigned to a partida that still have stock
 -- (i.e., not yet net-consumed by a production run).
--- Using vw_stock_actual as the availability gate is intentional:
+-- Using vw_stock_lotes as the availability gate is intentional:
 -- it handles annulled production correctly because anular_produccion
 -- posts a counter-movement that restores stock, whereas a PROD_CONSUMO
 -- movement-existence check would incorrectly hide re-available rolls.
@@ -2948,7 +2945,7 @@ SELECT COALESCE(jsonb_agg(
         'cantidad_reservada', pc.cantidad_reservada,
         'saldo_actual',       (
             SELECT SUM(cantidad_disponible)
-            FROM inventario.vw_stock_actual
+            FROM inventario.vw_stock_lotes
             WHERE lote_id = pc.lote_id
         ),
         'estado_calidad',     l.estado_calidad,
@@ -2965,7 +2962,7 @@ LEFT JOIN inventario.lote_rollo_detalle lrd  ON lrd.lote_id = l.id
 WHERE pc.partida_id = p_partida_id
   AND pc.lote_id IS NOT NULL
   AND EXISTS (
-      SELECT 1 FROM inventario.vw_stock_actual
+      SELECT 1 FROM inventario.vw_stock_lotes
       WHERE lote_id = pc.lote_id
   );
 $function$;
