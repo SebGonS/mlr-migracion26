@@ -280,41 +280,40 @@ CREATE TRIGGER trg_bi_factura_detalle_audit BEFORE INSERT ON doc.factura_detalle
 
 -- ── Stock balance maintenance ──────────────────────────────────────────────────
 -- Maintains lote_saldo (MCHB) and saldo_item (MARD) on every posted movement.
--- Effective location follows SAP MSEG pattern: destino for inflows, origen for outflows.
--- Both tables are updated in the same transaction regardless of lote_id.
+-- Direction is derived from location field presence — no factor lookup needed.
+-- destino IS NOT NULL → ingress (+cantidad at destino)
+-- origen  IS NOT NULL → egress  (-cantidad at origen)
+-- Both set            → transfer (both sides fire in one call — SAP 311 pattern)
 CREATE OR REPLACE FUNCTION inventario.fn_trg_sync_cantidad_actual()
 RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE
-    v_factor       NUMERIC;
-    v_delta        NUMERIC;
-    v_ubicacion_id INT;
 BEGIN
-    SELECT factor INTO v_factor
-    FROM inventario.item_movimiento_tipo
-    WHERE id = NEW.item_movimiento_tipo_id;
-
-    v_delta := NEW.cantidad * v_factor;
-
-    -- Effective location: destino for inflows (+), origen for outflows (-)
-    IF v_delta >= 0 THEN
-        v_ubicacion_id := NEW.destino_ubicacion_id;
-    ELSE
-        v_ubicacion_id := NEW.origen_ubicacion_id;
+    -- Ingress: credit destino
+    IF NEW.destino_ubicacion_id IS NOT NULL THEN
+        IF NEW.lote_id IS NOT NULL THEN
+            INSERT INTO inventario.lote_saldo (lote_id, ubicacion_id, cantidad_actual)
+            VALUES (NEW.lote_id, NEW.destino_ubicacion_id, NEW.cantidad)
+            ON CONFLICT (lote_id, ubicacion_id) DO UPDATE
+                SET cantidad_actual = inventario.lote_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
+        END IF;
+        INSERT INTO inventario.saldo_item (item_id, ubicacion_id, cantidad_actual)
+        VALUES (NEW.item_id, NEW.destino_ubicacion_id, NEW.cantidad)
+        ON CONFLICT (item_id, ubicacion_id) DO UPDATE
+            SET cantidad_actual = inventario.saldo_item.cantidad_actual + EXCLUDED.cantidad_actual;
     END IF;
 
-    -- MCHB: lot-level balance at location
-    IF NEW.lote_id IS NOT NULL THEN
-        INSERT INTO inventario.lote_saldo (lote_id, ubicacion_id, cantidad_actual)
-        VALUES (NEW.lote_id, v_ubicacion_id, v_delta)
-        ON CONFLICT (lote_id, ubicacion_id) DO UPDATE
-            SET cantidad_actual = inventario.lote_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
+    -- Egress: debit origen
+    IF NEW.origen_ubicacion_id IS NOT NULL THEN
+        IF NEW.lote_id IS NOT NULL THEN
+            INSERT INTO inventario.lote_saldo (lote_id, ubicacion_id, cantidad_actual)
+            VALUES (NEW.lote_id, NEW.origen_ubicacion_id, -NEW.cantidad)
+            ON CONFLICT (lote_id, ubicacion_id) DO UPDATE
+                SET cantidad_actual = inventario.lote_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
+        END IF;
+        INSERT INTO inventario.saldo_item (item_id, ubicacion_id, cantidad_actual)
+        VALUES (NEW.item_id, NEW.origen_ubicacion_id, -NEW.cantidad)
+        ON CONFLICT (item_id, ubicacion_id) DO UPDATE
+            SET cantidad_actual = inventario.saldo_item.cantidad_actual + EXCLUDED.cantidad_actual;
     END IF;
-
-    -- MARD: item-level balance at location (always)
-    INSERT INTO inventario.saldo_item (item_id, ubicacion_id, cantidad_actual)
-    VALUES (NEW.item_id, v_ubicacion_id, v_delta)
-    ON CONFLICT (item_id, ubicacion_id) DO UPDATE
-        SET cantidad_actual = inventario.saldo_item.cantidad_actual + EXCLUDED.cantidad_actual;
 
     RETURN NEW;
 END;

@@ -46,8 +46,8 @@ BEGIN
     VALUES (get_user_id())
     RETURNING id INTO v_cuadre_id;
 
-    -- Source from item catalog (all INSUMOs), not vw_stock_general.
-    -- vw_stock_general only includes items with qty > 0 — items fully consumed
+    -- Source from item catalog (all INSUMOs), not vw_stock_items.
+    -- vw_stock_items only includes items with qty > 0 — items fully consumed
     -- wouldn't appear on the count sheet, preventing discovery of phantom stock.
     -- cantidad_sistema = 0 for items with no open lotes; operators can still flag them.
     INSERT INTO inventario.cuadre_detalle (
@@ -376,7 +376,10 @@ BEGIN
                 'id',             im.id,
                 'tipo_codigo',    imt.codigo,
                 'tipo_nombre',    imt.nombre,
-                'cantidad',       im.cantidad * imt.factor,
+                'cantidad',       im.cantidad * (
+                    CASE WHEN im.destino_ubicacion_id IS NOT NULL THEN  1 ELSE 0 END +
+                    CASE WHEN im.origen_ubicacion_id  IS NOT NULL THEN -1 ELSE 0 END
+                ),
                 'precio',         im.precio_unitario,
                 'documento_tipo', im.documento_tipo,
                 'documento_id',   im.documento_id,

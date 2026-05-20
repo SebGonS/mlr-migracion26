@@ -974,16 +974,21 @@ BEGIN
             im.lote_id,
             COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
             items.cantidad,
-            SUM(im.cantidad * imt.factor) AS saldo
+            SUM(im.cantidad * (
+                CASE WHEN im.destino_ubicacion_id IS NOT NULL THEN  1 ELSE 0 END +
+                CASE WHEN im.origen_ubicacion_id  IS NOT NULL THEN -1 ELSE 0 END
+            )) AS saldo
         FROM inventario.item_movimientos im
-        JOIN inventario.item_movimiento_tipo imt ON im.item_movimiento_tipo_id = imt.id
         JOIN partida_rollos AS items
           ON items.lote_id = im.lote_id
          AND items.ubicacion_id = COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id)
         GROUP BY im.item_id, im.lote_id,
                  COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id),
                  items.cantidad
-        HAVING SUM(im.cantidad * imt.factor) < items.cantidad
+        HAVING SUM(im.cantidad * (
+            CASE WHEN im.destino_ubicacion_id IS NOT NULL THEN  1 ELSE 0 END +
+            CASE WHEN im.origen_ubicacion_id  IS NOT NULL THEN -1 ELSE 0 END
+        )) < items.cantidad
     )
     SELECT jsonb_agg(
         jsonb_build_object(

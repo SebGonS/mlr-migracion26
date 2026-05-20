@@ -1419,6 +1419,7 @@ INSERT INTO mes.partida_paso (
     secuencia,
     operacion_id,
     maquina_planificada_id,
+    receta_id,
     usr_cre,
     fyh_cre
 )
@@ -1429,9 +1430,11 @@ SELECT
     ROW_NUMBER() OVER (PARTITION BY pt.partida_id ORDER BY pt.fecha, pt.id)::smallint,
     (SELECT id FROM mes.operacion WHERE codigo = 'TENIDO'),
     pt.maquina::int,
+    p.receta_id,
     NULL,
     ((pt.fecha + COALESCE(pt.hora_inicio, '06:00'::time))::TIMESTAMP + INTERVAL '5 hours')::TIMESTAMPTZ
 FROM public.produccion_tenido pt
+JOIN public.partida p ON p.id = pt.partida_id
 WHERE pt.partida_id IN (SELECT id FROM mes.partida)
   AND pt.tipo = 'Teñido'
 ON CONFLICT DO NOTHING;
@@ -1501,6 +1504,7 @@ INSERT INTO mes.partida_paso (
     secuencia,
     operacion_id,
     maquina_planificada_id,
+    receta_id,
     usr_cre,
     fyh_cre
 )
@@ -1511,9 +1515,11 @@ SELECT
     1,
     (SELECT id FROM mes.operacion WHERE codigo = 'TENIDO'),
     pt.maquina::int,
+    p.receta_id,
     NULL,
     rp.fyh_cre
 FROM public.produccion_tenido pt
+JOIN public.partida p  ON p.id = pt.partida_id
 JOIN mes.partida rp
     ON  rp.partida_origen_id = pt.partida_id
     AND rp.fyh_cre = ((pt.fecha + COALESCE(pt.hora_inicio, '06:00'::time))::TIMESTAMP + INTERVAL '5 hours')::TIMESTAMPTZ
@@ -3180,20 +3186,22 @@ SELECT setval(pg_get_serial_sequence('notification.notifications',           'id
 -- ── Initialize maintained stock balances from movement history ─
 -- Runs after all movements are migrated. Trigger (step 12) takes over from here.
 
--- lote_saldo (MCHB): one row per (lote, ubicacion).
--- Ingress always has destino_ubicacion_id set; egress destino is NULL (consumed stock
--- has no destination). COALESCE(destino, origen) resolves the effective location for both.
+-- lote_saldo (MCHB): two explicit contributions per movement — no factor or imt join needed.
+-- Ingress side credits destino; egress side debits origen. Both fire for single-row transfers.
 INSERT INTO inventario.lote_saldo (lote_id, ubicacion_id, cantidad_actual)
-SELECT
-    im.lote_id,
-    COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id) AS ubicacion_id,
-    SUM(im.cantidad * imt.factor)                             AS cantidad_actual
-FROM inventario.item_movimientos im
-JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-WHERE im.lote_id IS NOT NULL
-GROUP BY im.lote_id, COALESCE(im.destino_ubicacion_id, im.origen_ubicacion_id)
+SELECT lote_id, ubicacion_id, SUM(delta)
+FROM (
+    SELECT lote_id, destino_ubicacion_id AS ubicacion_id,  cantidad AS delta
+    FROM inventario.item_movimientos
+    WHERE lote_id IS NOT NULL AND destino_ubicacion_id IS NOT NULL
+    UNION ALL
+    SELECT lote_id, origen_ubicacion_id  AS ubicacion_id, -cantidad AS delta
+    FROM inventario.item_movimientos
+    WHERE lote_id IS NOT NULL AND origen_ubicacion_id IS NOT NULL
+) sub
+GROUP BY lote_id, ubicacion_id
 ON CONFLICT (lote_id, ubicacion_id) DO UPDATE
-    SET cantidad_actual = inventario.lote_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
+    SET cantidad_actual = EXCLUDED.cantidad_actual;
 
 -- saldo_item (MARD): aggregate lote_saldo by (item, ubicacion).
 INSERT INTO inventario.saldo_item (item_id, ubicacion_id, cantidad_actual)

@@ -416,8 +416,12 @@ CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_despachados AS
 WITH mov AS (
     SELECT
         im.lote_id,
-        SUM(im.cantidad * imt.factor)                                   AS saldo,
-        BOOL_OR(imt.factor = -1 AND imt.categoria != 'PRODUCCION')     AS has_egreso
+        SUM(im.cantidad * (
+            CASE WHEN im.destino_ubicacion_id IS NOT NULL THEN  1 ELSE 0 END +
+            CASE WHEN im.origen_ubicacion_id  IS NOT NULL THEN -1 ELSE 0 END
+        ))                                                              AS saldo,
+        BOOL_OR(im.origen_ubicacion_id IS NOT NULL
+                AND imt.categoria NOT IN ('PRODUCCION', 'TRANSFERENCIA')) AS has_egreso
     FROM inventario.item_movimientos im
     JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
     GROUP BY im.lote_id
@@ -978,9 +982,11 @@ SELECT
     imt.codigo                                                        AS tipo_codigo,
     imt.nombre                                                        AS tipo_nombre,
     imt.categoria,
-    imt.factor,
     im.cantidad,
-    im.cantidad * imt.factor                                          AS cantidad_neta,
+    im.cantidad * (
+        CASE WHEN im.destino_ubicacion_id IS NOT NULL THEN  1 ELSE 0 END +
+        CASE WHEN im.origen_ubicacion_id  IS NOT NULL THEN -1 ELSE 0 END
+    )                                                                 AS cantidad_neta,
     im.origen_ubicacion_id,
     uo.nombre                                                         AS origen_nombre,
     im.destino_ubicacion_id,

@@ -472,15 +472,14 @@ RETURNS TRIGGER LANGUAGE plpgsql AS $$
 DECLARE
     v_flg_valorizable boolean;
     v_flg_recalcula   boolean;
-    v_factor          smallint;
     v_map             numeric(12,4);
     v_stock_qty       numeric(12,4);
     v_stock_valorado  numeric(16,4);
 BEGIN
     IF NEW.precio_unitario IS NULL THEN RETURN NEW; END IF;
 
-    SELECT imt.flg_valorizable, imt.flg_recalcula_costo, imt.factor
-    INTO v_flg_valorizable, v_flg_recalcula, v_factor
+    SELECT imt.flg_valorizable, imt.flg_recalcula_costo
+    INTO v_flg_valorizable, v_flg_recalcula
     FROM inventario.item_movimiento_tipo imt
     WHERE imt.id = NEW.item_movimiento_tipo_id;
 
@@ -497,7 +496,7 @@ BEGIN
     WHERE item_id = NEW.item_id
     FOR UPDATE;  -- row-level lock: serializes concurrent movements for the same item
 
-    IF v_factor > 0 THEN
+    IF NEW.destino_ubicacion_id IS NOT NULL THEN
         IF v_flg_recalcula THEN
             v_stock_valorado := v_stock_valorado + (NEW.cantidad * NEW.precio_unitario);
             v_stock_qty      := v_stock_qty + NEW.cantidad;

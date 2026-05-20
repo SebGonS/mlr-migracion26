@@ -185,7 +185,8 @@ BEGIN
             SUM(im.cantidad) / 60.0 AS avg_daily
         FROM inventario.item_movimientos im
         JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-        WHERE imt.factor < 0
+        WHERE im.origen_ubicacion_id IS NOT NULL
+          AND imt.categoria NOT IN ('PRODUCCION', 'TRANSFERENCIA')
           AND im.fecha_hora >= now() - interval '60 days'
         GROUP BY im.item_id
     ),
@@ -260,7 +261,8 @@ BEGIN
               SELECT im.item_id, SUM(im.cantidad) / 60.0 AS avg_daily
               FROM inventario.item_movimientos im
               JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-              WHERE imt.factor < 0
+              WHERE im.origen_ubicacion_id IS NOT NULL
+          AND imt.categoria NOT IN ('PRODUCCION', 'TRANSFERENCIA')
                 AND im.fecha_hora >= now() - interval '60 days'
               GROUP BY im.item_id
           ),
