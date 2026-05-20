@@ -1631,6 +1631,8 @@ DECLARE
     v_ejecucion_id     BIGINT;
     v_paso_count       INT := 0;
     v_already_executed BIGINT;
+    v_rollos_asignados INT;
+    v_overflow_paso    BIGINT;
 BEGIN
     IF NOT jwt_has_permission('produccion.ejecutar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
@@ -1645,22 +1647,58 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM mes.partida WHERE id = v_partida_id) THEN
         RAISE EXCEPTION 'Orden de producción % no encontrada.', v_partida_id;
     END IF;
+
+    SELECT COUNT(*) INTO v_rollos_asignados
+    FROM mes.partida_componente
+    WHERE partida_id = v_partida_id AND lote_id IS NOT NULL;
     IF jsonb_array_length(p_data->'pasos') = 0 THEN
         RAISE EXCEPTION 'Se requiere al menos un paso en p_data.pasos.';
     END IF;
 
-    -- Batch idempotency guard: one query against all submitted paso_ids.
+    -- Idempotency guard: reject exact duplicate runs (same paso_id + fyh_inicio + maquina_id).
+    -- Allows multiple runs per paso: interrupted/restarted steps and parallel runs on different machines.
     SELECT pe.partida_paso_id INTO v_already_executed
     FROM mes.partida_paso_ejecucion pe
-    WHERE pe.partida_paso_id IN (
-        SELECT (el->>'paso_id')::BIGINT FROM jsonb_array_elements(p_data->'pasos') el
-    )
+    JOIN (
+        SELECT (el->>'paso_id')::BIGINT         AS paso_id,
+               (el->>'fyh_inicio')::TIMESTAMPTZ AS fyh_inicio,
+               (el->>'maquina_id')::INT         AS maquina_id
+        FROM jsonb_array_elements(p_data->'pasos') el
+    ) submitted ON submitted.paso_id   = pe.partida_paso_id
+               AND submitted.fyh_inicio = pe.fyh_inicio
+               AND submitted.maquina_id IS NOT DISTINCT FROM pe.maquina_id
     LIMIT 1;
 
     IF v_already_executed IS NOT NULL THEN
         RAISE EXCEPTION
-            'El paso % ya tiene una ejecución registrada. Para corregir use anular_produccion.',
+            'Ya existe una ejecución para el paso % con el mismo fyh_inicio y máquina. Posible envío duplicado.',
             v_already_executed;
+    END IF;
+
+    -- Cantidad guard: per-paso, existing + submitted cantidad must not exceed assigned roll count.
+    -- Only checked when cantidad is provided; NULL means not recorded for this run.
+    SELECT s.paso_id INTO v_overflow_paso
+    FROM (
+        SELECT
+            sub.paso_id,
+            COALESCE(SUM(pe.cantidad), 0) + sub.cantidad_submitted AS total
+        FROM (
+            SELECT (el->>'paso_id')::BIGINT          AS paso_id,
+                   SUM((el->>'cantidad')::NUMERIC)   AS cantidad_submitted
+            FROM jsonb_array_elements(p_data->'pasos') el
+            WHERE (el->>'cantidad') IS NOT NULL
+            GROUP BY (el->>'paso_id')::BIGINT
+        ) sub
+        LEFT JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = sub.paso_id
+        GROUP BY sub.paso_id, sub.cantidad_submitted
+    ) s
+    WHERE s.total > v_rollos_asignados
+    LIMIT 1;
+
+    IF v_overflow_paso IS NOT NULL THEN
+        RAISE EXCEPTION
+            'El paso % excede los % rollos asignados a la partida.',
+            v_overflow_paso, v_rollos_asignados;
     END IF;
 
     FOR v_paso IN SELECT * FROM jsonb_array_elements(p_data->'pasos') LOOP

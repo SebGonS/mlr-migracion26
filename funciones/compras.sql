@@ -946,3 +946,107 @@ GRANT EXECUTE ON FUNCTION doc.get_letra(bigint)                    TO authentica
 GRANT EXECUTE ON FUNCTION doc.anular_compra(bigint)                TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.anular_factura_proveedor(bigint)     TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.anular_letra(bigint)                 TO authenticated;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- actualizar_factura_proveedor
+-- Updates editable header fields of a supplier invoice.
+-- Never touches estado_pago (owned by pagar_letra / anular_letra /
+-- anular_factura_proveedor) or tercero_id (immutable after creation).
+-- Optionally replaces all line items when 'lineas' key is present.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.actualizar_factura_proveedor(
+    p_factura_id bigint,
+    p_datos      jsonb
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id int := get_user_id();
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_factura_proveedor', v_usr_id,
+            jsonb_build_object('factura_id', p_factura_id) || p_datos);
+
+    -- Validate subtotal + igv ≈ total
+    IF ABS(
+        (p_datos->>'total')::NUMERIC -
+        (COALESCE((p_datos->>'subtotal')::NUMERIC, 0) +
+         COALESCE((p_datos->>'igv')::NUMERIC, 0))
+    ) > 0.01 THEN
+        RAISE EXCEPTION 'Total (%) no coincide con subtotal + IGV (% + % = %)',
+            p_datos->>'total',
+            p_datos->>'subtotal',
+            p_datos->>'igv',
+            COALESCE((p_datos->>'subtotal')::NUMERIC, 0) +
+            COALESCE((p_datos->>'igv')::NUMERIC, 0);
+    END IF;
+
+    -- tipo_cambio required for USD
+    IF COALESCE(p_datos->>'moneda', 'USD') = 'USD'
+       AND (p_datos->>'tipo_cambio') IS NULL THEN
+        RAISE EXCEPTION 'Se requiere tipo_cambio para facturas en USD.';
+    END IF;
+
+    UPDATE doc.factura_proveedor
+    SET
+        serie             = p_datos->>'serie',
+        numero            = (p_datos->>'numero')::INT,
+        fecha_emision     = (p_datos->>'fecha_emision')::DATE,
+        fecha_vencimiento = (p_datos->>'fecha_vencimiento')::DATE,
+        tipo_pago         = COALESCE((p_datos->>'tipo_pago')::tipo_pago_enum, tipo_pago),
+        moneda            = COALESCE(p_datos->>'moneda', moneda),
+        tipo_cambio       = (p_datos->>'tipo_cambio')::NUMERIC,
+        subtotal          = (p_datos->>'subtotal')::NUMERIC,
+        igv               = COALESCE((p_datos->>'igv')::NUMERIC, 0),
+        total             = (p_datos->>'total')::NUMERIC,
+        observacion       = p_datos->>'observacion',
+        usr_mod           = v_usr_id,
+        fyh_mod           = NOW()
+    WHERE id = p_factura_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Factura #% no encontrada.', p_factura_id;
+    END IF;
+
+    -- Replace line items only when 'lineas' key is explicitly present
+    IF p_datos ? 'lineas' THEN
+        DELETE FROM doc.factura_proveedor_detalle
+        WHERE factura_proveedor_id = p_factura_id;
+
+        IF jsonb_array_length(p_datos->'lineas') > 0 THEN
+            INSERT INTO doc.factura_proveedor_detalle(
+                factura_proveedor_id, item_id, cantidad,
+                precio_unitario, igv_porcentaje, usr_cre
+            )
+            SELECT
+                p_factura_id,
+                (l->>'item_id')::INT,
+                (l->>'cantidad')::NUMERIC,
+                (l->>'precio_unitario')::NUMERIC,
+                COALESCE((l->>'igv_porcentaje')::NUMERIC, 18),
+                v_usr_id
+            FROM jsonb_array_elements(p_datos->'lineas') l;
+        END IF;
+    END IF;
+
+    RETURN format('Factura #%s actualizada.', p_factura_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in actualizar_factura_proveedor - User: %, factura: %, Error: %',
+        v_usr_id, p_factura_id, v_message;
+    RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION doc.actualizar_factura_proveedor(bigint, jsonb) TO authenticated;

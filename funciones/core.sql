@@ -489,9 +489,12 @@ DECLARE
     v_hint           text;
     v_context        text;
     v_sqlstate       text;
-    v_partida_id     BIGINT;
-    v_usr_id         int := get_user_id();
-    v_error_payload  jsonb;
+    v_partida_id           BIGINT;
+    v_usr_id               int := get_user_id();
+    v_error_payload        jsonb;
+    v_overflow_item_id     INT;
+    v_rollos_submitted     INT;
+    v_cantidad_planificada NUMERIC;
 BEGIN
     IF NOT jwt_has_permission('comercial.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
@@ -621,6 +624,27 @@ BEGIN
 
     -- ── Roll reservations (optional at creation; validated above if present) ──
     IF p_partida->'componentes' IS NOT NULL AND jsonb_array_length(p_partida->'componentes') > 0 THEN
+
+        -- Per-item roll count guard: submitted rolls per item_id must not exceed partida_detalle.cantidad.
+        -- Also catches rolls whose item has no partida_detalle entry (unplanned item).
+        SELECT l.item_id, COUNT(*)::int, pd.cantidad
+        INTO v_overflow_item_id, v_rollos_submitted, v_cantidad_planificada
+        FROM jsonb_array_elements(p_partida->'componentes') c
+        JOIN inventario.lote l ON l.id = (c->>'lote_id')::int
+        LEFT JOIN mes.partida_detalle pd ON pd.item_id = l.item_id
+                                        AND pd.partida_id = v_partida_id
+        WHERE (c->>'lote_id') IS NOT NULL
+        GROUP BY l.item_id, pd.cantidad
+        HAVING COUNT(*) > COALESCE(pd.cantidad, 0)
+        LIMIT 1;
+
+        IF v_overflow_item_id IS NOT NULL THEN
+            RAISE EXCEPTION
+                'El ítem % tiene % rollos asignados pero solo % están planificados.',
+                v_overflow_item_id, v_rollos_submitted, COALESCE(v_cantidad_planificada, 0)
+                USING ERRCODE = 'check_violation';
+        END IF;
+
         INSERT INTO mes.partida_componente(partida_id, lote_id, cantidad_reservada)
         SELECT v_partida_id,
                (c->>'lote_id')::int,
@@ -928,9 +952,12 @@ SET search_path TO 'iam', 'notification', 'public', 'doc', 'mes', 'inventario'
 AS $function$
 DECLARE
     v_message  text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id     int  := get_user_id();
-    v_estado     partida_estado_produccion_enum;
-    v_error_payload jsonb;
+    v_usr_id               int  := get_user_id();
+    v_estado               partida_estado_produccion_enum;
+    v_error_payload        jsonb;
+    v_overflow_item_id     INT;
+    v_rollos_submitted     INT;
+    v_cantidad_planificada NUMERIC;
 BEGIN
     IF NOT jwt_has_permission('produccion.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.editar'
@@ -1005,6 +1032,26 @@ BEGIN
     IF v_error_payload IS NOT NULL THEN
         RAISE EXCEPTION 'Stock insuficiente para asignar los componentes'
             USING DETAIL = v_error_payload::text;
+    END IF;
+
+    -- Per-item roll count guard: submitted rolls per item_id must not exceed partida_detalle.cantidad.
+    -- Also catches rolls whose item has no partida_detalle entry (unplanned item).
+    SELECT l.item_id, COUNT(*)::int, pd.cantidad
+    INTO v_overflow_item_id, v_rollos_submitted, v_cantidad_planificada
+    FROM jsonb_array_elements(p_componentes) i
+    JOIN inventario.lote l ON l.id = (i->>'lote_id')::int
+    LEFT JOIN mes.partida_detalle pd ON pd.item_id = l.item_id
+                                    AND pd.partida_id = p_partida_id
+    WHERE (i->>'lote_id') IS NOT NULL
+    GROUP BY l.item_id, pd.cantidad
+    HAVING COUNT(*) > COALESCE(pd.cantidad, 0)
+    LIMIT 1;
+
+    IF v_overflow_item_id IS NOT NULL THEN
+        RAISE EXCEPTION
+            'El ítem % tiene % rollos asignados pero solo % están planificados.',
+            v_overflow_item_id, v_rollos_submitted, COALESCE(v_cantidad_planificada, 0)
+            USING ERRCODE = 'check_violation';
     END IF;
 
     -- Reservation conflict check (exclude current order, rolls only)
