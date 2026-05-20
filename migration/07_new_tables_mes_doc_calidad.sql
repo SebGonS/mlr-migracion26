@@ -6,7 +6,7 @@
 --   mes.partida → mes.partida
 --   mes.partida_paso → receta.tenido
 --   mes.lavado_maquina → receta.lavado_maquina
---   calidad.inspeccion → inventario.lote, mes.partida_paso
+--   calidad.inspeccion → inventario.lote, mes.partida_paso_ejecucion
 -- ═══════════════════════════════════════════════════════════════
 
 -- ── mes.partida ───────────────────────────────────────────────
