@@ -75,6 +75,77 @@ END;
 $function$;
 
 -- ───────────────────────────────────────────────────────────────
+-- actualizar_compra
+-- Updates editable fields of a purchase order.
+-- Blocked if the compra is already anulada.
+-- Optionally replaces all line items when 'detalle' key is present.
+-- tercero_id is immutable after creation.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.actualizar_compra(
+    p_compra_id bigint,
+    p_datos     jsonb
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id  int := get_user_id();
+    v_fyh_elm timestamptz;
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_compra', v_usr_id,
+            jsonb_build_object('compra_id', p_compra_id) || p_datos);
+
+    SELECT fyh_elm INTO v_fyh_elm
+    FROM doc.compra WHERE id = p_compra_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Compra #% no encontrada.', p_compra_id;
+    END IF;
+    IF v_fyh_elm IS NOT NULL THEN
+        RAISE EXCEPTION 'Compra #% ya está anulada.', p_compra_id;
+    END IF;
+
+    UPDATE doc.compra
+    SET fecha       = COALESCE((p_datos->>'fecha')::DATE, fecha),
+        observacion = p_datos->>'observacion',
+        usr_mod     = v_usr_id,
+        fyh_mod     = NOW()
+    WHERE id = p_compra_id;
+
+    -- Replace line items only when 'detalle' key is explicitly present
+    IF p_datos ? 'detalle' THEN
+        DELETE FROM doc.compra_detalle WHERE compra_id = p_compra_id;
+
+        IF jsonb_array_length(p_datos->'detalle') > 0 THEN
+            INSERT INTO doc.compra_detalle (compra_id, item_id, cantidad, precio_unitario, usr_cre)
+            SELECT p_compra_id,
+                   (d->>'item_id')::INT,
+                   (d->>'cantidad')::NUMERIC,
+                   (d->>'precio_unitario')::NUMERIC,
+                   v_usr_id
+            FROM jsonb_array_elements(p_datos->'detalle') d;
+        END IF;
+    END IF;
+
+    RETURN format('Compra #%s actualizada.', p_compra_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in actualizar_compra - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ───────────────────────────────────────────────────────────────
 -- registrar_factura_proveedor
 -- Creates a supplier invoice (SUNAT comprobante) and optionally
 -- links it to an existing compra.
@@ -434,6 +505,50 @@ END;
 $function$;
 
 -- ───────────────────────────────────────────────────────────────
+-- desvincular_guias_compra
+-- Removes one or more guia links from a compra.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.desvincular_guias_compra(
+    p_compra_id bigint,
+    p_guia_ids  jsonb   -- [1, 2, 3]
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id   int := get_user_id();
+    v_unlinked int;
+BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM doc.compra WHERE id = p_compra_id) THEN
+        RAISE EXCEPTION 'Compra #% no encontrada.', p_compra_id;
+    END IF;
+
+    DELETE FROM doc.compra_guia_remision
+    WHERE compra_id = p_compra_id
+      AND guia_remision_id IN (
+          SELECT jsonb_array_elements_text(p_guia_ids)::bigint
+      );
+
+    GET DIAGNOSTICS v_unlinked = ROW_COUNT;
+
+    RETURN format('%s guía(s) desvinculada(s) de compra #%s.', v_unlinked, p_compra_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in desvincular_guias_compra - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
+    RAISE;
+END;
+$function$;
+
+-- ───────────────────────────────────────────────────────────────
 -- vincular_factura_compra
 -- Links a factura_proveedor to a compra via the junction table.
 -- Idempotent (ON CONFLICT DO NOTHING). Validates same proveedor.
@@ -536,10 +651,12 @@ END;
 $function$;
 
 GRANT EXECUTE ON FUNCTION doc.crear_compra(jsonb)                           TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.actualizar_compra(bigint, jsonb)              TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.registrar_factura_proveedor(jsonb)            TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.registrar_letra(jsonb)                        TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.pagar_letra(bigint, date)                     TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.vincular_guias_compra(bigint, jsonb)          TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.desvincular_guias_compra(bigint, jsonb)       TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.vincular_factura_compra(bigint, bigint, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.desvincular_factura_compra(bigint, bigint)    TO authenticated;
 
@@ -966,7 +1083,8 @@ SET search_path TO 'iam', 'public', 'doc'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id int := get_user_id();
+    v_usr_id      int := get_user_id();
+    v_estado_pago estado_pago_enum;
 BEGIN
     IF NOT jwt_has_permission('comercial.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
@@ -976,6 +1094,19 @@ BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('actualizar_factura_proveedor', v_usr_id,
             jsonb_build_object('factura_id', p_factura_id) || p_datos);
+
+    SELECT estado_pago INTO v_estado_pago
+    FROM doc.factura_proveedor WHERE id = p_factura_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Factura #% no encontrada.', p_factura_id;
+    END IF;
+    IF v_estado_pago = 'anulado' THEN
+        RAISE EXCEPTION 'Factura #% ya está anulada.', p_factura_id;
+    END IF;
+    IF v_estado_pago = 'total' THEN
+        RAISE EXCEPTION 'Factura #% ya está completamente pagada y no puede modificarse.', p_factura_id;
+    END IF;
 
     -- Validate subtotal + igv ≈ total
     IF ABS(
@@ -1020,6 +1151,16 @@ BEGIN
 
     -- Replace line items only when 'lineas' key is explicitly present
     IF p_datos ? 'lineas' THEN
+        -- Block if any letra is already paid (covers parcial estado_pago)
+        IF EXISTS (
+            SELECT 1 FROM doc.letra_factura lf
+            JOIN doc.letra l ON l.id = lf.letra_id
+            WHERE lf.factura_proveedor_id = p_factura_id
+              AND l.estado = 'pagada'
+        ) THEN
+            RAISE EXCEPTION 'No se pueden modificar las líneas de la factura #%: tiene letras pagadas vinculadas.', p_factura_id;
+        END IF;
+
         DELETE FROM doc.factura_proveedor_detalle
         WHERE factura_proveedor_id = p_factura_id;
 
@@ -1050,3 +1191,35 @@ END;
 $function$;
 
 GRANT EXECUTE ON FUNCTION doc.actualizar_factura_proveedor(bigint, jsonb) TO authenticated;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- doc.marcar_letras_vencidas
+-- Transitions emitida → vencida for all letras past their due date.
+-- Called by pg_cron; not user-facing.
+-- Returns the number of letras transitioned.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.marcar_letras_vencidas()
+RETURNS int
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'doc', 'public'
+AS $$
+DECLARE
+    v_count int;
+BEGIN
+    UPDATE doc.letra
+    SET estado  = 'vencida',
+        fyh_mod = NOW()
+    WHERE estado = 'emitida'
+      AND fecha_vencimiento < CURRENT_DATE;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    IF v_count > 0 THEN
+        RAISE LOG 'marcar_letras_vencidas: % letra(s) marcada(s) como vencida.', v_count;
+    END IF;
+
+    RETURN v_count;
+END;
+$$;

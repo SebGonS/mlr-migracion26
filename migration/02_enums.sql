@@ -6,11 +6,10 @@
 
 -- ── Inventory ──────────────────────────────────────────────────
 CREATE TYPE calidad_estado_enum AS ENUM (
-  'PENDIENTE',
-  'APROBADO',
-  'RECHAZADO',
-  'REPROCESO',
-  'CUARENTENA'
+  'PENDIENTE',   -- not yet inspected
+  'APROBADO',    -- passed QC (terminal)
+  'REPROCESO',   -- failed, will be reworked via crear_reproceso (terminal)
+  'BAJA'         -- condemned, write off via dar_de_baja_lote (terminal)
 );
 
 CREATE TYPE item_movimiento_tipo_categoria_enum AS ENUM (

@@ -28,7 +28,6 @@ FROM (
                                          FROM mes.partida_paso_ejecucion pe
                                          WHERE pe.partida_paso_id = pp.id
                                      ), 'PENDIENTE'),
-        'partida_id',                  p.id,
         'partida_id',                p.id,
         'partida_codigo',            EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
         'cliente',                   c.nombre,
@@ -295,12 +294,17 @@ DECLARE
     v_maquina_id       int;
     v_maq_nombre       text;
     v_maq_codigo       text;
-    v_rb               numeric;
+    v_rb               numeric;  -- effective bath ratio (resolved after batch weight is known)
+    v_rb_paso          numeric;  -- order-step override (pp.relacion_bano_objetivo)
+    v_rb_maquina       numeric;  -- machine standard ratio
+    v_cap_min_kg       numeric;  -- machine minimum operational load (kg)
     v_peso             numeric;
     v_cantidad         numeric;
     v_cantidad_regular numeric;
     v_cantidad_rib     numeric;
     v_volumen          numeric;
+    v_peso_volumen     numeric;  -- effective weight for volume calc (floored to cap_min_kg)
+    v_flg_cap_minima   boolean;  -- true when batch is below machine minimum
     v_usr_id           int := get_user_id();
     v_partida_id         bigint;
     v_op_nombre        text;
@@ -315,10 +319,13 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    -- 1. Validate paso, get receta + machine + relacion_bano
-    SELECT pp.receta_id, pp.maquina_planificada_id, COALESCE(pp.relacion_bano_objetivo, m.relacion_bano),
+    -- 1. Validate paso, get receta + machine capacity data
+    SELECT pp.receta_id, pp.maquina_planificada_id, pp.relacion_bano_objetivo,
+           m.relacion_bano, m.capacidad_min_kg,
            pp.partida_id, o.nombre
-    INTO v_receta_id, v_maquina_id, v_rb, v_partida_id, v_op_nombre
+    INTO v_receta_id, v_maquina_id, v_rb_paso,
+         v_rb_maquina, v_cap_min_kg,
+         v_partida_id, v_op_nombre
     FROM mes.partida_paso pp
     LEFT JOIN mes.operacion o ON o.id = pp.operacion_id
     LEFT JOIN mes.maquina m   ON m.id = pp.maquina_planificada_id
@@ -348,11 +355,15 @@ BEGIN
 
     v_cantidad := COALESCE(v_cantidad_regular, 0) + COALESCE(v_cantidad_rib, 0);
 
-    -- 4. Bath volume
-    v_volumen := CASE
-        WHEN v_maq_nombre != 'BRAZOLI (1)' AND v_cantidad <= 12 THEN v_peso * 7
-        ELSE v_peso * v_rb
-    END;
+    -- 4. Resolve effective bath ratio, then compute volume.
+    -- Order-step override wins; otherwise use machine's configured ratio.
+    -- When batch weight is below machine minimum, volume is floored to cap_min_kg * rb
+    -- so the bath covers the machine drum properly — g/L chemicals scale up accordingly.
+    -- % chemicals always scale on actual fabric weight (v_peso), not the floor.
+    v_rb           := COALESCE(v_rb_paso, v_rb_maquina);
+    v_flg_cap_minima := v_cap_min_kg IS NOT NULL AND v_peso < v_cap_min_kg;
+    v_peso_volumen := CASE WHEN v_flg_cap_minima THEN v_cap_min_kg ELSE v_peso END;
+    v_volumen      := v_peso_volumen * v_rb;
 
     -- 5. Build JSON
     -- pasos: chemistry steps with nested insumos (new hierarchical model)
@@ -371,6 +382,8 @@ BEGIN
         'cantidad_regular',  v_cantidad_regular,
         'cantidad_rib',      v_cantidad_rib,
         'volumen',           ROUND(v_volumen::NUMERIC, 2),
+        'cap_minima_aplicada', v_flg_cap_minima,
+        'cap_min_kg',        v_cap_min_kg,
         'maquina',           jsonb_build_object(
                                  'id',     v_maquina_id,
                                  'codigo', v_maq_codigo,
@@ -431,7 +444,7 @@ BEGIN
            p_paso_id,
            CASE
                WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen * iid.factor_stock
-               WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10 * iid.factor_stock
+               WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso    * 10 * iid.factor_stock
            END,
            v_usr_id
     FROM receta.tenido_paso rtp
@@ -1151,24 +1164,23 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- 5. Sync confirmed roll count onto the order item (idempotent: overwrites to current lote count)
+    -- 5. Sync confirmed roll count onto the order item.
+    -- Recounts all non-deleted output lotes across ALL ejecuciones for this partida,
+    -- not just the current run — correct for send-ahead (multiple runs on same paso).
     UPDATE mes.partida_detalle pd
-    SET cantidad_producida = sub.total,
-        usr_mod            = v_usr_id,
-        fyh_mod            = NOW()
-    FROM (
-        SELECT l.item_id, COUNT(*) AS total
+    SET cantidad_producida = (
+        SELECT COUNT(*)
         FROM inventario.lote l
-        JOIN inventario.item_movimientos im
-            ON  im.lote_id                 = l.id
-            AND im.item_movimiento_tipo_id = v_ing_tipo_id
-        WHERE l.documento_tipo = 'partida_paso_ejecucion'
-          AND l.documento_id   = p_ejecucion_id
-          AND l.fyh_elm        IS NULL
-        GROUP BY l.item_id
-    ) sub
-    WHERE pd.partida_id = v_partida_id
-      AND pd.item_id    = sub.item_id;
+        JOIN mes.partida_paso_ejecucion pe
+            ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
+        JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+        WHERE pp.partida_id = v_partida_id
+          AND l.item_id     = pd.item_id
+          AND l.fyh_elm     IS NULL
+    ),
+    usr_mod = v_usr_id,
+    fyh_mod = NOW()
+    WHERE pd.partida_id = v_partida_id;
 
     -- 6. Notifications
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
@@ -1298,6 +1310,7 @@ BEGIN
         temperatura_real   = COALESCE((p_datos->>'temperatura_real')::NUMERIC,   temperatura_real),
         relacion_bano_real = COALESCE((p_datos->>'relacion_bano_real')::NUMERIC, relacion_bano_real),
         cantidad           = COALESCE((p_datos->>'cantidad')::NUMERIC,           cantidad),
+        cantidad_scrap     = COALESCE((p_datos->>'cantidad_scrap')::NUMERIC,     cantidad_scrap),
         notas              = COALESCE(p_datos->>'notas',                         notas),
         usr_mod            = v_usr_id,
         fyh_mod            = NOW()
@@ -1609,6 +1622,7 @@ $function$;
 --     empleado_id        SMALLINT    (optional)
 --     maquina_id         INT         (optional)
 --     cantidad           NUMERIC     (optional — roll count confirmed in this run)
+--     cantidad_scrap     NUMERIC     (optional — rolls condemned mid-execution)
 --     ph_real            NUMERIC     (optional)
 --     temperatura_real   NUMERIC     (optional)
 --     relacion_bano_real NUMERIC     (optional)
@@ -1725,6 +1739,7 @@ BEGIN
             temperatura_real,
             relacion_bano_real,
             cantidad,
+            cantidad_scrap,
             notas,
             usr_cre,
             fyh_cre
@@ -1739,6 +1754,7 @@ BEGIN
             (v_paso->>'temperatura_real')::NUMERIC,
             (v_paso->>'relacion_bano_real')::NUMERIC,
             (v_paso->>'cantidad')::NUMERIC,
+            (v_paso->>'cantidad_scrap')::NUMERIC,
             v_paso->>'observacion',
             v_usr_id,
             (v_paso->>'fyh_inicio')::TIMESTAMPTZ
@@ -2305,12 +2321,22 @@ BEGIN
         fyh_mod = NOW()
     WHERE id = p_ejecucion_id;
 
-    -- 9. Decrement confirmed output count and re-derive partida state
-    UPDATE mes.partida_detalle
-    SET cantidad_producida = GREATEST(0, cantidad_producida - v_output_count),
-        usr_mod            = v_usr_id,
-        fyh_mod            = NOW()
-    WHERE partida_id = v_partida_id;
+    -- 9. Recount confirmed output — same logic as registrar_produccion so both
+    -- functions always agree. The soft-delete above already excludes reversed lotes.
+    UPDATE mes.partida_detalle pd
+    SET cantidad_producida = (
+        SELECT COUNT(*)
+        FROM inventario.lote l
+        JOIN mes.partida_paso_ejecucion pe
+            ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
+        JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+        WHERE pp.partida_id = v_partida_id
+          AND l.item_id     = pd.item_id
+          AND l.fyh_elm     IS NULL
+    ),
+    usr_mod = v_usr_id,
+    fyh_mod = NOW()
+    WHERE pd.partida_id = v_partida_id;
 
     PERFORM mes.actualizar_estado_partida(v_partida_id);
 
@@ -2468,6 +2494,15 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
+    -- Rework children are TECO-terminal: commercial settlement (estado_comercial,
+    -- estado_facturacion) always runs on the parent order. Close the parent once
+    -- all reprocesos are in TECO/CERRADA/CANCELADA — not each child individually.
+    IF EXISTS (SELECT 1 FROM mes.partida WHERE id = p_partida_id AND partida_origen_id IS NOT NULL) THEN
+        RAISE EXCEPTION
+            'Partida % es un reproceso y no puede cerrarse directamente. Cierre la partida origen una vez que todos sus reprocesos estén en TECO.',
+            p_partida_id;
+    END IF;
+
     SELECT estado_produccion, estado_comercial, estado_facturacion
     INTO v_estado_produccion, v_estado_comercial, v_estado_facturacion
     FROM mes.partida
@@ -2549,23 +2584,31 @@ GRANT USAGE on SCHEMA mes TO authenticated;
 -- CREAR REPROCESO
 -- Branches failing rolls into a rework child partida.
 --
--- p_lotes: JSON array of lote_id integers — the rolls that failed QC.
+-- p_datos shape:
+--   {
+--     "lotes": [1, 2, 3],            required — lote IDs to rework
+--     "pasos": [                      optional — if omitted, child is created with no pasos (blank draft)
+--       {
+--         "operacion_id": 5,          required per paso
+--         "secuencia": 1,             optional (defaults to array position)
+--         "receta_id": 42,            optional — corrective recipe (different from original)
+--         "maquina_planificada_id": 3,optional
+--         "ph_objetivo": 6.5,         optional
+--         "temperatura_objetivo": 80, optional
+--         "relacion_bano_objetivo": 1.5, optional
+--         "tiempo_estandar": 120      optional
+--       }
+--     ],
+--     "fecha_acordada": "2026-06-01" optional — override delivery date
+--   }
 --
--- What it does:
---   1. Creates a child partida inheriting all commercial/production attributes.
---      partida_origen_id links back to the parent; estado_comercial is locked
---      to PENDIENTE by the chk_rework_comercial_locked constraint.
---   2. Copies the paso structure (planning intent only, no execution rows).
---   3. Moves the failing rolls from the parent's partida_componente to the
---      child's by updating partida_id — preserving cantidad_reservada.
---
--- Billing and commercial settlement always run on the parent.
--- partida_detalle on the parent is intentionally untouched: the planned
--- quantity is the billing anchor (MLR absorbs rework cost internally).
+-- Immutable (always inherited from root): tercero_id, articulo_tipo_id, fibra,
+--   flg_antipilling, malla, ancho, rendimiento, color_x_cliente_id, tenido_id.
+-- Billing and commercial settlement always run on the root order.
 -- ═══════════════════════════════════════════════════════════════
 CREATE OR REPLACE FUNCTION mes.crear_reproceso(
     p_partida_id BIGINT,
-    p_lotes      JSONB
+    p_datos      JSONB
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -2581,10 +2624,18 @@ DECLARE
     v_usr_id    INT := get_user_id();
     v_origen    mes.partida%ROWTYPE;
     v_child_id  BIGINT;
+    v_root_id   BIGINT;
+    v_lotes     JSONB;
 BEGIN
     IF NOT jwt_has_permission('produccion.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.crear'
             USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    v_lotes := p_datos->'lotes';
+
+    IF v_lotes IS NULL OR jsonb_array_length(v_lotes) = 0 THEN
+        RAISE EXCEPTION 'Se requiere al menos un lote para crear reproceso.';
     END IF;
 
     SELECT * INTO v_origen
@@ -2601,68 +2652,118 @@ BEGIN
             v_origen.estado_produccion;
     END IF;
 
-    IF jsonb_array_length(p_lotes) = 0 THEN
-        RAISE EXCEPTION 'Se requiere al menos un lote para crear reproceso.';
-    END IF;
+    -- Flat rework topology: all children link to the original root.
+    -- If p_partida_id is itself a rework child, the new sibling links to the same root.
+    v_root_id := COALESCE(v_origen.partida_origen_id, v_origen.id);
 
-    -- Validate every supplied lote belongs to this partida
+    -- Validate every supplied lote against the whole family (two valid sources):
+    --   A) input rolls already in partida_componente of any family member
+    --   B) output lotes (PROD_ING) from paso_ejecucion of any family member (post-final-paso re-dye)
     IF EXISTS (
-        SELECT 1 FROM jsonb_array_elements(p_lotes) e
-        WHERE NOT EXISTS (
-            SELECT 1 FROM mes.partida_componente pc
-            WHERE pc.partida_id = p_partida_id
-              AND pc.lote_id    = (e.value::TEXT)::INT
+        SELECT 1 FROM jsonb_array_elements(v_lotes) e
+        WHERE NOT (
+            EXISTS (
+                SELECT 1 FROM mes.partida_componente pc
+                JOIN mes.partida p ON p.id = pc.partida_id
+                WHERE pc.lote_id = (e.value::TEXT)::INT
+                  AND (p.id = v_root_id OR p.partida_origen_id = v_root_id)
+            )
+            OR
+            EXISTS (
+                SELECT 1 FROM inventario.lote l
+                JOIN mes.partida_paso_ejecucion pe
+                    ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
+                JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+                WHERE l.id = (e.value::TEXT)::INT
+                  AND pp.partida_id IN (
+                      SELECT id FROM mes.partida
+                      WHERE id = v_root_id OR partida_origen_id = v_root_id
+                  )
+                  AND l.fyh_elm IS NULL
+            )
         )
     ) THEN
-        RAISE EXCEPTION 'Uno o más lotes no pertenecen a la partida %.', p_partida_id;
+        RAISE EXCEPTION 'Uno o más lotes no pertenecen a la familia de la partida %.', v_root_id;
     END IF;
 
-    -- Create rework child partida
+    -- Create rework child. Immutable specs always inherited; fecha_acordada overridable.
     INSERT INTO mes.partida (
         partida_origen_id, prioridad_id, tercero_id, tenido_id,
         color_x_cliente_id, articulo_tipo_id, fibra, malla, rendimiento,
         ancho, flg_antipilling, fecha_acordada, estado_produccion, usr_cre
     )
     VALUES (
-        p_partida_id, v_origen.prioridad_id, v_origen.tercero_id, v_origen.tenido_id,
+        v_root_id, v_origen.prioridad_id, v_origen.tercero_id, v_origen.tenido_id,
         v_origen.color_x_cliente_id, v_origen.articulo_tipo_id, v_origen.fibra,
         v_origen.malla, v_origen.rendimiento, v_origen.ancho, v_origen.flg_antipilling,
-        v_origen.fecha_acordada, 'CREADA', v_usr_id
+        COALESCE((p_datos->>'fecha_acordada')::date, v_origen.fecha_acordada),
+        'CREADA', v_usr_id
     )
     RETURNING id INTO v_child_id;
 
-    -- Copy paso structure (planning intent only — no execution rows)
-    INSERT INTO mes.partida_paso (
-        partida_id, secuencia, operacion_id, maquina_planificada_id,
-        receta_id, tiempo_estandar, ph_objetivo, temperatura_objetivo,
-        relacion_bano_objetivo, usr_cre
-    )
-    SELECT
-        v_child_id, secuencia, operacion_id, maquina_planificada_id,
-        receta_id, tiempo_estandar, ph_objetivo, temperatura_objetivo,
-        relacion_bano_objetivo, v_usr_id
-    FROM mes.partida_paso
-    WHERE partida_id = p_partida_id
-    ORDER BY secuencia;
+    -- Paso structure: caller-specified (flexible subset + corrective recipe), or no pasos
+    -- (blank draft — planner adds steps after creation). Rework children intentionally skip
+    -- PLANIFICADA/PROGRAMADA — iniciar_paso has no estado_produccion guard so execution
+    -- can begin from CREADA immediately once steps are defined.
+    IF p_datos->'pasos' IS NOT NULL AND jsonb_array_length(p_datos->'pasos') > 0 THEN
+        INSERT INTO mes.partida_paso (
+            partida_id, secuencia, operacion_id, maquina_planificada_id,
+            receta_id, tiempo_estandar, ph_objetivo, temperatura_objetivo,
+            relacion_bano_objetivo, usr_cre
+        )
+        SELECT
+            v_child_id,
+            COALESCE((e->>'secuencia')::smallint, rn::smallint),
+            (e->>'operacion_id')::smallint,
+            (e->>'maquina_planificada_id')::int,
+            (e->>'receta_id')::int,
+            (e->>'tiempo_estandar')::int,
+            (e->>'ph_objetivo')::numeric,
+            (e->>'temperatura_objetivo')::numeric,
+            (e->>'relacion_bano_objetivo')::numeric,
+            v_usr_id
+        FROM jsonb_array_elements(p_datos->'pasos') WITH ORDINALITY AS arr(e, rn);
+    -- If no pasos provided, child is created as a blank draft — planner adds steps explicitly.
+    END IF;
 
-    -- Move failing rolls to child partida (preserves cantidad_reservada)
+    -- Auto-create partida_detalle for the rework child.
+    -- Mirrors root's item structure; cantidad = rolls being reworked (one roll = one billing unit).
+    INSERT INTO mes.partida_detalle (partida_id, item_id, cantidad, usr_cre)
+    SELECT v_child_id, pd.item_id, jsonb_array_length(v_lotes), v_usr_id
+    FROM mes.partida_detalle pd
+    WHERE pd.partida_id = v_root_id;
+
+    -- Case A: move input rolls (already in partida_componente of any family member).
     UPDATE mes.partida_componente
     SET partida_id = v_child_id
-    WHERE partida_id = p_partida_id
-      AND lote_id IN (
-          SELECT (e.value::TEXT)::INT FROM jsonb_array_elements(p_lotes) e
+    WHERE lote_id IN (SELECT (e.value::TEXT)::INT FROM jsonb_array_elements(v_lotes) e)
+      AND partida_id IN (
+          SELECT id FROM mes.partida
+          WHERE id = v_root_id OR partida_origen_id = v_root_id
+      );
+
+    -- Case B: register output lotes as input for the rework child (post-final-paso re-dye).
+    -- These PROD_ING lotes have no partida_componente entry yet.
+    INSERT INTO mes.partida_componente (partida_id, lote_id, cantidad_reservada, usr_cre)
+    SELECT v_child_id, l.id, l.cantidad, v_usr_id
+    FROM inventario.lote l
+    WHERE l.id IN (SELECT (e.value::TEXT)::INT FROM jsonb_array_elements(v_lotes) e)
+      AND l.documento_tipo = 'partida_paso_ejecucion'
+      AND NOT EXISTS (
+          SELECT 1 FROM mes.partida_componente pc
+          WHERE pc.lote_id = l.id AND pc.partida_id = v_child_id
       );
 
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('crear_reproceso', v_usr_id,
-            jsonb_build_object('partida_id', p_partida_id, 'lotes', p_lotes));
+            p_datos || jsonb_build_object('partida_id', p_partida_id));
 
     RETURN jsonb_build_object(
         'reproceso_partida_id', v_child_id,
-        'partida_origen_id',    p_partida_id,
-        'lotes_movidos',        jsonb_array_length(p_lotes),
+        'partida_origen_id',    v_root_id,
+        'lotes_movidos',        jsonb_array_length(v_lotes),
         'message', format('Reproceso %s creado desde partida %s con %s rollo(s).',
-                          v_child_id, p_partida_id, jsonb_array_length(p_lotes))
+                          v_child_id, p_partida_id, jsonb_array_length(v_lotes))
     );
 
 EXCEPTION
@@ -3010,3 +3111,356 @@ WHERE pc.partida_id = p_partida_id
 $function$;
 
 GRANT EXECUTE ON FUNCTION mes.get_componentes_disponibles(BIGINT) TO authenticated;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- LAVADO MAQUINA — execution lifecycle
+--
+-- crear_lavado_maquina   → PENDIENTE  (record created; programacion can now reference its id)
+-- iniciar_lavado_maquina → EN_PROCESO (fyh_inicio stamped)
+-- finalizar_lavado_maquina → COMPLETADO (insumos consumed via PROD_CONSUMO/LAVADO_MAQUINA,
+--                                         machine ultimo_mantenimiento updated)
+--
+-- Insumos come directly from receta.lavado_maquina_paso_insumo — fixed absolute quantities,
+-- no scaling (unlike production recipes). All pasos aggregated by item_id.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE FUNCTION mes.crear_lavado_maquina(p_datos JSONB)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes','receta'
+AS $$
+DECLARE
+    v_id        BIGINT;
+    v_usr_id    INT     := get_user_id();
+    v_receta_id INT     := (p_datos->>'receta_id')::INT;
+    v_maq_id    INT     := (p_datos->>'maquina_id')::INT;
+BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM receta.lavado_maquina WHERE id = v_receta_id AND flg_activo = true
+    ) THEN
+        RAISE EXCEPTION 'Receta lavado máquina id=% no existe o no está activa.', v_receta_id;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM mes.maquina WHERE id = v_maq_id AND fyh_elm IS NULL
+    ) THEN
+        RAISE EXCEPTION 'Máquina id=% no encontrada.', v_maq_id;
+    END IF;
+
+    INSERT INTO mes.lavado_maquina(
+        receta_id, maquina_id, empleado_id, nota,
+        estado, usr_cre, fyh_cre
+    ) VALUES (
+        v_receta_id,
+        v_maq_id,
+        (p_datos->>'empleado_id')::SMALLINT,
+        p_datos->>'nota',
+        'PENDIENTE',
+        v_usr_id, now()
+    )
+    RETURNING id INTO v_id;
+
+    RETURN v_id;
+END;$$;
+
+
+CREATE OR REPLACE FUNCTION mes.iniciar_lavado_maquina(p_id BIGINT, p_datos JSONB DEFAULT '{}')
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes','receta'
+AS $$
+DECLARE
+    v_usr_id INT := get_user_id();
+    v_lavado mes.lavado_maquina%ROWTYPE;
+BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    SELECT * INTO v_lavado FROM mes.lavado_maquina WHERE id = p_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'lavado_maquina id=% no encontrado.', p_id;
+    END IF;
+
+    IF v_lavado.estado <> 'PENDIENTE' THEN
+        RAISE EXCEPTION 'lavado_maquina id=% en estado % — se esperaba PENDIENTE.', p_id, v_lavado.estado;
+    END IF;
+
+    UPDATE mes.lavado_maquina SET
+        estado      = 'EN_PROCESO',
+        fyh_inicio  = COALESCE((p_datos->>'fyh_inicio')::TIMESTAMPTZ, now()),
+        empleado_id = COALESCE((p_datos->>'empleado_id')::SMALLINT, empleado_id),
+        usr_mod     = v_usr_id,
+        fyh_mod     = now()
+    WHERE id = p_id;
+END;$$;
+
+
+CREATE OR REPLACE FUNCTION mes.finalizar_lavado_maquina(p_id BIGINT, p_datos JSONB DEFAULT '{}')
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes','receta'
+AS $$
+DECLARE
+    v_usr_id            INT := get_user_id();
+    v_lavado            mes.lavado_maquina%ROWTYPE;
+    v_egr_tipo_id       SMALLINT;
+    v_motivo_id         SMALLINT;
+    v_doc_movimiento_id BIGINT;
+    v_insumos           JSONB;
+    v_consumos          JSONB;
+    v_error_payload     JSONB;
+BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    SELECT * INTO v_lavado FROM mes.lavado_maquina WHERE id = p_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'lavado_maquina id=% no encontrado.', p_id;
+    END IF;
+
+    IF v_lavado.estado <> 'EN_PROCESO' THEN
+        RAISE EXCEPTION 'lavado_maquina id=% en estado % — se esperaba EN_PROCESO.', p_id, v_lavado.estado;
+    END IF;
+
+    -- Aggregate insumos across all recipe pasos, summed by item (fixed quantities, no scaling)
+    SELECT jsonb_agg(jsonb_build_object('item_id', item_id, 'cantidad', cantidad))
+    INTO v_insumos
+    FROM (
+        SELECT lmpi.item_id, SUM(lmpi.cantidad) AS cantidad
+        FROM receta.lavado_maquina_paso     lmp
+        JOIN receta.lavado_maquina_paso_insumo lmpi ON lmpi.paso_id = lmp.id
+        WHERE lmp.receta_id = v_lavado.receta_id
+        GROUP BY lmpi.item_id
+    ) agg;
+
+    IF v_insumos IS NOT NULL THEN
+        -- Stock check
+        WITH consumos AS (
+            SELECT (i->>'item_id')::INT    AS item_id,
+                   (i->>'cantidad')::NUMERIC AS cantidad
+            FROM jsonb_array_elements(v_insumos) i
+        )
+        SELECT jsonb_agg(jsonb_build_object(
+            'item_id',           c.item_id,
+            'item_nombre',       it.nombre,
+            'saldo_disponible',  COALESCE(sg.cantidad_total, 0),
+            'cantidad_requerida', c.cantidad
+        ))
+        INTO v_error_payload
+        FROM consumos c
+        LEFT JOIN inventario.vw_stock_items sg ON sg.item_id = c.item_id
+        JOIN item it ON it.id = c.item_id
+        WHERE COALESCE(sg.cantidad_total, 0) < c.cantidad;
+
+        IF v_error_payload IS NOT NULL THEN
+            RAISE EXCEPTION 'Stock insuficiente para lavado_maquina id=%'
+                USING DETAIL = v_error_payload::text;
+        END IF;
+
+        SELECT id INTO v_egr_tipo_id
+        FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
+
+        SELECT id INTO v_motivo_id
+        FROM inventario.item_movimiento_motivo
+        WHERE item_movimiento_tipo_id = v_egr_tipo_id AND codigo = 'LAVADO_MAQUINA';
+
+        v_consumos := mes.calcular_fifo(v_insumos);
+        SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
+
+        INSERT INTO inventario.item_movimientos(
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, cantidad, precio_unitario,
+            documento_tipo, documento_id, motivo_id
+        )
+        SELECT
+            v_doc_movimiento_id,
+            (c->>'item_id')::INT,
+            (c->>'lote_id')::INT,
+            v_egr_tipo_id,
+            (c->>'ubicacion_id')::INT,
+            (c->>'cantidad')::NUMERIC,
+            (SELECT iv.precio_promedio FROM inventario.item_valoracion iv
+             WHERE iv.item_id = (c->>'item_id')::INT),
+            'lavado_maquina',
+            p_id,
+            v_motivo_id
+        FROM jsonb_array_elements(v_consumos) c;
+    END IF;
+
+    UPDATE mes.lavado_maquina SET
+        estado  = 'COMPLETADO',
+        fyh_fin = COALESCE((p_datos->>'fyh_fin')::TIMESTAMPTZ, now()),
+        nota    = COALESCE(p_datos->>'nota', nota),
+        usr_mod = v_usr_id,
+        fyh_mod = now()
+    WHERE id = p_id;
+
+    UPDATE mes.maquina SET
+        ultimo_mantenimiento = now(),
+        usr_mod = v_usr_id,
+        fyh_mod = now()
+    WHERE id = v_lavado.maquina_id;
+END;$$;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- REGISTRAR LAVADO MAQUINA — atomic backdating shortcut
+-- Creates the record and immediately completes it in one transaction.
+-- Use when recording after the fact with known start/end timestamps.
+-- For live execution use crear → iniciar → finalizar instead.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE FUNCTION mes.registrar_lavado_maquina(p_datos JSONB)
+-- {receta_id, maquina_id, fyh_inicio, fyh_fin, empleado_id?, nota?}
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes','receta'
+AS $$
+DECLARE
+    v_id                BIGINT;
+    v_usr_id            INT     := get_user_id();
+    v_receta_id         INT     := (p_datos->>'receta_id')::INT;
+    v_maq_id            INT     := (p_datos->>'maquina_id')::INT;
+    v_egr_tipo_id       SMALLINT;
+    v_motivo_id         SMALLINT;
+    v_doc_movimiento_id BIGINT;
+    v_insumos           JSONB;
+    v_consumos          JSONB;
+    v_error_payload     JSONB;
+BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF (p_datos->>'fyh_inicio') IS NULL OR (p_datos->>'fyh_fin') IS NULL THEN
+        RAISE EXCEPTION 'fyh_inicio y fyh_fin son requeridos para registrar_lavado_maquina.';
+    END IF;
+
+    IF (p_datos->>'fyh_inicio')::TIMESTAMPTZ >= (p_datos->>'fyh_fin')::TIMESTAMPTZ THEN
+        RAISE EXCEPTION 'fyh_inicio debe ser anterior a fyh_fin.';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM receta.lavado_maquina WHERE id = v_receta_id AND flg_activo = true
+    ) THEN
+        RAISE EXCEPTION 'Receta lavado máquina id=% no existe o no está activa.', v_receta_id;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM mes.maquina WHERE id = v_maq_id AND fyh_elm IS NULL
+    ) THEN
+        RAISE EXCEPTION 'Máquina id=% no encontrada.', v_maq_id;
+    END IF;
+
+    -- Aggregate insumos across all recipe pasos, summed by item
+    SELECT jsonb_agg(jsonb_build_object('item_id', item_id, 'cantidad', cantidad))
+    INTO v_insumos
+    FROM (
+        SELECT lmpi.item_id, SUM(lmpi.cantidad) AS cantidad
+        FROM receta.lavado_maquina_paso        lmp
+        JOIN receta.lavado_maquina_paso_insumo lmpi ON lmpi.paso_id = lmp.id
+        WHERE lmp.receta_id = v_receta_id
+        GROUP BY lmpi.item_id
+    ) agg;
+
+    IF v_insumos IS NOT NULL THEN
+        -- Stock check
+        WITH consumos AS (
+            SELECT (i->>'item_id')::INT      AS item_id,
+                   (i->>'cantidad')::NUMERIC AS cantidad
+            FROM jsonb_array_elements(v_insumos) i
+        )
+        SELECT jsonb_agg(jsonb_build_object(
+            'item_id',            c.item_id,
+            'item_nombre',        it.nombre,
+            'saldo_disponible',   COALESCE(sg.cantidad_total, 0),
+            'cantidad_requerida', c.cantidad
+        ))
+        INTO v_error_payload
+        FROM consumos c
+        LEFT JOIN inventario.vw_stock_items sg ON sg.item_id = c.item_id
+        JOIN item it ON it.id = c.item_id
+        WHERE COALESCE(sg.cantidad_total, 0) < c.cantidad;
+
+        IF v_error_payload IS NOT NULL THEN
+            RAISE EXCEPTION 'Stock insuficiente para registrar lavado'
+                USING DETAIL = v_error_payload::text;
+        END IF;
+
+        SELECT id INTO v_egr_tipo_id
+        FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
+
+        SELECT id INTO v_motivo_id
+        FROM inventario.item_movimiento_motivo
+        WHERE item_movimiento_tipo_id = v_egr_tipo_id AND codigo = 'LAVADO_MAQUINA';
+
+        v_consumos := mes.calcular_fifo(v_insumos);
+        SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
+    END IF;
+
+    -- Insert directly as COMPLETADO
+    INSERT INTO mes.lavado_maquina(
+        receta_id, maquina_id, empleado_id, nota,
+        estado, fyh_inicio, fyh_fin,
+        usr_cre, fyh_cre
+    ) VALUES (
+        v_receta_id,
+        v_maq_id,
+        (p_datos->>'empleado_id')::SMALLINT,
+        p_datos->>'nota',
+        'COMPLETADO',
+        (p_datos->>'fyh_inicio')::TIMESTAMPTZ,
+        (p_datos->>'fyh_fin')::TIMESTAMPTZ,
+        v_usr_id, now()
+    )
+    RETURNING id INTO v_id;
+
+    IF v_consumos IS NOT NULL THEN
+        INSERT INTO inventario.item_movimientos(
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, cantidad, precio_unitario,
+            documento_tipo, documento_id, motivo_id
+        )
+        SELECT
+            v_doc_movimiento_id,
+            (c->>'item_id')::INT,
+            (c->>'lote_id')::INT,
+            v_egr_tipo_id,
+            (c->>'ubicacion_id')::INT,
+            (c->>'cantidad')::NUMERIC,
+            (SELECT iv.precio_promedio FROM inventario.item_valoracion iv
+             WHERE iv.item_id = (c->>'item_id')::INT),
+            'lavado_maquina',
+            v_id,
+            v_motivo_id
+        FROM jsonb_array_elements(v_consumos) c;
+    END IF;
+
+    UPDATE mes.maquina SET
+        ultimo_mantenimiento = (p_datos->>'fyh_fin')::TIMESTAMPTZ,
+        usr_mod = v_usr_id,
+        fyh_mod = now()
+    WHERE id = v_maq_id;
+
+    RETURN v_id;
+END;$$;
+
+GRANT EXECUTE ON FUNCTION mes.crear_lavado_maquina(JSONB)              TO authenticated;
+GRANT EXECUTE ON FUNCTION mes.iniciar_lavado_maquina(BIGINT, JSONB)    TO authenticated;
+GRANT EXECUTE ON FUNCTION mes.finalizar_lavado_maquina(BIGINT, JSONB)  TO authenticated;
+GRANT EXECUTE ON FUNCTION mes.registrar_lavado_maquina(JSONB)          TO authenticated;

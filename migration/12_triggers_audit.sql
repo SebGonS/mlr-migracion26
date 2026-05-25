@@ -279,7 +279,7 @@ CREATE TRIGGER trg_bi_factura_detalle_audit BEFORE INSERT ON doc.factura_detalle
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
 
 -- ── Stock balance maintenance ──────────────────────────────────────────────────
--- Maintains lote_saldo (MCHB) and saldo_item (MARD) on every posted movement.
+-- Maintains lote_saldo (MCHB) and item_saldo (MARD) on every posted movement.
 -- Direction is derived from location field presence — no factor lookup needed.
 -- destino IS NOT NULL → ingress (+cantidad at destino)
 -- origen  IS NOT NULL → egress  (-cantidad at origen)
@@ -295,10 +295,10 @@ BEGIN
             ON CONFLICT (lote_id, ubicacion_id) DO UPDATE
                 SET cantidad_actual = inventario.lote_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
         END IF;
-        INSERT INTO inventario.saldo_item (item_id, ubicacion_id, cantidad_actual)
+        INSERT INTO inventario.item_saldo (item_id, ubicacion_id, cantidad_actual)
         VALUES (NEW.item_id, NEW.destino_ubicacion_id, NEW.cantidad)
         ON CONFLICT (item_id, ubicacion_id) DO UPDATE
-            SET cantidad_actual = inventario.saldo_item.cantidad_actual + EXCLUDED.cantidad_actual;
+            SET cantidad_actual = inventario.item_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
     END IF;
 
     -- Egress: debit origen
@@ -309,10 +309,10 @@ BEGIN
             ON CONFLICT (lote_id, ubicacion_id) DO UPDATE
                 SET cantidad_actual = inventario.lote_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
         END IF;
-        INSERT INTO inventario.saldo_item (item_id, ubicacion_id, cantidad_actual)
+        INSERT INTO inventario.item_saldo (item_id, ubicacion_id, cantidad_actual)
         VALUES (NEW.item_id, NEW.origen_ubicacion_id, -NEW.cantidad)
         ON CONFLICT (item_id, ubicacion_id) DO UPDATE
-            SET cantidad_actual = inventario.saldo_item.cantidad_actual + EXCLUDED.cantidad_actual;
+            SET cantidad_actual = inventario.item_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
     END IF;
 
     RETURN NEW;

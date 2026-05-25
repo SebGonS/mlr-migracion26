@@ -3203,8 +3203,8 @@ GROUP BY lote_id, ubicacion_id
 ON CONFLICT (lote_id, ubicacion_id) DO UPDATE
     SET cantidad_actual = EXCLUDED.cantidad_actual;
 
--- saldo_item (MARD): aggregate lote_saldo by (item, ubicacion).
-INSERT INTO inventario.saldo_item (item_id, ubicacion_id, cantidad_actual)
+-- item_saldo (MARD): aggregate lote_saldo by (item, ubicacion).
+INSERT INTO inventario.item_saldo (item_id, ubicacion_id, cantidad_actual)
 SELECT l.item_id, ls.ubicacion_id, SUM(ls.cantidad_actual)
 FROM inventario.lote_saldo ls
 JOIN inventario.lote l ON l.id = ls.lote_id

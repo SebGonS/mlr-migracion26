@@ -37,10 +37,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_notif_alerta_activa
 -- All jobs call functions defined in funciones/alertas.sql.
 -- Unschedule first to make this script idempotent on re-run.
 
+SELECT cron.unschedule('letras-vencidas')              FROM cron.job WHERE jobname = 'letras-vencidas';
 SELECT cron.unschedule('alerta-partidas-vencidas')    FROM cron.job WHERE jobname = 'alerta-partidas-vencidas';
 SELECT cron.unschedule('alerta-rollos-sin-programar') FROM cron.job WHERE jobname = 'alerta-rollos-sin-programar';
 SELECT cron.unschedule('alerta-stock-bajo')           FROM cron.job WHERE jobname = 'alerta-stock-bajo';
 SELECT cron.unschedule('alerta-stock-pasos')          FROM cron.job WHERE jobname = 'alerta-stock-pasos';
+
+-- Nightly at midnight Lima time (05:00 UTC) — before business starts
+SELECT cron.schedule(
+    'letras-vencidas',
+    '0 5 * * *',
+    $$ SELECT doc.marcar_letras_vencidas() $$
+);
 
 -- Daily at 8am (UTC-5 = 13:00 UTC for Peru)
 SELECT cron.schedule(

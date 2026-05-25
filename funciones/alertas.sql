@@ -79,19 +79,20 @@ $$;
 -- ───────────────────────────────────────────────────────────────
 -- alertas.check_rollos_sin_programar
 -- Fires daily.
--- Condition: SERV_ING guia registered > 5 days ago with no
---            partida linked to its partida.
--- Resolves: when an partida is created for the partida.
+-- Condition: CLIENTE_ENVIO_PROCESO guia with fecha_emision > 5 days
+--            ago that still has at least one in-stock roll with no
+--            partida_componente assignment.
+-- Resolves: when all in-stock rolls from the guia are assigned to a partida.
 -- Notifies: jefe_planta, supervisor_produccion
 -- ───────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION alertas.check_rollos_sin_programar()
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'public', 'doc', 'mes', 'iam', 'notification'
+SET search_path TO 'public', 'doc', 'mes', 'inventario', 'iam', 'notification'
 AS $$
 BEGIN
-    -- OPEN: SERV_ING guias older than 5 days with no production order
+    -- OPEN: guias older than 5 days with at least one in-stock unassigned roll
     INSERT INTO notification.notifications (
         user_id, title, body, tipo, categoria,
         objeto_tipo, objeto_id, payload
@@ -99,19 +100,19 @@ BEGIN
     SELECT
         ur.user_id,
         'Rollos sin programar',
-        'La guía #' || gr.correlativo || ' de ' || t.nombre
-            || ' lleva ' || EXTRACT(DAY FROM now() - gr.fyh_cre)::INT
-            || ' días sin orden de producción asociada.',
+        'La guía ' || gr.serie || '-' || gr.correlativo || ' de ' || t.nombre
+            || ' lleva ' || (CURRENT_DATE - gr.fecha_emision::DATE)
+            || ' días con rollos sin asignar a una orden de producción.',
         'alert',
         'rollo_sin_programar',
         'guia_remision',
         gr.id,
         jsonb_build_object(
-            'guia_remision_id', gr.id,
-            'correlativo',      gr.correlativo,
-            'tercero',          t.nombre,
-            'dias_espera',      EXTRACT(DAY FROM now() - gr.fyh_cre)::INT,
-            'fyh_ingreso',      gr.fyh_cre
+            'guia_remision_id',  gr.id,
+            'guia_numero',       gr.serie || '-' || gr.correlativo,
+            'tercero',           t.nombre,
+            'dias_espera',       (CURRENT_DATE - gr.fecha_emision::DATE),
+            'fecha_emision',     gr.fecha_emision
         )
     FROM doc.guia_remision gr
     JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
@@ -123,13 +124,16 @@ BEGIN
         WHERE r.code = ANY(ARRAY['jefe_planta', 'supervisor_produccion'])
     ) ur
     WHERE grt.codigo = 'CLIENTE_ENVIO_PROCESO'
-      AND gr.fyh_cre < now() - interval '5 days'
-      AND NOT EXISTS (
+      AND gr.fecha_emision < CURRENT_DATE - 5
+      AND EXISTS (
+          -- at least one in-stock roll with no partida assigned
           SELECT 1
           FROM inventario.lote_rollo_detalle lrd
-          JOIN inventario.lote l              ON l.id = lrd.lote_id
-          JOIN mes.partida_componente pc   ON pc.lote_id = l.id
+          JOIN inventario.lote l              ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
+          JOIN inventario.vw_stock_lotes sl   ON sl.lote_id = l.id
+          LEFT JOIN mes.partida_componente pc ON pc.lote_id = l.id
           WHERE lrd.guia_remision_id = gr.id
+            AND pc.lote_id IS NULL
       )
       AND NOT EXISTS (
           SELECT 1 FROM notification.notifications n
@@ -141,18 +145,20 @@ BEGIN
       )
     ON CONFLICT DO NOTHING;
 
-    -- CLOSE: guias whose rolls now have a production order
-    UPDATE notification.notifications
+    -- CLOSE: guias that no longer have any in-stock unassigned rolls
+    UPDATE notification.notifications n
     SET fyh_resuelta = now()
-    WHERE categoria   = 'rollo_sin_programar'
-      AND objeto_tipo = 'guia_remision'
-      AND fyh_resuelta IS NULL
-      AND objeto_id IN (
-          SELECT DISTINCT lrd.guia_remision_id
+    WHERE n.categoria   = 'rollo_sin_programar'
+      AND n.objeto_tipo = 'guia_remision'
+      AND n.fyh_resuelta IS NULL
+      AND NOT EXISTS (
+          SELECT 1
           FROM inventario.lote_rollo_detalle lrd
-          JOIN inventario.lote l             ON l.id = lrd.lote_id
-          JOIN mes.partida_componente pc  ON pc.lote_id = l.id
-          WHERE lrd.guia_remision_id IS NOT NULL
+          JOIN inventario.lote l              ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
+          JOIN inventario.vw_stock_lotes sl   ON sl.lote_id = l.id
+          LEFT JOIN mes.partida_componente pc ON pc.lote_id = l.id
+          WHERE lrd.guia_remision_id = n.objeto_id
+            AND pc.lote_id IS NULL
       );
 END;
 $$;

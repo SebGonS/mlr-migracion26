@@ -356,6 +356,40 @@ LEFT JOIN LATERAL (
 
 GRANT SELECT ON doc.vw_facturas_proveedor TO authenticated;
 
+-- ── doc.vw_compras_item_mes ────────────────────────────────────
+-- Purchases aggregated by (supplier, item, month) from invoiced lines.
+-- Source: factura_proveedor_detalle — authoritative invoiced quantities.
+-- Excludes anuladas. All amounts in USD.
+-- Designed for time-series and supplier purchase analysis; the frontend
+-- pivots months into columns.
+CREATE OR REPLACE VIEW doc.vw_compras_item_mes AS
+SELECT
+    fp.tercero_id,
+    t.nombre                                          AS proveedor_nombre,
+    fpd.item_id,
+    i.codigo                                          AS item_codigo,
+    i.nombre                                          AS item_nombre,
+    un.codigo                                         AS unidad_codigo,
+    EXTRACT(YEAR  FROM fp.fecha_emision)::INT         AS ano,
+    EXTRACT(MONTH FROM fp.fecha_emision)::INT         AS mes,
+    TO_CHAR(fp.fecha_emision, 'YYYY-MM')              AS ano_mes,
+    SUM(fpd.cantidad)                                 AS cantidad_total,
+    SUM(fpd.subtotal_linea)                           AS monto_exigv,
+    SUM(fpd.total_linea)                              AS monto_conigv
+FROM doc.factura_proveedor_detalle fpd
+JOIN doc.factura_proveedor fp ON fp.id = fpd.factura_proveedor_id
+JOIN tercero t                ON t.id  = fp.tercero_id
+JOIN item i                   ON i.id  = fpd.item_id
+JOIN unidad un                ON un.id = i.unidad_id
+WHERE fp.estado_pago <> 'anulado'
+GROUP BY fp.tercero_id, t.nombre,
+         fpd.item_id, i.codigo, i.nombre, un.codigo,
+         EXTRACT(YEAR  FROM fp.fecha_emision),
+         EXTRACT(MONTH FROM fp.fecha_emision),
+         TO_CHAR(fp.fecha_emision, 'YYYY-MM');
+
+GRANT SELECT ON doc.vw_compras_item_mes TO authenticated;
+
 -- ── doc.vw_letras ──────────────────────────────────────────────
 -- Hydrated list view for payment letters.
 -- Adds proveedor name, invoice count, applied amount, and free balance.
@@ -525,7 +559,7 @@ WHERE l.documento_tipo = 'partida_paso_ejecucion'
 GROUP BY p.id, l.item_id, vi.item_codigo, vi.item_nombre;
 
 -- ── inventario.vw_stock_items ─────────────────────────────────
--- Item-level stock totals, location-agnostic — reads saldo_item (≈ SAP MARD).
+-- Item-level stock totals, location-agnostic — reads item_saldo (≈ SAP MARD).
 -- O(1) per item: no aggregation over lot history. Used by availability gates.
 DROP VIEW IF EXISTS inventario.vw_stock_general CASCADE;
 CREATE OR REPLACE VIEW inventario.vw_stock_items AS
@@ -534,7 +568,7 @@ SELECT
     vi.item_tipo_id, vi.item_tipo_codigo,
     SUM(si.cantidad_actual) AS cantidad_total,
     vi.unidad_id, vi.unidad_codigo
-FROM inventario.saldo_item si
+FROM inventario.item_saldo si
 JOIN vw_items vi ON vi.item_id = si.item_id
 WHERE si.cantidad_actual > 0
 GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre,
@@ -549,9 +583,30 @@ SELECT
     si.ubicacion_id,
     si.cantidad_actual AS cantidad_total,
     vi.unidad_id, vi.unidad_codigo
-FROM inventario.saldo_item si
+FROM inventario.item_saldo si
 JOIN vw_items vi ON vi.item_id = si.item_id
 WHERE si.cantidad_actual > 0;
+
+-- ── inventario.vw_stock_items_valorado ───────────────────────
+-- Item stock + MAP valuation (≈ SAP MB52). Financial view only — not for
+-- availability gates (use vw_stock_items for that).
+-- LEFT JOIN so items with no valuation row still appear (cost columns NULL).
+CREATE OR REPLACE VIEW inventario.vw_stock_items_valorado AS
+SELECT
+    vi.item_id, vi.item_codigo, vi.item_nombre,
+    vi.item_tipo_id, vi.item_tipo_codigo,
+    SUM(si.cantidad_actual)   AS cantidad_total,
+    vi.unidad_id, vi.unidad_codigo,
+    iv.precio_promedio,
+    iv.stock_valorado
+FROM inventario.item_saldo si
+JOIN  vw_items vi                    ON vi.item_id = si.item_id
+LEFT JOIN inventario.item_valoracion iv ON iv.item_id = si.item_id
+WHERE si.cantidad_actual > 0
+GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre,
+         vi.item_tipo_id, vi.item_tipo_codigo,
+         vi.unidad_id, vi.unidad_codigo,
+         iv.precio_promedio, iv.stock_valorado;
 
 -- ── inventario.vw_stock_rollos ────────────────────────────────
 -- Kept as combined base view in case any function needs a single roll stock source.
@@ -697,7 +752,7 @@ ORDER BY art.nombre, vc.color, i.nombre;
 
 -- ── inventario.vw_stock_insumos ───────────────────────────────
 -- Insumo stock totals with tipo/colorante attributes, location-agnostic.
--- Aggregates saldo_item across locations (saldo_item key is item_id + ubicacion_id).
+-- Aggregates item_saldo across locations (item_saldo key is item_id + ubicacion_id).
 CREATE OR REPLACE VIEW inventario.vw_stock_insumos AS
 SELECT
     si.item_id,
@@ -711,7 +766,7 @@ SELECT
     iid.colorante_tipo_id,
     ct.codigo                   AS colorante_tipo_codigo,
     ct.nombre                   AS colorante_tipo_nombre
-FROM inventario.saldo_item si
+FROM inventario.item_saldo si
 JOIN item i        ON i.id = si.item_id
 JOIN item_tipo it  ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
 JOIN unidad un     ON un.id = i.unidad_id
@@ -880,6 +935,77 @@ FROM calidad.inspeccion i
 LEFT JOIN inventario.lote l ON l.id = i.lote_id
 LEFT JOIN vw_items vi ON vi.item_id = l.item_id
 LEFT JOIN mes.empleado e ON e.id = i.empleado_id;
+
+-- ── calidad.vw_partidas_pendientes_calidad ────────────────────
+-- Partida-level QC summary — aggregates over vw_lotes_pendientes_inspeccion.
+-- lotes_en_produccion:   input rolls currently inside an EN_PROCESO paso
+--                        (more output lotes may appear for QC when the step completes)
+-- lotes_asignados_total: total input rolls reserved for this partida
+-- tiene_rework_activo:   at least one non-closed rework partida linked to this one
+-- partida_origen_id:     non-NULL means this row is itself a rework
+DROP VIEW IF EXISTS calidad.vw_partidas_pendientes_calidad;
+CREATE OR REPLACE VIEW calidad.vw_partidas_pendientes_calidad AS
+WITH base AS (
+    SELECT
+        partida_id,
+        partida_codigo,
+        partida_origen_id,
+        cliente_nombre,
+        prioridad_id,
+        operacion_codigo,
+        lote_id,
+        fecha_creacion_lote
+    FROM calidad.vw_lotes_pendientes_inspeccion
+    WHERE partida_id IS NOT NULL
+),
+agg AS (
+    SELECT
+        partida_id,
+        partida_codigo,
+        partida_origen_id,
+        cliente_nombre,
+        prioridad_id,
+        COUNT(*)                                                             AS lotes_pendientes_qc,
+        array_agg(DISTINCT operacion_codigo ORDER BY operacion_codigo)
+            FILTER (WHERE operacion_codigo IS NOT NULL)                     AS operaciones_pendientes,
+        MIN(fecha_creacion_lote)                                            AS lote_pendiente_mas_antiguo
+    FROM base
+    GROUP BY partida_id, partida_codigo, partida_origen_id, cliente_nombre, prioridad_id
+)
+SELECT
+    a.partida_id,
+    a.partida_codigo,
+    a.partida_origen_id,
+    a.cliente_nombre,
+    a.prioridad_id,
+    a.lotes_pendientes_qc,
+    a.operaciones_pendientes,
+    a.lote_pendiente_mas_antiguo,
+    (
+        SELECT COUNT(DISTINCT pc.lote_id)
+        FROM mes.partida_componente pc
+        WHERE pc.partida_id = a.partida_id
+          AND pc.lote_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM mes.partida_paso pp
+              JOIN mes.partida_paso_ejecucion ppe ON ppe.partida_paso_id = pp.id
+              WHERE pp.partida_id = a.partida_id
+                AND ppe.estado = 'EN_PROCESO'
+          )
+    )                                                                        AS lotes_en_produccion,
+    (
+        SELECT COUNT(*)
+        FROM mes.partida_componente
+        WHERE partida_id = a.partida_id AND lote_id IS NOT NULL
+    )                                                                        AS lotes_asignados_total,
+    EXISTS (
+        SELECT 1 FROM mes.partida rw
+        WHERE rw.partida_origen_id = a.partida_id
+          AND rw.estado_produccion NOT IN ('CANCELADA', 'TECO', 'CERRADA')
+    )                                                                        AS tiene_rework_activo
+FROM agg a
+ORDER BY a.lote_pendiente_mas_antiguo;
 
 -- ── mes.vw_empleados_activos ───────────────────────────────────
 CREATE OR REPLACE VIEW mes.vw_empleados_activos AS
@@ -1170,6 +1296,37 @@ FROM (
 WHERE count > 0
 ORDER BY CASE urgencia WHEN 'alta' THEN 1 ELSE 2 END;
 
+-- ── inventario.vw_guias_rollos_pendientes ─────────────────────
+-- Guias with at least one in-stock roll not yet assigned to a partida.
+-- Drops off automatically once all rolls are assigned or leave stock.
+-- Mirrors the condition used by alertas.check_rollos_sin_programar.
+CREATE OR REPLACE VIEW inventario.vw_guias_rollos_pendientes AS
+SELECT
+    gr.id                                       AS guia_remision_id,
+    gr.serie || '-' || gr.correlativo           AS guia_numero,
+    gr.fecha_emision,
+    gr.tercero_id,
+    t.nombre                                    AS tercero_nombre,
+    (CURRENT_DATE - gr.fecha_emision::DATE)     AS dias_espera,
+    COUNT(l.id)                                 AS total_rollos,
+    COUNT(l.id) FILTER (WHERE pc.lote_id IS NULL)      AS rollos_pendientes,
+    COUNT(l.id) FILTER (WHERE pc.lote_id IS NOT NULL)  AS rollos_asignados,
+    SUM(sl.cantidad_disponible) FILTER (WHERE pc.lote_id IS NULL)     AS peso_pendiente_kg,
+    SUM(sl.cantidad_disponible) FILTER (WHERE pc.lote_id IS NOT NULL) AS peso_asignado_kg,
+    SUM(sl.cantidad_disponible)                 AS peso_total_kg
+FROM doc.guia_remision gr
+JOIN doc.guia_remision_tipo grt         ON grt.id = gr.guia_remision_tipo_id
+                                        AND grt.codigo = 'CLIENTE_ENVIO_PROCESO'
+JOIN tercero t                          ON t.id = gr.tercero_id
+JOIN inventario.lote_rollo_detalle lrd  ON lrd.guia_remision_id = gr.id
+JOIN inventario.lote l                  ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
+JOIN inventario.vw_stock_lotes sl       ON sl.lote_id = l.id
+LEFT JOIN mes.partida_componente pc     ON pc.lote_id = l.id
+GROUP BY gr.id, gr.serie, gr.correlativo, gr.fecha_emision, gr.tercero_id, t.nombre
+HAVING COUNT(l.id) FILTER (WHERE pc.lote_id IS NULL) > 0;
+
+GRANT SELECT ON inventario.vw_guias_rollos_pendientes TO authenticated;
+
 -- ── inventario.vw_rollos_por_guia ────────────────────────────
 -- Roll counts and weights aggregated per ingress guia.
 -- Used for intake review and guia → partida assignment UI.
@@ -1208,6 +1365,7 @@ GRANT SELECT ON inventario.vw_stock_rollos_crudos          TO anon, authenticate
 GRANT SELECT ON inventario.vw_stock_rollos_tenidos         TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_items                  TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_items_ubicacion        TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_items_valorado         TO authenticated;
 GRANT SELECT ON inventario.vw_stock_insumos                TO anon, authenticated;
 GRANT SELECT ON inventario.vw_lotes_disponibles            TO anon, authenticated;
 GRANT SELECT ON inventario.vw_lotes_rollos_despachados     TO anon, authenticated;
@@ -1216,8 +1374,9 @@ GRANT SELECT ON mes.vw_maquinas                   TO authenticated;
 GRANT SELECT ON mes.vw_empleados_activos          TO authenticated;
 GRANT SELECT ON mes.vw_pasos                      TO anon, authenticated;
 GRANT SELECT ON mes.vw_partida_produccion_rollos  TO anon, authenticated;
-GRANT SELECT ON calidad.vw_lotes_pendientes_inspeccion TO authenticated;
-GRANT SELECT ON calidad.vw_inspecciones           TO authenticated;
+GRANT SELECT ON calidad.vw_lotes_pendientes_inspeccion    TO authenticated;
+GRANT SELECT ON calidad.vw_inspecciones                   TO authenticated;
+GRANT SELECT ON calidad.vw_partidas_pendientes_calidad    TO authenticated;
 GRANT SELECT ON mes.vw_partida_resumen_tenido              TO authenticated;
 GRANT SELECT ON public.vw_dashboard_kpis                   TO authenticated;
 GRANT SELECT ON public.vw_dashboard_actividad_reciente     TO authenticated;
@@ -1249,6 +1408,7 @@ DROP VIEW IF EXISTS public.vw_dashboard_actividad_reciente CASCADE;
 DROP VIEW IF EXISTS public.vw_dashboard_kpis               CASCADE;
 
 -- calidad views
+DROP VIEW IF EXISTS calidad.vw_partidas_pendientes_calidad CASCADE;
 DROP VIEW IF EXISTS calidad.vw_inspecciones                CASCADE;
 DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion CASCADE;
 
@@ -1261,11 +1421,13 @@ DROP VIEW IF EXISTS mes.vw_partida_produccion_rollos       CASCADE;
 DROP VIEW IF EXISTS mes.vw_partidas                        CASCADE;
 
 -- inventario views (dependent on vw_stock_lotes — drop before it)
+DROP VIEW IF EXISTS inventario.vw_guias_rollos_pendientes  CASCADE;
 DROP VIEW IF EXISTS inventario.vw_rollos_por_guia          CASCADE;
 DROP VIEW IF EXISTS inventario.vw_lotes_rollos_despachados CASCADE;
 DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock       CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_rollos_tenidos     CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_rollos_crudos      CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_items_valorado     CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_items_ubicacion    CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_items              CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_insumos            CASCADE;
@@ -1278,6 +1440,7 @@ DROP VIEW IF EXISTS inventario.vw_stock_lotes              CASCADE;
 
 -- doc views
 DROP VIEW IF EXISTS doc.vw_letras                          CASCADE;
+DROP VIEW IF EXISTS doc.vw_compras_item_mes                CASCADE;
 DROP VIEW IF EXISTS doc.vw_facturas_proveedor              CASCADE;
 DROP VIEW IF EXISTS doc.vw_compras                         CASCADE;
 

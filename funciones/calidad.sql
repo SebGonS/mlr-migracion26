@@ -99,7 +99,7 @@ BEGIN
         RETURNING id
     ),
     defectos_mapped AS (
-        SELECT id, ROW_NUMBER() OVER () AS idx
+        SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS idx
         FROM defectos_inserted
     )
     INSERT INTO calidad.inspeccion_foto (inspeccion_defecto_id, ruta_archivo, etiqueta, observacion)
@@ -208,3 +208,290 @@ BEGIN
     RETURN v_result;
 END;
 $function$;
+
+
+CREATE OR REPLACE FUNCTION calidad.get_lotes_pendientes_partida(p_partida_id bigint)
+RETURNS TABLE (
+    lote_id                   int,
+    lote_codigo               text,
+    item_id                   int,
+    item_nombre               text,
+    item_codigo               text,
+    partida_paso_ejecucion_id bigint,
+    operacion_id              smallint,
+    operacion_codigo          text,
+    maquina_id                int,
+    maquina_codigo            text,
+    ancho                     text,
+    peso                      numeric,
+    fecha_creacion_lote       timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'iam','public','calidad','inventario','mes'
+AS $$
+    SELECT
+        v.lote_id,
+        v.lote_codigo,
+        v.item_id,
+        v.item_nombre,
+        v.item_codigo,
+        v.partida_paso_ejecucion_id,
+        v.operacion_id,
+        v.operacion_codigo,
+        v.maquina_id,
+        v.maquina_codigo,
+        v.ancho,
+        l.cantidad  AS peso,
+        v.fecha_creacion_lote
+    FROM calidad.vw_lotes_pendientes_inspeccion v
+    JOIN inventario.lote l ON l.id = v.lote_id
+    WHERE v.partida_id = p_partida_id
+    ORDER BY v.partida_paso_ejecucion_id, v.fecha_creacion_lote;
+$$;
+
+
+CREATE OR REPLACE FUNCTION calidad.bulk_aprobar_lotes(
+    p_lote_ids    int[],
+    p_empleado_id int  DEFAULT NULL,
+    p_observacion text DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','calidad','inventario','mes'
+AS $function$
+DECLARE
+    v_message   text;
+    v_detail    text;
+    v_hint      text;
+    v_context   text;
+    v_sqlstate  text;
+    v_usr_id    int := get_user_id();
+    v_approved  int;
+    v_results   jsonb;
+BEGIN
+    IF NOT jwt_has_permission('calidad.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere calidad.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('bulk_aprobar_lotes', v_usr_id,
+            jsonb_build_object('lote_ids', p_lote_ids, 'empleado_id', p_empleado_id));
+
+    WITH lotes_resueltos AS (
+        -- Resolve ejecucion_id via the view — handles both output rolls
+        -- (documento_tipo = 'partida_paso_ejecucion') and input rolls
+        -- (ejecucion resolved via the active lateral join in the view).
+        SELECT v.lote_id, v.partida_paso_ejecucion_id
+        FROM calidad.vw_lotes_pendientes_inspeccion v
+        WHERE v.lote_id = ANY(p_lote_ids)
+    ),
+    ins AS (
+        INSERT INTO calidad.inspeccion (lote_id, partida_paso_ejecucion_id, resultado, observacion, empleado_id)
+        SELECT lr.lote_id, lr.partida_paso_ejecucion_id, 'APROBADO', p_observacion, p_empleado_id
+        FROM lotes_resueltos lr
+        WHERE NOT EXISTS (
+            SELECT 1 FROM calidad.inspeccion ci
+            WHERE ci.lote_id                   = lr.lote_id
+              AND ci.partida_paso_ejecucion_id = lr.partida_paso_ejecucion_id
+        )
+        RETURNING id AS inspeccion_id, lote_id
+    ),
+    upd AS (
+        UPDATE inventario.lote
+        SET estado_calidad = 'APROBADO'
+        WHERE id IN (SELECT lote_id FROM ins)
+    )
+    SELECT COUNT(*)::int,
+           jsonb_agg(jsonb_build_object('lote_id', lote_id, 'inspeccion_id', inspeccion_id))
+    INTO v_approved, v_results
+    FROM ins;
+
+    IF v_approved > 0 THEN
+        INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+        SELECT ur.user_id,
+               'Aprobación Masiva de Calidad',
+               COALESCE(
+                   (SELECT COALESCE(nombre, 'Usuario desconocido') || ' ' || apellido
+                    FROM usuario WHERE id = v_usr_id),
+                   'sistema'
+               ) || ' aprobó ' || v_approved || ' rollo(s) en bloque',
+               'info',
+               jsonb_build_object('objeto_tipo', 'bulk_aprobacion', 'lote_ids', p_lote_ids)
+        FROM iam.user_rol ur
+        LEFT JOIN iam.rol r ON ur.rol_id = r.id
+        WHERE r.code IN ('jefe_planta', 'calidad')
+          AND v_usr_id <> ur.user_id;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'aprobados',  v_approved,
+        'resultados', COALESCE(v_results, '[]'::jsonb)
+    );
+
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+        RAISE LOG 'Error in bulk_aprobar_lotes - User: %, Lotes: %, Error: %, Detail: %',
+                  v_usr_id, p_lote_ids, v_message, v_detail;
+        RAISE;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- DAR DE BAJA LOTE — whole-roll condemnation (≈ SAP mvt 551)
+--
+-- Posts a PROD_SCRAP movement and soft-deletes the output lote.
+-- Prerequisite: lote.estado_calidad must already be 'BAJA'
+-- (set by crear_inspeccion with resultado='BAJA').
+--
+-- Only applies to production output lotes (documento_tipo = 'partida_paso_ejecucion').
+-- Guards against downstream movements (same pattern as anular_produccion).
+-- Recounts partida_detalle.cantidad_producida after the write-off.
+--
+-- Valuation: flg_valorizable on PROD_SCRAP is true by default. For client-owned
+-- rolls (lote.propietario_id references a tercero marked as cliente), the PROD_SCRAP
+-- movement is posted without valuation — same logic as SERV_EGR movements.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION calidad.dar_de_baja_lote(p_lote_id INT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','calidad','inventario','mes'
+AS $function$
+DECLARE
+    v_message        text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id         int  := get_user_id();
+    v_estado_calidad calidad_estado_enum;
+    v_documento_tipo text;
+    v_partida_id     bigint;
+    v_scrap_tipo_id  smallint;
+    v_doc_mov_id     bigint;
+    v_ubicacion_id   int;
+    v_item_id        int;
+    v_cantidad       numeric;
+BEGIN
+    IF NOT jwt_has_permission('calidad.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere calidad.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- 1. Resolve lote
+    SELECT l.estado_calidad, l.documento_tipo, l.item_id, l.cantidad
+    INTO v_estado_calidad, v_documento_tipo, v_item_id, v_cantidad
+    FROM inventario.lote l
+    WHERE l.id = p_lote_id AND l.fyh_elm IS NULL;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Lote % no encontrado o ya anulado.', p_lote_id;
+    END IF;
+
+    IF v_estado_calidad <> 'BAJA' THEN
+        RAISE EXCEPTION
+            'Lote % debe tener estado_calidad = BAJA para dar de baja. Estado actual: %.',
+            p_lote_id, v_estado_calidad;
+    END IF;
+
+    IF v_documento_tipo <> 'partida_paso_ejecucion' THEN
+        RAISE EXCEPTION
+            'dar_de_baja_lote solo aplica a lotes de salida de producción (documento_tipo = partida_paso_ejecucion). Tipo actual: %.',
+            v_documento_tipo;
+    END IF;
+
+    -- 2. Guard: no downstream movements beyond the original PROD_ING
+    IF EXISTS (
+        SELECT 1
+        FROM inventario.item_movimientos im
+        JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+        WHERE im.lote_id   = p_lote_id
+          AND imt.codigo NOT IN ('PROD_ING', 'PROD_ING_REV')
+    ) THEN
+        RAISE EXCEPTION
+            'Lote % tiene movimientos posteriores (despacho, ajuste, etc.). Anule esos documentos antes de dar de baja.',
+            p_lote_id;
+    END IF;
+
+    -- 3. Resolve partida for cantidad_producida recount
+    SELECT pp.partida_id
+    INTO v_partida_id
+    FROM mes.partida_paso_ejecucion pe
+    JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+    JOIN inventario.lote l   ON l.documento_id = pe.id AND l.documento_tipo = 'partida_paso_ejecucion'
+    WHERE l.id = p_lote_id;
+
+    -- 4. Lock
+    PERFORM 1 FROM inventario.lote WHERE id = p_lote_id FOR UPDATE;
+
+    -- 5. Post PROD_SCRAP movement
+    SELECT id INTO v_scrap_tipo_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_SCRAP';
+    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
+
+    SELECT sa.ubicacion_id INTO v_ubicacion_id
+    FROM inventario.vw_stock_lotes_ubicacion sa
+    WHERE sa.lote_id = p_lote_id
+    LIMIT 1;
+
+    INSERT INTO inventario.item_movimientos(
+        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+        origen_ubicacion_id, cantidad, documento_tipo, documento_id
+    )
+    VALUES (
+        v_doc_mov_id, v_item_id, p_lote_id, v_scrap_tipo_id,
+        v_ubicacion_id, v_cantidad, 'calidad_baja', p_lote_id
+    );
+
+    -- 6. Soft-delete lote (lote_rollo_detalle kept for traceability)
+    UPDATE inventario.lote
+    SET fyh_elm = NOW(), usr_elm = v_usr_id
+    WHERE id = p_lote_id;
+
+    -- 7. Recount cantidad_producida (same pattern as registrar_produccion / anular_produccion)
+    UPDATE mes.partida_detalle pd
+    SET cantidad_producida = (
+        SELECT COUNT(*)
+        FROM inventario.lote l
+        JOIN mes.partida_paso_ejecucion pe
+            ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
+        JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+        WHERE pp.partida_id = v_partida_id
+          AND l.item_id     = pd.item_id
+          AND l.fyh_elm     IS NULL
+    ),
+    usr_mod = v_usr_id,
+    fyh_mod = NOW()
+    WHERE pd.partida_id = v_partida_id;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('dar_de_baja_lote', v_usr_id, jsonb_build_object('lote_id', p_lote_id));
+
+    RETURN format('Lote #%s dado de baja. Movimiento PROD_SCRAP registrado.', p_lote_id);
+
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+        RAISE LOG 'Error in dar_de_baja_lote - User: %, Lote: %, Error: %, Detail: %',
+                  v_usr_id, p_lote_id, v_message, v_detail;
+        RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION calidad.dar_de_baja_lote(INT) TO authenticated;
+
+
+GRANT EXECUTE ON FUNCTION calidad.crear_inspeccion(jsonb)               TO authenticated;
+GRANT EXECUTE ON FUNCTION calidad.get_inspeccion(bigint)                 TO authenticated;
+GRANT EXECUTE ON FUNCTION calidad.get_lotes_pendientes_partida(bigint)   TO authenticated;
+GRANT EXECUTE ON FUNCTION calidad.bulk_aprobar_lotes(int[], int, text)   TO authenticated;

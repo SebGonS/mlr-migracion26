@@ -339,6 +339,7 @@ REVOKE UPDATE (usr_mod, fyh_mod) ON inventario.cuadre_detalle FROM anon, authent
 CREATE INDEX IF NOT EXISTS idx_partida_paso_partida_id  ON mes.partida_paso(partida_id);
 CREATE INDEX IF NOT EXISTS idx_partida_comp_partida_id  ON mes.partida_componente(partida_id);
 CREATE INDEX IF NOT EXISTS idx_paso_ejec_paso_id        ON mes.partida_paso_ejecucion(partida_paso_id);
+CREATE INDEX IF NOT EXISTS idx_paso_ejec_estado         ON mes.partida_paso_ejecucion(estado, partida_paso_id);
 CREATE INDEX IF NOT EXISTS idx_lote_doc             ON inventario.lote(documento_tipo, documento_id);
 CREATE INDEX IF NOT EXISTS idx_im_lote_id           ON inventario.item_movimientos(lote_id);
 CREATE INDEX IF NOT EXISTS idx_im_item_id           ON inventario.item_movimientos(item_id);

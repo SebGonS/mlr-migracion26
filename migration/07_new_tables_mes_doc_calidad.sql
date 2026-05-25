@@ -343,6 +343,7 @@ CREATE TABLE mes.partida_paso_ejecucion (
     temperatura_real    numeric(5,2),
     relacion_bano_real  numeric(5,2),
     cantidad            numeric(12,4),
+    cantidad_scrap      numeric(12,4),  -- rolls condemned mid-execution (≈ SAP AFRU.AFRUASC)
     notas           text,
     programacion_id BIGINT REFERENCES mes.programacion(id),
     usr_cre int,

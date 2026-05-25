@@ -243,7 +243,11 @@ VALUES
 -- PROD_CONSUMO_REV reverses the input lote backflush (factor +1, restores it to stock).
 -- Not valorizable — the original movements already set valuation; reversal is stock-only.
 ('PROD_ING_REV',     'Producción – Anulación Ingreso PT',         'PRODUCCION',      -1, true,  false, false, false, true,  false, 'Anulación de ingreso de producto terminado (reversal de PROD_ING)'),
-('PROD_CONSUMO_REV', 'Producción – Anulación Consumo MP',         'PRODUCCION',      1,  true,  false, false, false, false, true,  'Anulación de consumo de materia prima (reversal de PROD_CONSUMO)');
+('PROD_CONSUMO_REV', 'Producción – Anulación Consumo MP',         'PRODUCCION',      1,  true,  false, false, false, false, true,  'Anulación de consumo de materia prima (reversal de PROD_CONSUMO)'),
+-- PROD_SCRAP: whole-roll condemnation posted by dar_de_baja_lote.
+-- flg_valorizable=true for company-owned rolls; dar_de_baja_lote checks
+-- lote.propietario_id and skips valuation posting for client-owned material.
+('PROD_SCRAP',      'Producción – Baja por Calidad',            'PRODUCCION',      -1, true,  true,  false, false, true,  false, 'Baja de rollo de producción rechazado por calidad');
 
 -- ── inventario.item_movimiento_motivo ────────────────────────
 -- Movement reason catalog scoped per movement type (≈ SAP T157 / MSEG.GRUND).
@@ -258,6 +262,8 @@ CREATE TABLE inventario.item_movimiento_motivo (
 
 INSERT INTO inventario.item_movimiento_motivo (item_movimiento_tipo_id, codigo, nombre)
 SELECT id, 'MATIZADO',        'Corrección de color en máquina'              FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO'
+UNION ALL
+SELECT id, 'LAVADO_MAQUINA', 'Consumo de insumos en lavado de máquina'     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO'
 UNION ALL
 SELECT id, 'CONFECCION',      'Ingreso desde línea de confección propia'    FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING'
 UNION ALL
@@ -423,16 +429,16 @@ CREATE TABLE inventario.lote_saldo (
 CREATE INDEX idx_lote_saldo_lote_id ON inventario.lote_saldo(lote_id);
 CREATE INDEX idx_lote_saldo_lote_ubicacion ON inventario.lote_saldo(lote_id, ubicacion_id);
 
--- ── inventario.saldo_item ─────────────────────────────────────
+-- ── inventario.item_saldo ─────────────────────────────────────
 -- Trigger-maintained item stock by location (≈ SAP MARD).
 -- One row per (item, ubicacion). Updated by trg_ai_im_sync_cantidad_actual.
-CREATE TABLE inventario.saldo_item (
+CREATE TABLE inventario.item_saldo (
     item_id         INT  NOT NULL REFERENCES item(id),
     ubicacion_id    INT  REFERENCES inventario.ubicacion(id),
     cantidad_actual NUMERIC(12,4) NOT NULL DEFAULT 0,
     UNIQUE NULLS NOT DISTINCT (item_id, ubicacion_id)
 );
-CREATE INDEX idx_saldo_item_item_id ON inventario.saldo_item(item_id);
+CREATE INDEX idx_item_saldo_item_id ON inventario.item_saldo(item_id);
 
 -- ── inventario.item_movimientos ───────────────────────────────
 CREATE SEQUENCE IF NOT EXISTS inventario.mov_doc_seq START 1;

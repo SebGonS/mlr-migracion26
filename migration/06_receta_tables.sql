@@ -130,6 +130,96 @@ CREATE TABLE receta.tenido_paso_insumo (
     UNIQUE(paso_id, orden)
 );
 
+-- ── receta.tenido immutability ───────────────────────────────
+-- Prevent modifying a dyeing recipe once it has completed production executions.
+-- Estado/audit cols remain writable (lifecycle transitions must still be possible).
+-- Same pattern as receta.lavado_maquina below.
+-- NOTE: references mes.partida_paso/ejecucion defined in 07_... — resolved at runtime.
+
+CREATE OR REPLACE FUNCTION receta.fn_trg_tenido_immutable()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_paso pp
+        JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+        WHERE pp.receta_id = OLD.id
+          AND pe.estado = 'COMPLETADO'
+    ) THEN
+        RAISE EXCEPTION
+            'receta.tenido id=% cannot be modified: it has completed production executions',
+            OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- Guard identity fields only; estado_id/audit cols remain writable.
+CREATE TRIGGER trg_bu_tenido_immutable
+BEFORE UPDATE OF color_x_cliente_id, articulo_tipo_id, fibra, tenido_id, flg_antipilling, tipo_receta_id
+ON receta.tenido
+FOR EACH ROW EXECUTE FUNCTION receta.fn_trg_tenido_immutable();
+
+CREATE OR REPLACE FUNCTION receta.fn_trg_tenido_paso_immutable()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE v_receta_id INT := COALESCE(OLD.receta_id, NEW.receta_id);
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_paso pp
+        JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+        WHERE pp.receta_id = v_receta_id
+          AND pe.estado = 'COMPLETADO'
+    ) THEN
+        RAISE EXCEPTION
+            'receta.tenido_paso id=% cannot be modified: its recipe has completed executions',
+            OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_bud_tenido_paso_immutable
+BEFORE UPDATE OF operacion_id, orden, ph, temperatura, tiempo_min
+ON receta.tenido_paso
+FOR EACH ROW EXECUTE FUNCTION receta.fn_trg_tenido_paso_immutable();
+
+CREATE TRIGGER trg_bd_tenido_paso_immutable
+BEFORE DELETE ON receta.tenido_paso
+FOR EACH ROW EXECUTE FUNCTION receta.fn_trg_tenido_paso_immutable();
+
+CREATE OR REPLACE FUNCTION receta.fn_trg_tenido_paso_insumo_immutable()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE v_receta_id INT;
+BEGIN
+    SELECT tp.receta_id INTO v_receta_id
+    FROM receta.tenido_paso tp
+    WHERE tp.id = COALESCE(OLD.paso_id, NEW.paso_id);
+
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_paso pp
+        JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+        WHERE pp.receta_id = v_receta_id
+          AND pe.estado = 'COMPLETADO'
+    ) THEN
+        RAISE EXCEPTION
+            'receta.tenido_paso_insumo id=% cannot be modified: its recipe has completed executions',
+            OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_bud_tenido_paso_insumo_immutable
+BEFORE UPDATE OF item_id, cantidad, medida, orden
+ON receta.tenido_paso_insumo
+FOR EACH ROW EXECUTE FUNCTION receta.fn_trg_tenido_paso_insumo_immutable();
+
+CREATE TRIGGER trg_bd_tenido_paso_insumo_immutable
+BEFORE DELETE ON receta.tenido_paso_insumo
+FOR EACH ROW EXECUTE FUNCTION receta.fn_trg_tenido_paso_insumo_immutable();
+
 -- ── receta.lavado_maquina ─────────────────────────────────────
 -- FIX (BUG 4): removed stray "SELECT * FROM paso" that was between these tables.
 CREATE TABLE receta.lavado_maquina (
