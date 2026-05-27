@@ -169,7 +169,7 @@ BEGIN
             JOIN inventario.lote_rollo_detalle lrd
                 ON  lrd.lote_id    = l.id
                 AND lrd.flg_tenido = true
-            JOIN inventario.vw_stock_lotes sa ON sa.lote_id = l.id
+            JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
             WHERE pp.partida_id = p.id
             GROUP BY
                 CASE WHEN l.propietario_id = 1 THEN 'VENTA_EGRESO' ELSE 'DESPACHO_CLIENTE' END

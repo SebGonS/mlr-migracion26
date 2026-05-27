@@ -15,6 +15,7 @@
 -- ═══════════════════════════════════════════════════════════════
 
 
+
 -- ───────────────────────────────────────────────────────────────
 -- inventario.crear_cuadre
 -- Snapshots current insumo stock + MAP into cuadre_detalle.
@@ -570,6 +571,180 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_produccion(BIGINT, NUMERIC, NUMERIC) TO authenticated;
+
+-- ═══════════════════════════════════════════════════════════════
+-- inventario.registrar_pesaje_grupo
+--
+-- Group-scoped ingress weighing. Called when the scheduler weighs
+-- rolls grouped by (partida ▸ guía ▸ ítem ▸ tipo) — i.e., the user
+-- provides one total weight for all rolls of a specific item arriving
+-- on a specific guía within a partida.
+--
+-- Distributes p_peso_total_kg evenly across the matched rolls.
+-- Same chain as registrar_pesaje_produccion: upserts pesaje,
+-- posts PESAJE_POS/NEG to item_movimientos, updates lote.cantidad.
+-- Raises if any matched roll already has a PROD_CONSUMO movement.
+-- ═══════════════════════════════════════════════════════════════
+DROP FUNCTION IF EXISTS inventario.registrar_pesaje_grupo(BIGINT, BIGINT, BIGINT, BOOLEAN, NUMERIC);
+
+CREATE OR REPLACE FUNCTION inventario.registrar_pesaje_grupo(
+    p_partida_id        BIGINT,
+    p_guia_remision_id  BIGINT,   -- NULL = rolls with no guia
+    p_item_id           BIGINT,
+    p_flg_rib           BOOLEAN,
+    p_peso_total_kg     NUMERIC
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes','doc'
+AS $$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id            int := get_user_id();
+    v_pesaje_pos_id     smallint;
+    v_pesaje_neg_id     smallint;
+    v_doc_movimiento_id bigint;
+    v_cantidad          int;
+    v_peso_por_rollo    numeric;
+    v_updated           int := 0;
+BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM mes.partida WHERE id = p_partida_id) THEN
+        RAISE EXCEPTION 'partida #% no encontrado.', p_partida_id;
+    END IF;
+
+    -- Guard: no roll in this group may already be in production
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_componente pc
+        JOIN inventario.lote l                      ON l.id = pc.lote_id AND l.fyh_elm IS NULL
+        JOIN item_rollo_detalle ird                 ON ird.item_id = l.item_id AND ird.flg_rib = p_flg_rib
+        LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+        JOIN inventario.item_movimientos im         ON im.lote_id = l.id
+        JOIN inventario.item_movimiento_tipo imt    ON imt.id = im.item_movimiento_tipo_id
+        WHERE pc.partida_id = p_partida_id
+          AND l.item_id     = p_item_id
+          AND (
+              (p_guia_remision_id IS NULL AND lrd.guia_remision_id IS NULL)
+              OR lrd.guia_remision_id = p_guia_remision_id
+          )
+          AND imt.codigo = 'PROD_CONSUMO'
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede modificar pesos: uno o más rollos del grupo ya tienen movimientos de producción (partida #%, ítem #%, guía #%).',
+            p_partida_id, p_item_id, p_guia_remision_id;
+    END IF;
+
+    -- Count rolls in this specific (partida, guia, item, tipo) group
+    SELECT COUNT(DISTINCT l.id)
+    INTO v_cantidad
+    FROM mes.partida_componente pc
+    JOIN inventario.lote l                      ON l.id = pc.lote_id AND l.fyh_elm IS NULL
+    JOIN item_rollo_detalle ird                 ON ird.item_id = l.item_id AND ird.flg_rib = p_flg_rib
+    LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+    WHERE pc.partida_id = p_partida_id
+      AND l.item_id     = p_item_id
+      AND (
+          (p_guia_remision_id IS NULL AND lrd.guia_remision_id IS NULL)
+          OR lrd.guia_remision_id = p_guia_remision_id
+      );
+
+    IF v_cantidad = 0 THEN
+        RAISE EXCEPTION 'No se encontraron rollos para el grupo (partida #%, ítem #%, guía #%, rib=%).',
+            p_partida_id, p_item_id, p_guia_remision_id, p_flg_rib;
+    END IF;
+
+    v_peso_por_rollo := ROUND(p_peso_total_kg / v_cantidad, 4);
+
+    SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
+    SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
+    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
+
+    WITH rolls AS (
+        SELECT DISTINCT ON (l.id)
+            l.id       AS lote_id,
+            l.item_id,
+            l.cantidad AS peso_anterior,
+            sa.ubicacion_id,
+            v_peso_por_rollo AS peso_nuevo
+        FROM mes.partida_componente pc
+        JOIN inventario.lote l                      ON l.id = pc.lote_id AND l.fyh_elm IS NULL
+        JOIN item_rollo_detalle ird                 ON ird.item_id = l.item_id AND ird.flg_rib = p_flg_rib
+        LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+        JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
+        WHERE pc.partida_id = p_partida_id
+          AND l.item_id     = p_item_id
+          AND (
+              (p_guia_remision_id IS NULL AND lrd.guia_remision_id IS NULL)
+              OR lrd.guia_remision_id = p_guia_remision_id
+          )
+        ORDER BY l.id
+    ),
+    pesajes AS (
+        INSERT INTO inventario.pesaje (lote_id, tipo, peso_real, usr_cre)
+        SELECT r.lote_id, 'INGRESO', r.peso_nuevo, v_usr_id
+        FROM rolls r
+        ON CONFLICT (lote_id) DO UPDATE
+            SET peso_real = EXCLUDED.peso_real,
+                tipo      = EXCLUDED.tipo
+        RETURNING lote_id
+    ),
+    movimientos AS (
+        INSERT INTO inventario.item_movimientos (
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, destino_ubicacion_id,
+            cantidad, documento_tipo, documento_id
+        )
+        SELECT
+            v_doc_movimiento_id,
+            r.item_id, r.lote_id,
+            CASE WHEN r.peso_nuevo > r.peso_anterior THEN v_pesaje_pos_id
+                 ELSE v_pesaje_neg_id END,
+            CASE WHEN r.peso_nuevo < r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
+            CASE WHEN r.peso_nuevo > r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
+            ABS(r.peso_nuevo - r.peso_anterior),
+            'partida', p_partida_id
+        FROM rolls r
+        JOIN pesajes p ON p.lote_id = r.lote_id
+        WHERE r.peso_nuevo <> r.peso_anterior
+    )
+    UPDATE inventario.lote l
+    SET cantidad = r.peso_nuevo
+    FROM rolls r
+    WHERE l.id = r.lote_id;
+
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_pesaje_grupo', v_usr_id, jsonb_build_object(
+        'partida_id',       p_partida_id,
+        'guia_remision_id', p_guia_remision_id,
+        'item_id',          p_item_id,
+        'flg_rib',          p_flg_rib,
+        'peso_total_kg',    p_peso_total_kg
+    ));
+
+    RETURN format(
+        'Pesaje registrado: partida #%s, ítem #%s, guía #%s, rib=%s → %s rollos × %s kg (total %s kg).',
+        p_partida_id, p_item_id, COALESCE(p_guia_remision_id::text, 'sin guía'), p_flg_rib,
+        v_cantidad, v_peso_por_rollo, p_peso_total_kg
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error en registrar_pesaje_grupo - User: %, partida: %, item: %, guia: %, Error: %, Detail: %',
+              v_usr_id, p_partida_id, p_item_id, p_guia_remision_id, v_message, v_detail;
+    RAISE;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_grupo(BIGINT, BIGINT, BIGINT, BOOLEAN, NUMERIC) TO authenticated;
 
 -- ═══════════════════════════════════════════════════════════════
 -- inventario.registrar_pesaje_guia  (prorated)
