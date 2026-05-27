@@ -76,7 +76,7 @@ GRANT SELECT ON inventario.vw_stock_lotes_ubicacion TO anon, authenticated;
 -- this shows "expected" specs for undyed rolls (useful for operators).
 -- For dyed rolls the same values are also on lote_rollo_detalle.
 -- lote_rollo_detalle is joined for: guia_remision_id, flg_tenido.
-DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock;
+-- DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock;
 CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_stock AS
 SELECT
     sa.lote_id,
@@ -129,8 +129,27 @@ LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = sa.lote_id
 LEFT JOIN doc.guia_remision gr          ON gr.id = lrd.guia_remision_id
 LEFT JOIN tercero t                     ON t.id = l.propietario_id
 LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_cliente_id
-LEFT JOIN tenido tn                     ON tn.id = lrd.tenido_id
-ORDER BY art.nombre, u.nombre, i.nombre;
+LEFT JOIN tenido tn                     ON tn.id = lrd.tenido_id;
+
+-- ── inventario.vw_lotes_rollos_disponibles ────────────────────
+-- Available rolls only: physical stock minus rolls reserved by active partidas.
+-- Equivalent to SAP MD04 vs MMBE:
+--   vw_lotes_rollos_stock    = MMBE (physical)
+--   vw_lotes_rollos_disponibles = MD04 (available to assign)
+-- CANCELADA partidas restore stock via PROD_CONSUMO_REV but do not delete
+-- partida_componente rows — the estado filter handles that case.
+-- Use this view for order assignment / picking screens.
+DROP VIEW IF EXISTS inventario.vw_lotes_rollos_disponibles;
+CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_disponibles AS
+SELECT s.*
+FROM inventario.vw_lotes_rollos_stock s
+WHERE NOT EXISTS (
+    SELECT 1 FROM mes.partida_componente pc
+    JOIN mes.partida p ON p.id = pc.partida_id
+    WHERE pc.lote_id = s.lote_id
+      AND p.estado_produccion NOT IN ('CERRADA', 'CANCELADA')
+      AND p.fyh_elm IS NULL
+);
 
 -- ── mes.vw_partidas (detailed: paso/material/produccion stats) ───────────
 -- Replaces the old "ordenes de produccion" view: after the schema redesign
@@ -244,6 +263,15 @@ LEFT JOIN LATERAL (
 GRANT SELECT ON mes.vw_partidas TO anon, authenticated;
 
 -- ── doc.vw_compras ────────────────────────────────────────────
+-- List view for purchase orders.
+-- estado_ingreso: derived from compra_detalle (ordered) vs quantities
+--   received via linked guias (guia_remision_detalle).  Comparison is at
+--   the (compra, item) level — same granularity the linkage allows.
+--   'sin_lineas'  → compra header only, no detail lines
+--   'pendiente'   → no guias linked yet
+--   'parcial'     → some items partially received
+--   'completo'    → all ordered quantities covered by received quantities
+DROP VIEW IF EXISTS doc.vw_compras;
 CREATE OR REPLACE VIEW doc.vw_compras AS
 SELECT
     c.id,
@@ -261,7 +289,15 @@ SELECT
     COALESCE(guias.total_guias, 0)             AS total_guias,
     COALESCE(letras.total_letras, 0)           AS total_letras,
     COALESCE(letras.monto_letras_pendiente, 0) AS monto_letras_pendiente,
+    -- Receipt progress derived from linked guias
+    CASE
+        WHEN det.total_items = 0                   THEN 'sin_lineas'
+        WHEN COALESCE(guias.total_guias, 0) = 0    THEN 'pendiente'
+        WHEN recepcion.qty_pendiente <= 0           THEN 'completo'
+        ELSE                                             'parcial'
+    END                                        AS estado_ingreso,
     c.observacion,
+    c.fyh_elm,
     c.usr_cre,
     c.fyh_cre
 FROM doc.compra c
@@ -297,7 +333,22 @@ LEFT JOIN LATERAL (
     JOIN doc.letra_factura lf ON lf.factura_proveedor_id = cfp.factura_proveedor_id
     JOIN doc.letra l ON l.id = lf.letra_id
     WHERE cfp.compra_id = c.id
-) letras ON true;
+) letras ON true
+LEFT JOIN LATERAL (
+    -- Sum ordered qty vs received qty across all items in this compra.
+    -- Received = guia_remision_detalle rows for linked guias, matched by item_id.
+    SELECT SUM(cd.cantidad) - COALESCE(SUM(rec.cantidad_recibida), 0) AS qty_pendiente
+    FROM doc.compra_detalle cd
+    LEFT JOIN LATERAL (
+        SELECT SUM(grd.cantidad) AS cantidad_recibida
+        FROM doc.compra_guia_remision cgr
+        JOIN doc.guia_remision_detalle grd
+            ON grd.guia_remision_id = cgr.guia_remision_id
+           AND grd.item_id = cd.item_id
+        WHERE cgr.compra_id = c.id
+    ) rec ON true
+    WHERE cd.compra_id = c.id
+) recepcion ON true;
 
 GRANT SELECT ON doc.vw_compras TO authenticated;
 
@@ -357,36 +408,93 @@ LEFT JOIN LATERAL (
 GRANT SELECT ON doc.vw_facturas_proveedor TO authenticated;
 
 -- ── doc.vw_compras_item_mes ────────────────────────────────────
--- Purchases aggregated by (supplier, item, month) from invoiced lines.
--- Source: factura_proveedor_detalle — authoritative invoiced quantities.
--- Excludes anuladas. All amounts in USD.
+-- Purchases aggregated by (supplier, item, month).
+-- All amounts in USD. Excludes anuladas.
 -- Designed for time-series and supplier purchase analysis; the frontend
 -- pivots months into columns.
+--
+-- Source priority (same pattern as vw_precio_promedio_insumos):
+--   1. factura_proveedor_detalle — authoritative when invoice lines are entered.
+--   2. compra_detalle via compra_factura_proveedor — fallback for facturas that
+--      have no detail lines (legacy migration: headers only, no line breakdown).
+--      IGV hardcoded at 18% — all insumo purchases (domestic + imports) carry IGV.
+--      `fuente` column lets callers distinguish the two sources.
+--
+-- Once all facturas have detail lines entered, the fallback branch becomes
+-- unreachable and can be dropped.
 CREATE OR REPLACE VIEW doc.vw_compras_item_mes AS
+WITH facturas_con_detalle AS (
+    -- Which facturas already have line-level detail entered
+    SELECT DISTINCT factura_proveedor_id FROM doc.factura_proveedor_detalle
+),
+lineas AS (
+    -- Branch 1: authoritative invoice lines
+    SELECT
+        fp.id                                                   AS factura_proveedor_id,
+        fp.tercero_id,
+        fp.fecha_emision,
+        fpd.item_id,
+        fpd.cantidad,
+        fpd.subtotal_linea                                      AS monto_exigv,
+        fpd.total_linea                                         AS monto_conigv,
+        'factura'::text                                         AS fuente
+    FROM doc.factura_proveedor_detalle fpd
+    JOIN doc.factura_proveedor fp ON fp.id = fpd.factura_proveedor_id
+    WHERE fp.estado_pago <> 'anulado'
+
+    UNION ALL
+
+    -- Branch 2: fallback — compra lines for facturas with no detail yet.
+    -- IGV rate = fp.igv / fp.subtotal (handles 0% and 18% correctly).
+    -- If one factura links to multiple compras the lines from all are included;
+    -- this is acceptable given the fallback is transitional.
+    SELECT
+        fp.id                                                   AS factura_proveedor_id,
+        fp.tercero_id,
+        fp.fecha_emision,
+        cd.item_id,
+        cd.cantidad,
+        cd.cantidad * cd.precio_unitario                        AS monto_exigv,
+        cd.cantidad * cd.precio_unitario * 1.18                AS monto_conigv,
+        'compra'::text                                          AS fuente
+    FROM doc.compra_factura_proveedor cfp
+    JOIN doc.factura_proveedor fp ON fp.id = cfp.factura_proveedor_id
+    JOIN doc.compra_detalle cd    ON cd.compra_id = cfp.compra_id
+    WHERE fp.estado_pago <> 'anulado'
+      AND NOT EXISTS (
+          SELECT 1 FROM facturas_con_detalle fcd
+          WHERE fcd.factura_proveedor_id = fp.id
+      )
+)
 SELECT
-    fp.tercero_id,
+    l.tercero_id,
     t.nombre                                          AS proveedor_nombre,
-    fpd.item_id,
+    l.item_id,
     i.codigo                                          AS item_codigo,
     i.nombre                                          AS item_nombre,
     un.codigo                                         AS unidad_codigo,
-    EXTRACT(YEAR  FROM fp.fecha_emision)::INT         AS ano,
-    EXTRACT(MONTH FROM fp.fecha_emision)::INT         AS mes,
-    TO_CHAR(fp.fecha_emision, 'YYYY-MM')              AS ano_mes,
-    SUM(fpd.cantidad)                                 AS cantidad_total,
-    SUM(fpd.subtotal_linea)                           AS monto_exigv,
-    SUM(fpd.total_linea)                              AS monto_conigv
-FROM doc.factura_proveedor_detalle fpd
-JOIN doc.factura_proveedor fp ON fp.id = fpd.factura_proveedor_id
-JOIN tercero t                ON t.id  = fp.tercero_id
-JOIN item i                   ON i.id  = fpd.item_id
-JOIN unidad un                ON un.id = i.unidad_id
-WHERE fp.estado_pago <> 'anulado'
-GROUP BY fp.tercero_id, t.nombre,
-         fpd.item_id, i.codigo, i.nombre, un.codigo,
-         EXTRACT(YEAR  FROM fp.fecha_emision),
-         EXTRACT(MONTH FROM fp.fecha_emision),
-         TO_CHAR(fp.fecha_emision, 'YYYY-MM');
+    EXTRACT(YEAR  FROM l.fecha_emision)::INT          AS ano,
+    EXTRACT(MONTH FROM l.fecha_emision)::INT          AS mes,
+    TO_CHAR(l.fecha_emision, 'YYYY-MM')               AS ano_mes,
+    SUM(l.cantidad)                                   AS cantidad_total,
+    SUM(l.monto_exigv)                                AS monto_exigv,
+    SUM(l.monto_conigv)                               AS monto_conigv,
+    -- 'factura' once all lines are entered; 'compra' while on fallback;
+    -- 'mixto' if a period somehow has both (shouldn't happen in practice)
+    CASE
+        WHEN bool_and(l.fuente = 'factura') THEN 'factura'
+        WHEN bool_and(l.fuente = 'compra')  THEN 'compra'
+        ELSE                                     'mixto'
+    END                                             AS fuente
+FROM lineas l
+JOIN tercero t ON t.id  = l.tercero_id
+JOIN item i    ON i.id  = l.item_id
+JOIN unidad un ON un.id = i.unidad_id
+GROUP BY l.tercero_id, t.nombre,
+         l.item_id, i.codigo, i.nombre, un.codigo,
+         EXTRACT(YEAR  FROM l.fecha_emision),
+         EXTRACT(MONTH FROM l.fecha_emision),
+         TO_CHAR(l.fecha_emision, 'YYYY-MM');
 
 GRANT SELECT ON doc.vw_compras_item_mes TO authenticated;
 
@@ -426,6 +534,130 @@ LEFT JOIN LATERAL (
 ) facturas ON true;
 
 GRANT SELECT ON doc.vw_letras TO authenticated;
+
+-- ── doc.vw_cuentas_por_pagar ───────────────────────────────────
+-- Combined AP view: one row per (factura, letra) clearing pair.
+--
+-- Spine: letra_factura junction, LEFT-joined from both sides so that:
+--   • Facturas with no letra yet  → 1 row, all letra_* columns NULL
+--   • Facturas with N letras      → N rows, one per letra
+--   • Letras covering M facturas  → M rows, one per factura
+--
+-- factura_saldo = factura total minus ALL applied letras for that factura
+-- (computed via lateral, not from this row's monto_aplicado alone —
+--  otherwise multi-letra facturas would show the wrong balance).
+--
+-- Common filter patterns:
+--   AP aging          : estado_pago NOT IN ('total','anulado') ORDER BY factura_dias_vencido DESC
+--   Payment schedule  : letra_estado = 'emitida'              ORDER BY letra_fecha_vencimiento
+--   Unassigned        : letra_id IS NULL AND estado_pago NOT IN ('total','anulado')
+--   Overdue letters   : letra_estado = 'vencida'
+--   By supplier       : tercero_id = X
+CREATE OR REPLACE VIEW doc.vw_cuentas_por_pagar AS
+SELECT
+    -- ── Factura side ──────────────────────────────────────────
+    fp.id                                                   AS factura_id,
+    fp.tercero_id,
+    t.nombre                                                AS proveedor_nombre,
+    fp.serie || '-' || fp.numero::text                      AS factura_numero,
+    fp.fecha_emision,
+    fp.fecha_vencimiento                                    AS factura_fecha_vencimiento,
+    fp.moneda,
+    fp.tipo_cambio,
+    fp.subtotal,
+    fp.igv,
+    fp.total                                                AS factura_total,
+    fp.tipo_pago,
+    fp.estado_pago,
+    CASE
+        WHEN fp.estado_pago IN ('total', 'anulado') THEN NULL
+        ELSE GREATEST(0, CURRENT_DATE - fp.fecha_vencimiento)
+    END                                                     AS factura_dias_vencido,
+    -- Open balance: total minus sum of all non-anulada letras on this factura
+    fp.total - COALESCE(saldo.monto_aplicado_total, 0)      AS factura_saldo,
+
+    -- ── Letra side (NULL when no letra assigned yet) ──────────
+    l.id                                                    AS letra_id,
+    l.numero                                                AS letra_numero,
+    lf.monto_aplicado,
+    l.monto                                                 AS letra_monto,
+    l.fecha_giro,
+    l.fecha_vencimiento                                     AS letra_fecha_vencimiento,
+    l.fecha_pago,
+    l.banco,
+    l.estado                                                AS letra_estado,
+    CASE
+        WHEN l.id IS NULL                      THEN NULL
+        WHEN l.estado IN ('pagada', 'anulada') THEN NULL
+        ELSE GREATEST(0, CURRENT_DATE - l.fecha_vencimiento)
+    END                                                     AS letra_dias_vencido
+
+FROM doc.factura_proveedor fp
+JOIN tercero t ON t.id = fp.tercero_id
+-- Open balance across ALL letras on this factura (not just the current row's)
+LEFT JOIN LATERAL (
+    SELECT SUM(lf2.monto_aplicado) FILTER (WHERE l2.estado <> 'anulada') AS monto_aplicado_total
+    FROM doc.letra_factura lf2
+    JOIN doc.letra l2 ON l2.id = lf2.letra_id
+    WHERE lf2.factura_proveedor_id = fp.id
+) saldo ON true
+-- Clearing pairs
+LEFT JOIN doc.letra_factura lf ON lf.factura_proveedor_id = fp.id
+LEFT JOIN doc.letra l          ON l.id = lf.letra_id;
+
+GRANT SELECT ON doc.vw_cuentas_por_pagar TO authenticated;
+
+-- ── doc.vw_compras_recepcion ───────────────────────────────────
+-- Receipt tracking: per (compra, item) shows ordered qty vs qty
+-- received via linked guias, and the remaining open qty.
+--
+-- "Received" = sum of guia_remision_detalle.cantidad for all guias
+-- linked to this compra (via compra_guia_remision) that carry this
+-- item_id.  There is intentionally no FK from a guia line to a
+-- compra line — linkage is at the compra↔guia level — so this is
+-- the finest granularity possible without schema changes.
+--
+-- Rows exist for every compra_detalle line including those with
+-- zero receipt (qty_pendiente = cantidad_ordenada).  Use WHERE
+-- qty_pendiente > 0 to filter open lines.
+CREATE OR REPLACE VIEW doc.vw_compras_recepcion AS
+SELECT
+    c.id                                                              AS compra_id,
+    c.tercero_id,
+    t.nombre                                                          AS proveedor_nombre,
+    c.fecha,
+    cd.id                                                             AS compra_detalle_id,
+    cd.item_id,
+    i.codigo                                                          AS item_codigo,
+    i.nombre                                                          AS item_nombre,
+    un.codigo                                                         AS unidad_codigo,
+    cd.cantidad                                                       AS cantidad_ordenada,
+    COALESCE(rec.cantidad_recibida, 0)                                AS cantidad_recibida,
+    cd.cantidad - COALESCE(rec.cantidad_recibida, 0)                  AS cantidad_pendiente,
+    cd.precio_unitario,
+    cd.cantidad * cd.precio_unitario                                  AS valor_linea,
+    -- Per-line receipt status
+    CASE
+        WHEN COALESCE(rec.cantidad_recibida, 0) = 0               THEN 'pendiente'
+        WHEN COALESCE(rec.cantidad_recibida, 0) >= cd.cantidad    THEN 'completo'
+        ELSE                                                            'parcial'
+    END                                                               AS estado_linea,
+    c.fyh_elm
+FROM doc.compra c
+JOIN tercero t          ON t.id  = c.tercero_id
+JOIN doc.compra_detalle cd ON cd.compra_id = c.id
+JOIN item i             ON i.id  = cd.item_id
+JOIN unidad un          ON un.id = i.unidad_id
+LEFT JOIN LATERAL (
+    SELECT SUM(grd.cantidad) AS cantidad_recibida
+    FROM doc.compra_guia_remision cgr
+    JOIN doc.guia_remision_detalle grd
+        ON grd.guia_remision_id = cgr.guia_remision_id
+       AND grd.item_id = cd.item_id
+    WHERE cgr.compra_id = c.id
+) rec ON true;
+
+GRANT SELECT ON doc.vw_compras_recepcion TO authenticated;
 
 -- ── inventario.vw_item_proveedor_guia ─────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_item_proveedor_guia AS
@@ -507,7 +739,7 @@ LEFT JOIN mes.partida_paso pp          ON pp.id = pe.partida_paso_id
 LEFT JOIN mes.partida p                ON p.id = pp.partida_id
 LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_cliente_id;
 
-
+DROP VIEW IF EXISTS mes.vw_partida_resumen_tenido;
 -- ── mes.partida_resumen_tenido ────────────────────────────────
 CREATE OR REPLACE VIEW mes.vw_partida_resumen_tenido AS
 SELECT
@@ -517,7 +749,7 @@ SELECT
     a.articulo_tipo_id,           -- added
     at.nombre       AS articulo_tipo_nombre,  -- added
     a.fibra,
-    COUNT(pd.item_id)                                                    AS total_rollos,
+    SUM(pd.cantidad)                                                     AS total_rollos,
     SUM(pd.cantidad)                                                     AS cantidad_total,
     SUM(CASE WHEN ird.flg_rib = false THEN pd.cantidad ELSE 0 END)      AS cantidad_regular,
     SUM(CASE WHEN ird.flg_rib = true  THEN pd.cantidad ELSE 0 END)      AS cantidad_rib
@@ -851,7 +1083,7 @@ LEFT JOIN inventario.lote l ON l.id = sa.lote_id;
 --   Input rolls:  assigned via partida_componente to an EN_PRODUCCION partida
 -- Step/machine context comes from the ejecucion path (NULL for input rolls).
 -- Partida context is resolved from whichever path applies.
-DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion;
+-- DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion;
 CREATE OR REPLACE VIEW calidad.vw_lotes_pendientes_inspeccion AS
 SELECT
     l.id AS lote_id,
@@ -869,7 +1101,7 @@ SELECT
     o.codigo                                            AS operacion_codigo,
     p.id                                                AS partida_id,
     p.partida_origen_id,
-    EXTRACT(YEAR FROM p.fyh_cre) || '-' || p.numero    AS partida_codigo,
+    EXTRACT(YEAR FROM p.fyh_cre)::text || '-' || LPAD(p.numero::text, 4, '0') AS partida_codigo,
     p.ancho,
     p.rendimiento,
     p.malla,
@@ -1357,9 +1589,122 @@ LEFT JOIN inventario.vw_stock_lotes sa ON sa.lote_id = l.id
 GROUP BY gr.id, gr.serie, gr.correlativo, gr.fecha_emision, gr.tercero_id,
          t.nombre, grt.codigo;
 
+-- ── inventario.vw_pesaje_pendiente ─────────────────────────────
+-- One row per (partida, guia_remision, item) for partidas that have
+-- a TENIDO paso scheduled AND at least one assigned roll with no
+-- pesaje record.
+-- Business rule: if any roll in the partida is unweighed the whole
+-- batch must be reweighed (prorated flow), so the filter is at
+-- partida level — ALL rolls for that partida are shown, not just
+-- the unweighed ones.
+-- Drives the print-friendly weighing form: the frontend groups by
+-- partida → guia → item to build the grid.
+--
+-- Partida header columns repeat on every row (denormalised for ease
+-- of use — the frontend can read them from the first row per group).
+-- fecha_programada: earliest scheduling board date for the TENIDO paso.
+-- rollos: total assigned rolls for this (partida, guia, item) cell.
+-- flg_rib: true = rib item, false = regular. Lets the frontend style
+--   rows differently without parsing item names.
+DROP VIEW IF EXISTS mes.vw_pesaje_pendiente;
+CREATE OR REPLACE VIEW mes.vw_pesaje_pendiente AS
+SELECT
+    -- ── Partida header (repeats per row) ──────────────────────
+    p.id                                                                      AS partida_id,
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT
+        || '-' || LPAD(p.numero::TEXT, 4, '0')                              AS partida_codigo,
+    p.tercero_id,
+    ter.nombre                                                                AS cliente,
+    p.color_x_cliente_id,
+    vc.color,
+    vc.color_hex,
+    p.tenido_id,
+    t.tenido,
+    p.articulo_tipo_id,
+    at.nombre                                                                 AS articulo_tipo,
+    p.fibra,
+    p.malla,
+    p.rendimiento,
+    p.ancho,
+    p.fecha_acordada,
+    -- Earliest scheduling board date for the TENIDO paso
+    (
+        SELECT MIN(pr.fecha)
+        FROM mes.partida_paso  pp2
+        JOIN mes.operacion     op2 ON op2.id = pp2.operacion_id
+                                   AND op2.codigo = 'TENIDO'
+        JOIN mes.programacion  pr  ON pr.actividad_tipo = 'partida_paso'
+                                   AND pr.actividad_id  = pp2.id
+        WHERE pp2.partida_id = p.id
+    )                                                                         AS fecha_programada,
+
+    -- ── Guia ──────────────────────────────────────────────────
+    gr.id                                                                     AS guia_remision_id,
+    gr.serie || '-' || gr.correlativo                                         AS guia_numero,
+
+    -- ── Item ──────────────────────────────────────────────────
+    l.item_id,
+    i.codigo                                                                  AS item_codigo,
+    i.nombre                                                                  AS item_nombre,
+    ird.flg_rib,
+
+    -- ── Roll count for this (partida, guia, item) cell ────────
+    COUNT(*)::INT                                                             AS rollos
+
+FROM mes.partida p
+LEFT JOIN tercero       ter ON ter.id = p.tercero_id
+LEFT JOIN vw_colores    vc  ON vc.color_x_cliente_id = p.color_x_cliente_id
+LEFT JOIN tenido        t   ON t.id  = p.tenido_id
+LEFT JOIN articulo_tipo at  ON at.id = p.articulo_tipo_id
+
+-- Walk from partida down to the actual rolls
+JOIN mes.partida_componente            pc  ON pc.partida_id = p.id
+                                          AND pc.lote_id IS NOT NULL
+JOIN inventario.lote                   l   ON l.id  = pc.lote_id
+                                          AND l.fyh_elm IS NULL
+JOIN item                              i   ON i.id  = l.item_id
+JOIN item_rollo_detalle                ird ON ird.item_id = l.item_id
+LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+LEFT JOIN doc.guia_remision             gr  ON gr.id = lrd.guia_remision_id
+
+WHERE p.fyh_elm IS NULL
+
+  -- Condition 1: has at least one TENIDO paso on the scheduling board
+  AND EXISTS (
+      SELECT 1
+      FROM mes.partida_paso  pp
+      JOIN mes.operacion     op ON op.id = pp.operacion_id AND op.codigo = 'TENIDO'
+      JOIN mes.programacion  pr ON pr.actividad_tipo = 'partida_paso'
+                               AND pr.actividad_id   = pp.id
+      WHERE pp.partida_id = p.id
+  )
+
+  -- Condition 2: at least one assigned roll has no pesaje record yet
+  -- (triggers full-batch reweigh — all rolls shown, not just unweighed ones)
+  AND EXISTS (
+      SELECT 1
+      FROM mes.partida_componente pc2
+      LEFT JOIN inventario.pesaje ps ON ps.lote_id = pc2.lote_id
+      WHERE pc2.partida_id = p.id
+        AND pc2.lote_id IS NOT NULL
+        AND ps.lote_id IS NULL
+  )
+
+GROUP BY
+    p.id, p.numero, p.fyh_cre,
+    p.tercero_id, ter.nombre,
+    p.color_x_cliente_id, vc.color, vc.color_hex,
+    p.tenido_id, t.tenido,
+    p.articulo_tipo_id, at.nombre,
+    p.fibra, p.malla, p.rendimiento, p.ancho, p.fecha_acordada,
+    gr.id, gr.serie, gr.correlativo,
+    l.item_id, i.codigo, i.nombre, ird.flg_rib;
+
 -- ── Grants ────────────────────────────────────────────────────
+GRANT SELECT ON mes.vw_pesaje_pendiente             TO authenticated;
 GRANT SELECT ON inventario.vw_rollos_por_guia              TO anon, authenticated;
-GRANT SELECT ON inventario.vw_lotes_rollos_stock           TO anon, authenticated;
+GRANT SELECT ON inventario.vw_lotes_rollos_stock            TO anon, authenticated;
+GRANT SELECT ON inventario.vw_lotes_rollos_disponibles      TO anon, authenticated;
 -- GRANT SELECT ON inventario.vw_stock_rollos              TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_rollos_crudos          TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_rollos_tenidos         TO anon, authenticated;
@@ -1392,7 +1737,8 @@ GRANT USAGE ON SCHEMA inventario TO authenticated;
 GRANT USAGE ON SCHEMA calidad    TO authenticated;
 GRANT INSERT ON calidad.inspeccion      TO authenticated;
 GRANT INSERT ON calidad.inspeccion_foto TO authenticated;
-GRANT UPDATE ON mes.operacion           TO authenticated;
+GRANT INSERT, UPDATE ON mes.operacion   TO authenticated;
+
 
 /*
 -- ═══════════════════════════════════════════════════════════════
@@ -1421,9 +1767,11 @@ DROP VIEW IF EXISTS mes.vw_partida_produccion_rollos       CASCADE;
 DROP VIEW IF EXISTS mes.vw_partidas                        CASCADE;
 
 -- inventario views (dependent on vw_stock_lotes — drop before it)
+DROP VIEW IF EXISTS inventario.vw_pesaje_pendiente         CASCADE;
 DROP VIEW IF EXISTS inventario.vw_guias_rollos_pendientes  CASCADE;
 DROP VIEW IF EXISTS inventario.vw_rollos_por_guia          CASCADE;
 DROP VIEW IF EXISTS inventario.vw_lotes_rollos_despachados CASCADE;
+DROP VIEW IF EXISTS inventario.vw_lotes_rollos_disponibles CASCADE;
 DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock       CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_rollos_tenidos     CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_rollos_crudos      CASCADE;
@@ -1440,8 +1788,10 @@ DROP VIEW IF EXISTS inventario.vw_stock_lotes              CASCADE;
 
 -- doc views
 DROP VIEW IF EXISTS doc.vw_letras                          CASCADE;
+DROP VIEW IF EXISTS doc.vw_cuentas_por_pagar               CASCADE;
 DROP VIEW IF EXISTS doc.vw_compras_item_mes                CASCADE;
 DROP VIEW IF EXISTS doc.vw_facturas_proveedor              CASCADE;
+DROP VIEW IF EXISTS doc.vw_compras_recepcion               CASCADE;
 DROP VIEW IF EXISTS doc.vw_compras                         CASCADE;
 
 -- public base views (other views may depend — drop last)

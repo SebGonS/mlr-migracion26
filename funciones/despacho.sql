@@ -18,10 +18,11 @@
 --   • propietario_id ≠ 1 (client-owned rolls)                          → DESPACHO_CLIENTE
 --
 -- Reversal tipo mapping (used by anular_guia_remision):
---   COMPRA_ING  (factor +1) → DEV_PROV_EGR       (factor -1)
---   SERV_ING    (factor +1) → DEV_CLI_EGR         (factor -1)
---   SERV_EGR    (factor -1) → SERV_DEV_ING        (factor +1)
---   VENTA_EGR   (factor -1) → DEV_CLI_ING         (factor +1)
+--   COMPRA_ING  → DEV_PROV_EGR
+--   SERV_ING    → DEV_CLI_EGR
+--   SERV_EGR    → SERV_DEV_ING
+--   VENTA_EGR   → DEV_CLI_ING
+-- Stock direction is derived from location fields: origen IS NOT NULL → debit, destino IS NOT NULL → credit.
 -- ============================================================================
 
 

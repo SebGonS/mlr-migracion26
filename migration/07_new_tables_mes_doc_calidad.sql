@@ -369,6 +369,8 @@ CREATE TABLE mes.partida_componente (
     cantidad_reservada  numeric(12,4),
     usr_cre int,
     fyh_cre timestamptz DEFAULT now(),
+    usr_mod int,
+    fyh_mod timestamptz,
     CONSTRAINT chk_resb_tipo CHECK (
         (lote_id IS NOT NULL AND item_id IS NULL  AND partida_paso_id IS NULL)
         OR

@@ -1435,7 +1435,7 @@ SELECT
     ((pt.fecha + COALESCE(pt.hora_inicio, '06:00'::time))::TIMESTAMP + INTERVAL '5 hours')::TIMESTAMPTZ
 FROM public.produccion_tenido pt
 JOIN public.partida p ON p.id = pt.partida_id
-WHERE pt.partida_id IN (SELECT id FROM mes.partida)
+WHERE pt.partida_id IN (SELECT id FROM mes.partida) AND EXISTS (SELECT 1 FROM receta2 WHERE id = p.receta_id)
   AND pt.tipo = 'Teñido'
 ON CONFLICT DO NOTHING;
 
@@ -3132,7 +3132,7 @@ BEGIN
         cp.tipo_articulo_id::smallint,
         cp.tenido_id,
         cp.fibra::smallint,
-        (cp.adicional_id > 0),
+        CASE WHEN cp.adicional_id > 0 THEN true ELSE NULL END,  -- NULL = wildcard (base rate covers all orders)
         cp.precio_tenido,
         CASE WHEN cp.activo = 0 THEN cp.fyh_fin ELSE NULL END,
         cp.fyh_cre
@@ -3211,4 +3211,56 @@ JOIN inventario.lote l ON l.id = ls.lote_id
 GROUP BY l.item_id, ls.ubicacion_id
 ON CONFLICT (item_id, ubicacion_id) DO UPDATE
     SET cantidad_actual = EXCLUDED.cantidad_actual;
+
+-- ============================================================================
+-- BACKFILL RIB ROLLS INTO partida_componente  (ran 2026-05-25)
+-- ============================================================================
+-- The original opi_insert block skipped rib lotes (AND NOT lwr.flg_rib) because
+-- produccion_tenido had no rib column to derive roll ranges from.
+-- Effect: rib lotes existed in inventario.lote (PARTIDA) but were invisible to
+--   • mes.get_partida → materiales_reservados (reads partida_componente)
+--   • generar_receta → weight sum (reads partida_componente)
+--   • vw_partida_resumen_tenido → total_rollos (was also COUNT not SUM — fixed in 08_views.sql)
+-- Fix: assign every rib lote to its partida in partida_componente.
+-- No paso-level assignment possible (pt has no rib column); partida-level is sufficient
+-- for weight computation and materiales display.
+-- ============================================================================
+INSERT INTO mes.partida_componente (partida_id, lote_id, usr_cre, fyh_cre)
+SELECT
+    l.documento_id  AS partida_id,
+    l.id            AS lote_id,
+    l.usr_cre,
+    l.fyh_cre
+FROM inventario.lote l
+JOIN item_rollo_detalle ird ON ird.item_id = l.item_id AND ird.flg_rib = true
+WHERE l.documento_tipo = 'PARTIDA'
+  AND NOT EXISTS (
+      SELECT 1 FROM mes.partida_componente pc WHERE pc.lote_id = l.id
+  )
+ON CONFLICT (partida_id, lote_id) WHERE lote_id IS NOT NULL DO NOTHING;
+
+-- ============================================================================
+-- BACKFILL REGULAR ROLLS INTO partida_componente  (ran 2026-05-25)
+-- ============================================================================
+-- Separate from the rib backfill above (already ran on live DB).
+-- Root cause: opi_insert assigned regular rolls via pt_ranges (produccion_tenido).
+-- Partidas with no produccion_tenido rows (no recorded dyeing history) were
+-- skipped entirely — their regular roll lotes exist in inventario.lote (PARTIDA)
+-- but never got a partida_componente entry.
+-- Guard: flg_rib = false ensures no overlap with the rib backfill above.
+-- Idempotent: NOT EXISTS + ON CONFLICT make re-runs safe.
+-- ============================================================================
+INSERT INTO mes.partida_componente (partida_id, lote_id, usr_cre, fyh_cre)
+SELECT
+    l.documento_id  AS partida_id,
+    l.id            AS lote_id,
+    l.usr_cre,
+    l.fyh_cre
+FROM inventario.lote l
+JOIN item_rollo_detalle ird ON ird.item_id = l.item_id AND ird.flg_rib = false
+WHERE l.documento_tipo = 'PARTIDA'
+  AND NOT EXISTS (
+      SELECT 1 FROM mes.partida_componente pc WHERE pc.lote_id = l.id
+  )
+ON CONFLICT (partida_id, lote_id) WHERE lote_id IS NOT NULL DO NOTHING;
 

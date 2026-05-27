@@ -149,65 +149,7 @@ BEGIN
     RETURN format('Detalle de rollo para item_id %s creado correctamente.', p_item_id);
 END;
 $function$;
-CREATE OR REPLACE FUNCTION public.crear_item(p_item jsonb)
- RETURNS text
-LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'iam', 'notification', 'public'
-AS $function$
-DECLARE
-    v_message   text;
-    v_detail    text;
-    v_hint      text;
-    v_context   text;
-    v_sqlstate  text;
-    v_item_id   INT;
-    v_tipo_codigo text;
-    v_usr_id int := get_user_id();
-BEGIN
-    IF NOT jwt_has_permission('inventario.crear') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere inventario.crear'
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
 
- INSERT INTO logs_api(function_name, user_id, params)
-        VALUES ('crear_item', v_usr_id, p_item::TEXT);
-    INSERT INTO item (codigo, nombre, item_tipo_id, unidad_id)
-    VALUES (
-        p_item->>'codigo',
-        p_item->>'nombre',
-        (p_item->>'item_tipo_id')::INT,
-        (p_item->>'unidad_id')::INT
-    )
-    RETURNING id INTO v_item_id;
-     SELECT codigo INTO v_tipo_codigo FROM item_tipo WHERE id = (p_item->>'item_tipo_id')::INT;
-
-    -- Create rollo or insumo detail
-    IF v_tipo_codigo = 'ROLLO' THEN
-        PERFORM crear_item_rollo(p_item, v_item_id);
-    ELSIF v_tipo_codigo = 'INSUMO' THEN
-        PERFORM crear_item_insumo(p_item, v_item_id);
-    END IF;
-INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Nuevo Item Creado', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' creó un nuevo item de tipo' || COALESCE(p_item->>'nombre','sin nombre'), 'info',jsonb_build_object('objeto_tipo','item','item_id',v_item_id)
-FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
-LEFT JOIN iam.rol r ON ur.rol_id=r.id
-WHERE r.code IN ('jefe_planta','compras') AND v_usr_id<>ur.user_id;
-   RETURN format('Item con ID %s creado correctamente.', v_item_id);
- EXCEPTION
-    WHEN OTHERS THEN
-        GET STACKED DIAGNOSTICS
-            v_message  = MESSAGE_TEXT,
-            v_detail   = PG_EXCEPTION_DETAIL,
-            v_hint     = PG_EXCEPTION_HINT,
-            v_context  = PG_EXCEPTION_CONTEXT,
-            v_sqlstate = RETURNED_SQLSTATE;
-
-        RAISE LOG 'Error in crear_item - User: %, Params: %, Error: %, Detail: %',
-                  v_usr_id, p_item::TEXT, v_message, v_detail;
-        RAISE;
-END;
-$function$;
 
 CREATE OR REPLACE FUNCTION inventario.get_almacen(p_almacen_id int)
 RETURNS JSONB
@@ -649,7 +591,8 @@ BEGIN
         SELECT v_partida_id,
                (c->>'lote_id')::int,
                (c->>'cantidad')::numeric
-        FROM jsonb_array_elements(p_partida->'componentes') c;
+        FROM jsonb_array_elements(p_partida->'componentes') c
+        WHERE (c->>'lote_id') IS NOT NULL;
     END IF;
 
     -- ── Auto-request recipe if no live recipe exists for this spec ────────────
@@ -1033,7 +976,6 @@ BEGIN
         RAISE EXCEPTION 'Stock insuficiente para asignar los componentes'
             USING DETAIL = v_error_payload::text;
     END IF;
-
     -- Per-item roll count guard: submitted rolls per item_id must not exceed partida_detalle.cantidad.
     -- Also catches rolls whose item has no partida_detalle entry (unplanned item).
     SELECT l.item_id, COUNT(*)::int, pd.cantidad
@@ -1095,13 +1037,14 @@ BEGIN
           WHERE (i->>'lote_id')::int = lote_id
       );
 
-    -- Insert/update roll components
+    -- Insert/update roll components (skip elements with missing/null lote_id)
     INSERT INTO mes.partida_componente(partida_id, lote_id, cantidad_reservada, usr_cre)
     SELECT p_partida_id,
            (i->>'lote_id')::int,
            (i->>'cantidad')::numeric,
            v_usr_id
     FROM jsonb_array_elements(p_componentes) i
+    WHERE (i->>'lote_id') IS NOT NULL
     ON CONFLICT (partida_id, lote_id) WHERE lote_id IS NOT NULL
     DO UPDATE SET cantidad_reservada = EXCLUDED.cantidad_reservada;
 

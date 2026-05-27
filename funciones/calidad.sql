@@ -347,6 +347,125 @@ END;
 $function$;
 
 -- ═══════════════════════════════════════════════════════════════
+-- BULK RECHAZAR LOTES
+-- Symmetric counterpart to bulk_aprobar_lotes for non-discrete shared defects
+-- (e.g. tone off-spec across a full batch) where per-roll forms are impractical.
+--
+-- Diverges from bulk_aprobar_lotes intentionally on one point:
+--   bulk_aprobar_lotes silently skips ineligible lotes.
+--   bulk_rechazar_lotes raises on ANY ineligible lote — because a bulk rejection
+--   implies a shared defect verdict; partial application would be misleading.
+--
+-- Does NOT create a reproceso — inspection recording only.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION calidad.bulk_rechazar_lotes(
+    p_lote_ids    int[],
+    p_resultado   calidad_estado_enum,  -- REPROCESO | BAJA
+    p_observacion text,
+    p_empleado_id int  DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','calidad','inventario','mes'
+AS $function$
+DECLARE
+    v_message      text;
+    v_detail       text;
+    v_hint         text;
+    v_context      text;
+    v_sqlstate     text;
+    v_usr_id       int := get_user_id();
+    v_rechazados   int;
+    v_results      jsonb;
+    v_ineligibles  int[];
+BEGIN
+    IF NOT jwt_has_permission('calidad.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere calidad.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Strict eligibility gate: raise if ANY supplied lote is not pending QC.
+    SELECT ARRAY_AGG(u) INTO v_ineligibles
+    FROM UNNEST(p_lote_ids) u
+    WHERE NOT EXISTS (
+        SELECT 1 FROM calidad.vw_lotes_pendientes_inspeccion v WHERE v.lote_id = u
+    );
+
+    IF v_ineligibles IS NOT NULL THEN
+        RAISE EXCEPTION 'Lotes no elegibles para inspección: %. Deben estar pendientes de QC.',
+            v_ineligibles;
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('bulk_rechazar_lotes', v_usr_id,
+            jsonb_build_object('lote_ids', p_lote_ids, 'resultado', p_resultado, 'empleado_id', p_empleado_id));
+
+    WITH lotes_resueltos AS (
+        SELECT v.lote_id, v.partida_paso_ejecucion_id
+        FROM calidad.vw_lotes_pendientes_inspeccion v
+        WHERE v.lote_id = ANY(p_lote_ids)
+    ),
+    ins AS (
+        INSERT INTO calidad.inspeccion (lote_id, partida_paso_ejecucion_id, resultado, observacion, empleado_id)
+        SELECT lr.lote_id, lr.partida_paso_ejecucion_id, p_resultado, p_observacion, p_empleado_id
+        FROM lotes_resueltos lr
+        WHERE NOT EXISTS (
+            SELECT 1 FROM calidad.inspeccion ci
+            WHERE ci.lote_id                   = lr.lote_id
+              AND ci.partida_paso_ejecucion_id = lr.partida_paso_ejecucion_id
+        )
+        RETURNING id AS inspeccion_id, lote_id
+    ),
+    upd AS (
+        UPDATE inventario.lote
+        SET estado_calidad = p_resultado
+        WHERE id IN (SELECT lote_id FROM ins)
+    )
+    SELECT COUNT(*)::int,
+           jsonb_agg(jsonb_build_object('lote_id', lote_id, 'inspeccion_id', inspeccion_id))
+    INTO v_rechazados, v_results
+    FROM ins;
+
+    IF v_rechazados > 0 THEN
+        INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+        SELECT ur.user_id,
+               'Rechazo Masivo de Calidad',
+               COALESCE(
+                   (SELECT COALESCE(nombre, 'Usuario desconocido') || ' ' || apellido
+                    FROM usuario WHERE id = v_usr_id),
+                   'sistema'
+               ) || ' rechazó ' || v_rechazados || ' rollo(s) como ' || p_resultado,
+               'warning',
+               jsonb_build_object('objeto_tipo', 'bulk_rechazo', 'lote_ids', p_lote_ids, 'resultado', p_resultado)
+        FROM iam.user_rol ur
+        LEFT JOIN iam.rol r ON ur.rol_id = r.id
+        WHERE r.code IN ('jefe_planta', 'calidad')
+          AND v_usr_id <> ur.user_id;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'rechazados', v_rechazados,
+        'resultados', COALESCE(v_results, '[]'::jsonb)
+    );
+
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message  = MESSAGE_TEXT,
+            v_detail   = PG_EXCEPTION_DETAIL,
+            v_hint     = PG_EXCEPTION_HINT,
+            v_context  = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+        RAISE LOG 'Error in bulk_rechazar_lotes - User: %, Lotes: %, Resultado: %, Error: %, Detail: %',
+                  v_usr_id, p_lote_ids, p_resultado, v_message, v_detail;
+        RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION calidad.bulk_rechazar_lotes(int[], calidad_estado_enum, text, int) TO authenticated;
+
+-- ═══════════════════════════════════════════════════════════════
 -- DAR DE BAJA LOTE — whole-roll condemnation (≈ SAP mvt 551)
 --
 -- Posts a PROD_SCRAP movement and soft-deletes the output lote.

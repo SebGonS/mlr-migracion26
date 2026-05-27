@@ -70,9 +70,10 @@ $$;
 
 
 -- ── doc.fn_get_costo_receta ───────────────────────────────────
--- Returns the chemical cost per kg for a given dyeing recipe.
--- Cost = SUM(insumo.cantidad × item_unit_price) across all pasos.
--- cantidad is in kg-chemical / kg-fabric (OWF fraction, e.g. 0.02 = 2%).
+-- Returns the chemical cost per kg of fabric for a given dyeing recipe.
+-- Unit conversion via item_insumo_detalle.medida (canonical unit per item):
+--   g/L → quantity × 5 L/kg liquor ratio ÷ 1000 g/kg  (matches legacy view logic)
+--   %   → quantity × 10 g/L per % ÷ 1000 g/kg
 --
 -- Price source priority:
 --   1. Most recent doc.factura_proveedor_detalle.precio_unitario
@@ -89,7 +90,13 @@ SET search_path TO 'receta', 'doc', 'public'
 AS $$
     SELECT ROUND(
         SUM(
-            tpi.cantidad * COALESCE(
+            tpi.cantidad
+            * CASE iid.medida
+                WHEN 'g/L' THEN (5.0  / 1000.0)
+                WHEN '%'   THEN (10.0 / 1000.0)
+                ELSE            (1.0  / 1000.0)
+              END
+            * COALESCE(
                 -- Authoritative: latest supplier invoice line (ex-IGV)
                 (
                     SELECT fpd.precio_unitario
@@ -113,6 +120,7 @@ AS $$
     )
     FROM receta.tenido_paso tp
     JOIN receta.tenido_paso_insumo tpi ON tpi.paso_id = tp.id
+    JOIN public.item_insumo_detalle iid ON iid.item_id = tpi.item_id
     WHERE tp.receta_id = p_receta_id;
 $$;
 

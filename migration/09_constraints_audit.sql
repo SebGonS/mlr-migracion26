@@ -338,6 +338,7 @@ REVOKE UPDATE (usr_mod, fyh_mod) ON inventario.cuadre_detalle FROM anon, authent
 -- ── Performance indexes ───────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_partida_paso_partida_id  ON mes.partida_paso(partida_id);
 CREATE INDEX IF NOT EXISTS idx_partida_comp_partida_id  ON mes.partida_componente(partida_id);
+CREATE INDEX IF NOT EXISTS idx_partida_comp_lote_id     ON mes.partida_componente(lote_id) WHERE lote_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_paso_ejec_paso_id        ON mes.partida_paso_ejecucion(partida_paso_id);
 CREATE INDEX IF NOT EXISTS idx_paso_ejec_estado         ON mes.partida_paso_ejecucion(estado, partida_paso_id);
 CREATE INDEX IF NOT EXISTS idx_lote_doc             ON inventario.lote(documento_tipo, documento_id);
@@ -349,6 +350,10 @@ CREATE INDEX IF NOT EXISTS idx_letra_factura_factura     ON doc.letra_factura(fa
 CREATE INDEX IF NOT EXISTS idx_compra_factura_factura_id ON doc.compra_factura_proveedor(factura_proveedor_id);
 
 -- lote_rollo_detalle lookup indexes
+-- Primary FK lookup — powers all stock views that join lrd by lote_id
+CREATE INDEX IF NOT EXISTS idx_lrd_lote_id
+    ON inventario.lote_rollo_detalle (lote_id);
+
 CREATE INDEX IF NOT EXISTS idx_lrd_guia
     ON inventario.lote_rollo_detalle (guia_remision_id)
     WHERE guia_remision_id IS NOT NULL;

@@ -4,8 +4,30 @@
 CREATE OR REPLACE FUNCTION mes.get_programacion_diaria(p_fecha DATE)
 RETURNS jsonb
 LANGUAGE sql STABLE
-SET search_path TO 'public','doc','mes','inventario'
+SET search_path TO 'public','doc','mes','inventario','receta'
 AS $$
+-- One pass: collect guias for all partidas on today's board, then LEFT JOIN below.
+-- Avoids a correlated subquery (per-row) — CTE executes once and is hash-joined.
+WITH guias_partida AS (
+    SELECT
+        pc.partida_id,
+        jsonb_agg(DISTINCT jsonb_build_object(
+            'id',     gr.id,
+            'codigo', gr.serie || '-' || gr.correlativo
+        )) AS guias
+    FROM mes.partida_componente        pc
+    JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id     = pc.lote_id
+    JOIN doc.guia_remision             gr  ON gr.id           = lrd.guia_remision_id
+    WHERE pc.lote_id           IS NOT NULL
+      AND lrd.guia_remision_id IS NOT NULL
+      AND pc.partida_id IN (
+          SELECT pp2.partida_id
+          FROM mes.programacion prog2
+          JOIN mes.partida_paso  pp2 ON pp2.id = prog2.actividad_id
+          WHERE prog2.fecha = p_fecha AND prog2.actividad_tipo = 'partida_paso'
+      )
+    GROUP BY pc.partida_id
+)
 SELECT COALESCE(jsonb_agg(row_obj), '[]'::jsonb)
 FROM (
     SELECT jsonb_build_object(
@@ -18,6 +40,8 @@ FROM (
         'paso_id',                   pp.id,
         'operacion',                 o.nombre,
         'operacion_codigo',          o.codigo,
+        'receta_tenido_id',          pp.receta_id,
+        'tipo_receta',               tr.tipo_receta,
         'paso_estado',               COALESCE((
                                          SELECT CASE
                                              WHEN bool_or(pe.estado = 'COMPLETADO') THEN 'COMPLETADO'
@@ -34,7 +58,7 @@ FROM (
         'articulo_tipo_id',          p.articulo_tipo_id,
         'color',                     vc.color,
         'color_hex',                 vc.color_hex,
-        'tono',                      vc.tono,
+        'valor',                     vclr.valor,
         'tenido',                    t.tenido,
         'ancho',                     p.ancho,
         'malla',                     p.malla,
@@ -45,20 +69,39 @@ FROM (
         'cantidad_total',            vpa.cantidad_total,
         'cantidad_regular',          vpa.cantidad_regular,
         'cantidad_rib',              vpa.cantidad_rib,
+        'guias',                     gp.guias,
         -- Lavado maquina fields (null when actividad_tipo = 'partida_paso')
         'lavado_id',                 lm.id,
         'lavado_estado',             lm.estado,
-        'receta_lavado_maquina_id',  lm.receta_id  -- FIX BUG5: was lm.receta_lavado_maquina_id (old column name)
+        'lavado_nota',               lm.nota,
+        'lavado_fyh_inicio',         lm.fyh_inicio,
+        'lavado_fyh_fin',            lm.fyh_fin,
+        'empleado_id',               lm.empleado_id,
+        'empleado',                  NULLIF(TRIM(COALESCE(emp.nombre,'') || ' ' || COALESCE(emp.apellido,'')), ''),
+        'receta_lavado_maquina_id',  lm.receta_id,
+        'tipo_lavado',               tlm.nombre,
+        'color_origen',              vo.valor,
+        'color_destino',             vd.valor
     ) AS row_obj
     FROM mes.programacion prog
-    LEFT JOIN mes.partida_paso pp  ON prog.actividad_tipo = 'partida_paso' AND pp.id = prog.actividad_id
-    LEFT JOIN mes.operacion o       ON o.id = pp.operacion_id
-    LEFT JOIN mes.partida p         ON p.id = pp.partida_id
-    LEFT JOIN tenido t              ON t.id = p.tenido_id
-    LEFT JOIN tercero c             ON c.id = p.tercero_id
-    LEFT JOIN vw_colores vc         ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN mes.partida_paso pp         ON prog.actividad_tipo = 'partida_paso' AND pp.id = prog.actividad_id
+    LEFT JOIN mes.operacion o             ON o.id = pp.operacion_id
+    LEFT JOIN receta.tenido rt            ON rt.id = pp.receta_id
+    LEFT JOIN tipo_receta tr              ON tr.id = rt.tipo_receta_id
+    LEFT JOIN mes.partida p               ON p.id = pp.partida_id
+    LEFT JOIN tenido t                    ON t.id = p.tenido_id
+    LEFT JOIN tercero c                   ON c.id = p.tercero_id
+    LEFT JOIN vw_colores vc               ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN color_x_cliente cxc         ON cxc.id = p.color_x_cliente_id
+    LEFT JOIN public.valor vclr           ON vclr.id = cxc.valor_id
     LEFT JOIN vw_partida_resumen_tenido vpa ON vpa.partida_id = p.id
-    LEFT JOIN mes.lavado_maquina lm ON prog.actividad_tipo = 'LAVADO_MAQUINA' AND lm.id = prog.actividad_id
+    LEFT JOIN guias_partida gp            ON gp.partida_id = p.id
+    LEFT JOIN mes.lavado_maquina lm       ON prog.actividad_tipo = 'LAVADO_MAQUINA' AND lm.id = prog.actividad_id
+    LEFT JOIN receta.lavado_maquina rlm   ON rlm.id = lm.receta_id
+    LEFT JOIN tipo_lavado_maquina tlm     ON tlm.id = rlm.tipo_lavado_mq_id
+    LEFT JOIN public.valor vo             ON vo.id  = rlm.valor_origen_id
+    LEFT JOIN public.valor vd             ON vd.id  = rlm.valor_destino_id
+    LEFT JOIN mes.empleado emp            ON emp.id = lm.empleado_id
     WHERE prog.fecha = p_fecha
     ORDER BY prog.maquina_id, prog.secuencia
 ) sub;
@@ -85,15 +128,17 @@ FROM (
         'cliente',            c.nombre,
         'color',              vc.color,
         'color_hex',          vc.color_hex,
-        'tono',               vc.tono,
+        'valor',              vclr.valor,
         'tenido',             t.tenido
     ) AS row_obj
     FROM mes.partida_paso pp
     JOIN mes.operacion o ON o.id = pp.operacion_id
     JOIN mes.partida p   ON p.id = pp.partida_id
-    LEFT JOIN tenido t   ON t.id = p.tenido_id
-    LEFT JOIN tercero c  ON c.id = p.tercero_id
-    LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN tenido t         ON t.id  = p.tenido_id
+    LEFT JOIN tercero c        ON c.id  = p.tercero_id
+    LEFT JOIN vw_colores vc    ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN color_x_cliente cxc ON cxc.id = p.color_x_cliente_id
+    LEFT JOIN public.valor vclr   ON vclr.id = cxc.valor_id
     WHERE NOT EXISTS (
           SELECT 1 FROM mes.partida_paso_ejecucion pe
           WHERE pe.partida_paso_id = pp.id AND pe.estado IN ('EN_PROCESO','COMPLETADO','OMITIDO')
@@ -111,8 +156,34 @@ $$;
 CREATE OR REPLACE FUNCTION mes.get_actividades_sin_programar()
 RETURNS jsonb
 LANGUAGE sql STABLE
-SET search_path TO 'public','doc','mes'
+SET search_path TO 'public','doc','mes','inventario'
 AS $$
+WITH guias_partida AS (
+    SELECT
+        pc.partida_id,
+        jsonb_agg(DISTINCT jsonb_build_object(
+            'id',     gr.id,
+            'codigo', gr.serie || '-' || gr.correlativo
+        )) AS guias
+    FROM mes.partida_componente        pc
+    JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id     = pc.lote_id
+    JOIN doc.guia_remision             gr  ON gr.id           = lrd.guia_remision_id
+    WHERE pc.lote_id           IS NOT NULL
+      AND lrd.guia_remision_id IS NOT NULL
+      AND pc.partida_id IN (
+          SELECT pp2.partida_id
+          FROM mes.partida_paso pp2
+          WHERE NOT EXISTS (
+              SELECT 1 FROM mes.partida_paso_ejecucion pe
+              WHERE pe.partida_paso_id = pp2.id AND pe.estado IN ('EN_PROCESO','COMPLETADO','OMITIDO')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM mes.programacion prog
+              WHERE prog.actividad_tipo = 'partida_paso' AND prog.actividad_id = pp2.id
+          )
+      )
+    GROUP BY pc.partida_id
+)
 SELECT COALESCE(jsonb_agg(row_obj ORDER BY fyh_cre DESC), '[]'::jsonb)
 FROM (
     -- Production pasos (PENDIENTE, not yet on board)
@@ -122,7 +193,7 @@ FROM (
             'actividad_tipo',     'partida_paso',
             'actividad_id',       pp.id,
             'paso_id',            pp.id,
-            'partida_id',           p.id,
+            'partida_id',         p.id,
             'operacion',          o.nombre,
             'operacion_codigo',   o.codigo,
             'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
@@ -130,15 +201,19 @@ FROM (
             'cliente',            c.nombre,
             'color',              vc.color,
             'color_hex',          vc.color_hex,
-            'tono',               vc.tono,
-            'tenido',             t.tenido
+            'valor',              vclr.valor,
+            'tenido',             t.tenido,
+            'guias',              gp.guias
         ) AS row_obj
     FROM mes.partida_paso pp
     JOIN mes.operacion o ON o.id = pp.operacion_id
     JOIN mes.partida p   ON p.id = pp.partida_id
-    LEFT JOIN tenido t   ON t.id = p.tenido_id
-    LEFT JOIN tercero c  ON c.id = p.tercero_id
-    LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN tenido t              ON t.id  = p.tenido_id
+    LEFT JOIN tercero c             ON c.id  = p.tercero_id
+    LEFT JOIN vw_colores vc         ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN color_x_cliente cxc   ON cxc.id = p.color_x_cliente_id
+    LEFT JOIN public.valor vclr     ON vclr.id = cxc.valor_id
+    LEFT JOIN guias_partida gp      ON gp.partida_id = p.id
     WHERE NOT EXISTS (
           SELECT 1 FROM mes.partida_paso_ejecucion pe
           WHERE pe.partida_paso_id = pp.id AND pe.estado IN ('EN_PROCESO','COMPLETADO','OMITIDO')
@@ -281,7 +356,7 @@ Race conditions possible	Atomic transaction
 Complex frontend state sync	Frontend is source of truth
 Need optimistic updates	Simple: save = replace
 Want me to add this to your funciones.sql?*/
-
+-- SELECT mes.generar_receta(7513)
 CREATE OR REPLACE FUNCTION mes.generar_receta(p_paso_id BIGINT)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -319,16 +394,23 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    -- 1. Validate paso, get receta + machine capacity data
-    SELECT pp.receta_id, pp.maquina_planificada_id, pp.relacion_bano_objetivo,
+    -- 1. Validate paso, get receta + machine capacity data.
+    -- Machine resolved from programacion if the paso is already scheduled
+    -- (scheduled machine is authoritative over planning intent).
+    -- Falls back to maquina_planificada_id when not yet on the board.
+    SELECT pp.receta_id,
+           COALESCE(prog.maquina_id, pp.maquina_planificada_id),
+           pp.relacion_bano_objetivo,
            m.relacion_bano, m.capacidad_min_kg,
            pp.partida_id, o.nombre
     INTO v_receta_id, v_maquina_id, v_rb_paso,
          v_rb_maquina, v_cap_min_kg,
          v_partida_id, v_op_nombre
     FROM mes.partida_paso pp
-    LEFT JOIN mes.operacion o ON o.id = pp.operacion_id
-    LEFT JOIN mes.maquina m   ON m.id = pp.maquina_planificada_id
+    LEFT JOIN mes.operacion o   ON o.id   = pp.operacion_id
+    LEFT JOIN mes.programacion prog
+           ON prog.actividad_tipo = 'partida_paso' AND prog.actividad_id = pp.id
+    LEFT JOIN mes.maquina m     ON m.id   = COALESCE(prog.maquina_id, pp.maquina_planificada_id)
     WHERE pp.id = p_paso_id;
 
     IF NOT FOUND THEN
@@ -371,6 +453,7 @@ BEGIN
     SELECT jsonb_build_object(
         'receta_id',         pp.receta_id,
         'partida_id',        p.id,
+        'partida_origen_id', p.partida_origen_id,
         'tercero_id',        p.tercero_id,
         'cliente',           cli.nombre,
         'tipo_receta',       tr.tipo_receta,
@@ -389,6 +472,7 @@ BEGIN
                                  'codigo', v_maq_codigo,
                                  'nombre', v_maq_nombre
                              ),
+        'costo_quimicos_kg', doc.fn_get_costo_receta(r.id),
         'pasos', (
             SELECT jsonb_agg(
                 jsonb_build_object(
@@ -402,21 +486,36 @@ BEGIN
                     'insumos', (
                         SELECT jsonb_agg(
                             jsonb_build_object(
-                                'item_id',              rtpi.item_id,
-                                'orden',                rtpi.orden,
-                                'codigo',               i.codigo,
-                                'nombre',               i.nombre,
-                                'cantidad',             rtpi.cantidad,
-                                'medida',               iid.medida,
-                                'cantidad_requerida_kg', CASE
-                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen * iid.factor_stock
-                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10 * iid.factor_stock
-                                END
+                                'item_id',               rtpi.item_id,
+                                'orden',                 rtpi.orden,
+                                'codigo',                i.codigo,
+                                'nombre',                i.nombre,
+                                'cantidad',              rtpi.cantidad,
+                                'medida',                iid.medida,
+                                'cantidad_requerida_kg', ROUND(CASE
+                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen
+                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10
+                                END, 4),
+                                'precio_kg',             pr.precio_kg,
+                                'costo_insumo',          ROUND(CASE
+                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen
+                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10
+                                    ELSE 0
+                                END * pr.precio_kg, 4)
                             ) ORDER BY rtpi.orden
                         )
                         FROM receta.tenido_paso_insumo rtpi
-                        JOIN item i                ON i.id   = rtpi.item_id
-                        JOIN item_insumo_detalle iid ON iid.item_id = rtpi.item_id
+                        JOIN item i                  ON i.id        = rtpi.item_id
+                        JOIN item_insumo_detalle iid  ON iid.item_id = rtpi.item_id
+                        LEFT JOIN LATERAL (
+                            SELECT COALESCE(
+                                (SELECT fpd.precio_unitario FROM doc.factura_proveedor_detalle fpd
+                                 WHERE fpd.item_id = rtpi.item_id ORDER BY fpd.fyh_cre DESC LIMIT 1),
+                                (SELECT cd.precio_unitario FROM doc.compra_detalle cd
+                                 WHERE cd.item_id = rtpi.item_id ORDER BY cd.fyh_cre DESC LIMIT 1),
+                                0
+                            ) AS precio_kg
+                        ) pr ON true
                         WHERE rtpi.paso_id = rtp.id
                     )
                 ) ORDER BY rtp.orden
@@ -442,22 +541,23 @@ BEGIN
     SELECT v_partida_id,
            rtpi.item_id,
            p_paso_id,
-           CASE
-               WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen * iid.factor_stock
-               WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso    * 10 * iid.factor_stock
-           END,
+           ROUND(CASE
+               WHEN iid.medida = 'g/L' THEN SUM(rtpi.cantidad) * v_volumen * iid.factor_stock
+               WHEN iid.medida = '%'   THEN SUM(rtpi.cantidad) * v_peso    * 10 * iid.factor_stock
+           END, 4),
            v_usr_id
     FROM receta.tenido_paso rtp
     JOIN receta.tenido_paso_insumo rtpi ON rtpi.paso_id  = rtp.id
     JOIN item_insumo_detalle iid        ON iid.item_id   = rtpi.item_id
-    WHERE rtp.receta_id = v_receta_id;
+    WHERE rtp.receta_id = v_receta_id
+    GROUP BY rtpi.item_id, iid.medida, iid.factor_stock;
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Receta Generada',
            COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido
                      FROM usuario WHERE id = v_usr_id), 'sistema')
            || format(' generó la receta del paso %s (orden #%s)', v_op_nombre, v_partida_id), 'info',
-           jsonb_build_object('objeto_tipo','partida_paso','paso_id', p_paso_id, 'partida_id', v_partida_id)
+           jsonb_build_object('objeto_tipo','partida_paso','paso_id', p_paso_id, 'partida_id', v_partida_id, 'partida_origen_id', (v_receta->>'partida_origen_id')::bigint)
     FROM iam.user_rol ur LEFT JOIN iam.rol r ON ur.rol_id = r.id
     WHERE r.code IN ('jefe_planta','supervisor_produccion') AND v_usr_id <> ur.user_id;
 
@@ -546,15 +646,17 @@ BEGIN
         RAISE EXCEPTION 'No se puede iniciar el paso % porque la orden no tiene rollos asignados.', v_op_nombre;
     END IF;
 
-    -- Create execution run record
-    INSERT INTO mes.partida_paso_ejecucion(partida_paso_id, estado, maquina_id, empleado_id, fyh_inicio, programacion_id, usr_cre)
+    -- Create execution run record.
+    -- fyh_inicio / fyh_cre accept a historical timestamp for backfill; live callers omit it → NOW().
+    INSERT INTO mes.partida_paso_ejecucion(partida_paso_id, estado, maquina_id, empleado_id, fyh_inicio, programacion_id, usr_cre, fyh_cre)
     VALUES (
         p_paso_id, 'EN_PROCESO',
         (p_datos->>'maquina_id')::INT,
         (p_datos->>'empleado_id')::SMALLINT,
-        NOW(),
+        COALESCE((p_datos->>'fyh_inicio')::TIMESTAMPTZ, NOW()),
         (p_datos->>'programacion_id')::BIGINT,
-        v_usr_id
+        v_usr_id,
+        COALESCE((p_datos->>'fyh_inicio')::TIMESTAMPTZ, NOW())
     )
     RETURNING id INTO v_ejecucion_id;
 
@@ -683,8 +785,16 @@ v_consumos:= mes.calcular_fifo(p_consumos);
             (p_consumo->>'motivo_id')::SMALLINT,
             p_consumo->>'observacion'
         FROM jsonb_array_elements(v_consumos) v_consumo
-        JOIN jsonb_array_elements(p_consumos) p_consumo
-        ON v_consumo->>'item_id' = p_consumo->>'item_id'
+        -- Aggregate p_consumos by item_id so FIFO lots for one item don't Cartesian-product
+        -- against duplicate input entries. motivo_id/observacion are taken from the first entry
+        -- per item; callers should not mix motivos for the same item in one call.
+        JOIN (
+            SELECT (pc->>'item_id') AS item_id,
+                   MIN((pc->>'motivo_id')::SMALLINT) AS motivo_id,
+                   MIN(pc->>'observacion')            AS observacion
+            FROM jsonb_array_elements(p_consumos) pc
+            GROUP BY pc->>'item_id'
+        ) p_consumo ON v_consumo->>'item_id' = p_consumo.item_id
         ;
     RETURN format('%s consumos registrados para paso #%s.', jsonb_array_length(v_consumos), p_paso_id);
 EXCEPTION WHEN OTHERS THEN
@@ -739,20 +849,27 @@ AS $function$
 DECLARE
     v_consumos jsonb;
 BEGIN
-    WITH fifo AS (
+    -- Pre-aggregate by item_id before joining to stock: duplicate item_ids in p_items
+    -- would otherwise double every stock lot in the window partition, causing the running
+    -- sum to be inflated and silently dropping some of the requested quantity.
+    WITH input_agg AS (
+        SELECT (i->>'item_id')::INT AS item_id, SUM((i->>'cantidad')::NUMERIC) AS cantidad
+        FROM jsonb_array_elements(p_items) i
+        GROUP BY 1
+    ),
+    fifo AS (
         SELECT
             st.lote_id,
             st.item_id,
             st.ubicacion_id,
             st.cantidad_disponible,
             st.fecha_hora_ingreso,
-            (i->>'cantidad')::NUMERIC AS cantidad_solicitada,
+            inp.cantidad AS cantidad_solicitada,
             SUM(st.cantidad_disponible) OVER (
                 PARTITION BY st.item_id ORDER BY st.fecha_hora_ingreso
             ) AS cantidad_acumulada
         FROM inventario.vw_stock_lotes_ubicacion st
-        JOIN jsonb_array_elements(p_items) i
-            ON (i->>'item_id')::INT = st.item_id
+        JOIN input_agg inp ON inp.item_id = st.item_id
     ),
     inventario_prev AS (
         SELECT
@@ -1302,10 +1419,11 @@ BEGIN
         v_prod_result := mes.registrar_produccion(v_ejecucion_id, p_datos->'produccion');
     END IF;
 
-    -- Close the execution run with actual measured params
+    -- Close the execution run with actual measured params.
+    -- fyh_fin accepts a historical timestamp for backfill; live callers omit it → NOW().
     UPDATE mes.partida_paso_ejecucion
     SET estado             = 'COMPLETADO',
-        fyh_fin            = NOW(),
+        fyh_fin            = COALESCE((p_datos->>'fyh_fin')::TIMESTAMPTZ, NOW()),
         ph_real            = COALESCE((p_datos->>'ph_real')::NUMERIC,            ph_real),
         temperatura_real   = COALESCE((p_datos->>'temperatura_real')::NUMERIC,   temperatura_real),
         relacion_bano_real = COALESCE((p_datos->>'relacion_bano_real')::NUMERIC, relacion_bano_real),
@@ -1725,8 +1843,10 @@ BEGIN
             RAISE EXCEPTION 'Cada paso debe incluir fyh_inicio y fyh_fin (paso_id=%).', v_paso_id;
         END IF;
 
-        -- Direct INSERT: ejecucion is COMPLETADO from the start with historical timestamps.
-        -- fyh_cre mirrors fyh_inicio so the row looks correct in reporting.
+        -- Insert as EN_PROCESO first so registrar_consumo_paso and registrar_produccion
+        -- can find the row via their estado = 'EN_PROCESO' guard.
+        -- fyh_fin is withheld until after inventory side-effects are written, then patched
+        -- to the historical timestamp.  fyh_cre mirrors fyh_inicio so reporting looks correct.
         -- No trigger on partida_paso_ejecucion overrides fyh_cre, so this is safe.
         INSERT INTO mes.partida_paso_ejecucion(
             partida_paso_id,
@@ -1745,9 +1865,9 @@ BEGIN
             fyh_cre
         ) VALUES (
             v_paso_id,
-            'COMPLETADO',
+            'EN_PROCESO',
             (v_paso->>'fyh_inicio')::TIMESTAMPTZ,
-            (v_paso->>'fyh_fin')::TIMESTAMPTZ,
+            NULL,                                   -- patched to historical value below
             (v_paso->>'empleado_id')::SMALLINT,
             (v_paso->>'maquina_id')::INT,
             (v_paso->>'ph_real')::NUMERIC,
@@ -1767,6 +1887,12 @@ BEGIN
         IF v_paso->'produccion' IS NOT NULL THEN
             PERFORM mes.registrar_produccion(v_ejecucion_id, v_paso->'produccion');
         END IF;
+
+        -- Seal the ejecucion with the historical end timestamp.
+        UPDATE mes.partida_paso_ejecucion
+        SET estado  = 'COMPLETADO',
+            fyh_fin = (v_paso->>'fyh_fin')::TIMESTAMPTZ
+        WHERE id = v_ejecucion_id;
 
         PERFORM mes.actualizar_estado_partida(v_partida_id);
 
@@ -1834,8 +1960,8 @@ WITH pasos AS (
     JOIN mes.partida_paso        pp    ON pp.id  = p.actividad_id
     LEFT JOIN mes.partida_paso_ejecucion pe
            ON pe.partida_paso_id = pp.id AND pe.estado = 'EN_PROCESO'
-    JOIN receta.tenido                    rt     ON rt.id   = pp.receta_id
-    JOIN color_x_cliente                  cxc    ON cxc.id  = rt.color_x_cliente_id
+    LEFT JOIN receta.tenido               rt     ON rt.id   = pp.receta_id
+    LEFT JOIN color_x_cliente             cxc    ON cxc.id  = rt.color_x_cliente_id
     LEFT JOIN color                       co     ON co.id   = cxc.color_id
     LEFT JOIN tenido                      te     ON te.id   = rt.tenido_id
     LEFT JOIN valor                       val    ON val.id  = cxc.valor_id
@@ -1849,7 +1975,6 @@ WITH pasos AS (
           SELECT 1 FROM mes.partida_paso_ejecucion pe2
           WHERE pe2.partida_paso_id = pp.id AND pe2.estado = 'COMPLETADO'
       )
-      AND pp.receta_id     IS NOT NULL
 ),
 lavados AS (
     SELECT
@@ -2726,12 +2851,17 @@ BEGIN
     -- If no pasos provided, child is created as a blank draft — planner adds steps explicitly.
     END IF;
 
+
     -- Auto-create partida_detalle for the rework child.
     -- Mirrors root's item structure; cantidad = rolls being reworked (one roll = one billing unit).
-    INSERT INTO mes.partida_detalle (partida_id, item_id, cantidad, usr_cre)
-    SELECT v_child_id, pd.item_id, jsonb_array_length(v_lotes), v_usr_id
+    INSERT INTO mes.partida_detalle (partida_id, item_id, cantidad, unidad_id, usr_cre)
+    SELECT v_child_id, pd.item_id, COUNT(l.id), pd.unidad_id, v_usr_id
     FROM mes.partida_detalle pd
-    WHERE pd.partida_id = v_root_id;
+    LEFT JOIN inventario.lote l ON l.item_id = pd.item_id
+        AND l.id IN (SELECT (e.value::TEXT)::INT FROM jsonb_array_elements(v_lotes) e)
+    WHERE pd.partida_id = v_root_id
+    GROUP BY pd.item_id, pd.unidad_id
+    HAVING COUNT(l.id) > 0;
 
     -- Case A: move input rolls (already in partida_componente of any family member).
     UPDATE mes.partida_componente
@@ -3001,6 +3131,7 @@ BEGIN
             LEFT JOIN vw_items vi_mat ON vi_mat.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_in ON lrd_in.lote_id = l.id
             WHERE opi.partida_id = p.id
+              AND opi.lote_id IS NOT NULL
         ), '[]'::jsonb),
 
         -- Finished goods produced
@@ -3043,6 +3174,18 @@ BEGIN
             LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_out ON lrd_out.lote_id = l.id
             WHERE l.documento_tipo = 'partida_paso_ejecucion'
+        ), '[]'::jsonb),
+
+        -- Direct rework partidas (partida_origen_id = this partida; no grandchildren)
+        'reprocesos', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'id',                 ph.id,
+                'codigo',             EXTRACT(YEAR FROM ph.fyh_cre)::TEXT || '-' || LPAD(ph.numero::TEXT, 4, '0'),
+                'estado_produccion',  ph.estado_produccion,
+                'estado_comercial',   ph.estado_comercial
+            ) ORDER BY ph.fyh_cre)
+            FROM mes.partida ph
+            WHERE ph.partida_origen_id = p.id
         ), '[]'::jsonb)
 
     ) INTO v_result
@@ -3266,8 +3409,8 @@ BEGIN
         WHERE COALESCE(sg.cantidad_total, 0) < c.cantidad;
 
         IF v_error_payload IS NOT NULL THEN
-            RAISE EXCEPTION 'Stock insuficiente para lavado_maquina id=%'
-                USING DETAIL = v_error_payload::text;
+            RAISE EXCEPTION 'Stock insuficiente para lavado_maquina id=%', p_id
+    USING DETAIL = v_error_payload::text;
         END IF;
 
         SELECT id INTO v_egr_tipo_id
@@ -3464,3 +3607,94 @@ GRANT EXECUTE ON FUNCTION mes.crear_lavado_maquina(JSONB)              TO authen
 GRANT EXECUTE ON FUNCTION mes.iniciar_lavado_maquina(BIGINT, JSONB)    TO authenticated;
 GRANT EXECUTE ON FUNCTION mes.finalizar_lavado_maquina(BIGINT, JSONB)  TO authenticated;
 GRANT EXECUTE ON FUNCTION mes.registrar_lavado_maquina(JSONB)          TO authenticated;
+
+-- ── mes.generar_receta_lavado_maquina ─────────────────────────────────────────
+-- Returns the wash recipe for a scheduled mes.lavado_maquina execution.
+-- Quantities are fixed (no bath-ratio scaling); every insumo is returned as-is.
+CREATE OR REPLACE FUNCTION mes.generar_receta_lavado_maquina(p_lavado_id BIGINT)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes','receta','doc'
+AS $function$
+DECLARE
+    v_usr_id   INT := get_user_id();
+    v_receta   jsonb;
+    v_message  text;
+    v_detail   text;
+    v_hint     text;
+    v_context  text;
+    v_sqlstate text;
+BEGIN
+    IF NOT jwt_has_permission('produccion.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    SELECT jsonb_build_object(
+        'lavado_maquina_id',  lm.id,
+        'receta_id',          r.id,
+        'tipo_lavado',        tlm.nombre,
+        'color_origen_id',    r.valor_origen_id,
+        'color_origen',       vo.valor,
+        'color_destino_id',   r.valor_destino_id,
+        'color_destino',      vd.valor,
+        'maquina_id',         lm.maquina_id,
+        'maquina',            jsonb_build_object('id', m.id, 'codigo', m.codigo, 'nombre', m.nombre),
+        'estado',             lm.estado,
+        'fyh_cre',            lm.fyh_cre,
+        'pasos', (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'orden',       lmp.orden,
+                    'operacion_id', ro.id,
+                    'operacion',   ro.nombre,
+                    'ph',          lmp.ph,
+                    'temperatura', lmp.temperatura,
+                    'tiempo_min',  lmp.tiempo_min,
+                    'nota',        lmp.nota,
+                    'insumos', (
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'item_id',  lmpi.item_id,
+                                'orden',    lmpi.orden,
+                                'codigo',   i.codigo,
+                                'nombre',   i.nombre,
+                                'cantidad', lmpi.cantidad,
+                                'medida',   'kg'
+                            ) ORDER BY lmpi.orden
+                        )
+                        FROM receta.lavado_maquina_paso_insumo lmpi
+                        JOIN item i ON i.id = lmpi.item_id
+                        WHERE lmpi.paso_id = lmp.id
+                    )
+                ) ORDER BY lmp.orden
+            )
+            FROM receta.lavado_maquina_paso lmp
+            JOIN receta.operacion ro ON ro.id = lmp.operacion_id
+            WHERE lmp.receta_id = r.id
+        )
+    ) INTO v_receta
+    FROM mes.lavado_maquina         lm
+    JOIN receta.lavado_maquina      r   ON r.id   = lm.receta_id
+    JOIN mes.maquina                m   ON m.id   = lm.maquina_id
+    LEFT JOIN tipo_lavado_maquina   tlm ON tlm.id = r.tipo_lavado_mq_id
+    LEFT JOIN public.valor          vo  ON vo.id  = r.valor_origen_id
+    LEFT JOIN public.valor          vd  ON vd.id  = r.valor_destino_id
+    WHERE lm.id = p_lavado_id;
+
+    IF v_receta IS NULL THEN
+        RAISE EXCEPTION 'lavado_maquina id=% no encontrado.', p_lavado_id;
+    END IF;
+
+    RETURN v_receta;
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in generar_receta_lavado_maquina - User: %, ID: %, Error: %', v_usr_id, p_lavado_id, v_message;
+    RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION mes.generar_receta_lavado_maquina(BIGINT) TO authenticated;

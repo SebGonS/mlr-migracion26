@@ -860,6 +860,54 @@ $$;
 
 
 -- ───────────────────────────────────────
+-- Immutability trigger functions
+-- Fix: RETURN NEW is NULL in DELETE triggers, which silently cancels deletions.
+-- Both functions handle UPDATE and DELETE events, so must return OLD for DELETE.
+-- ───────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION receta.fn_trg_tenido_paso_immutable()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE v_receta_id INT := COALESCE(OLD.receta_id, NEW.receta_id);
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_paso pp
+        JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+        WHERE pp.receta_id = v_receta_id
+          AND pe.estado = 'COMPLETADO'
+    ) THEN
+        RAISE EXCEPTION
+            'receta.tenido_paso id=% cannot be modified: its recipe has completed executions',
+            OLD.id;
+    END IF;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION receta.fn_trg_tenido_paso_insumo_immutable()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE v_receta_id INT;
+BEGIN
+    SELECT tp.receta_id INTO v_receta_id
+    FROM receta.tenido_paso tp
+    WHERE tp.id = COALESCE(OLD.paso_id, NEW.paso_id);
+
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_paso pp
+        JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+        WHERE pp.receta_id = v_receta_id
+          AND pe.estado = 'COMPLETADO'
+    ) THEN
+        RAISE EXCEPTION
+            'receta.tenido_paso_insumo id=% cannot be modified: its recipe has completed executions',
+            OLD.id;
+    END IF;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+END;
+$$;
+
+-- ───────────────────────────────────────
 -- GRANTS
 -- ───────────────────────────────────────
 

@@ -121,12 +121,12 @@ CREATE TABLE receta.tenido_paso (
 
 -- ── receta.tenido_paso_insumo ─────────────────────────────────
 CREATE TABLE receta.tenido_paso_insumo (
-    id       INT           GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    paso_id  INT           NOT NULL REFERENCES receta.tenido_paso(id) ON DELETE CASCADE,
-    item_id  INT           NOT NULL REFERENCES item(id),
-    cantidad NUMERIC(8,4)  NOT NULL,
-    medida   TEXT          NOT NULL DEFAULT 'g_kg' CHECK (medida IN ('g_kg', 'pct')),
-    orden    SMALLINT      NOT NULL,
+    id       INT            GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    paso_id  INT            NOT NULL REFERENCES receta.tenido_paso(id) ON DELETE CASCADE,
+    item_id  INT            NOT NULL REFERENCES item(id),
+    cantidad NUMERIC(10,6)  NOT NULL,  -- 10,6: max 9999.999999 (NUMERIC(8,6) would limit integer part to 99)
+    medida   TEXT           NOT NULL DEFAULT 'g_kg' CHECK (medida IN ('g_kg', 'pct')),
+    orden    SMALLINT       NOT NULL,
     UNIQUE(paso_id, orden)
 );
 
@@ -175,7 +175,7 @@ BEGIN
             'receta.tenido_paso id=% cannot be modified: its recipe has completed executions',
             OLD.id;
     END IF;
-    RETURN NEW;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
 END;
 $$;
 
@@ -207,7 +207,7 @@ BEGIN
             'receta.tenido_paso_insumo id=% cannot be modified: its recipe has completed executions',
             OLD.id;
     END IF;
-    RETURN NEW;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
 END;
 $$;
 
@@ -276,11 +276,11 @@ CREATE TABLE receta.lavado_maquina_paso (
 
 -- ── receta.lavado_maquina_paso_insumo ─────────────────────────
 CREATE TABLE receta.lavado_maquina_paso_insumo (
-    id       INT           GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    paso_id  INT           NOT NULL REFERENCES receta.lavado_maquina_paso(id) ON DELETE CASCADE,
-    item_id  INT           NOT NULL REFERENCES item(id),
-    cantidad NUMERIC(8,4)  NOT NULL,
-    orden    SMALLINT      NOT NULL,
+    id       INT            GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    paso_id  INT            NOT NULL REFERENCES receta.lavado_maquina_paso(id) ON DELETE CASCADE,
+    item_id  INT            NOT NULL REFERENCES item(id),
+    cantidad NUMERIC(10,6)  NOT NULL,  -- 10,6: max 9999.999999
+    orden    SMALLINT       NOT NULL,
     UNIQUE(paso_id, orden)
 );
 

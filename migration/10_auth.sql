@@ -106,6 +106,7 @@ ALTER TABLE public.cliente           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.proveedor         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.guia_remision_tipo   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.operacion            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE receta.operacion         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.maquina_tipo         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.empleado_rol         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE calidad.tipo_defecto     ENABLE ROW LEVEL SECURITY;
@@ -123,6 +124,7 @@ CREATE POLICY "auth_read" ON public.cliente           FOR SELECT TO authenticate
 CREATE POLICY "auth_read" ON public.proveedor         FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON doc.guia_remision_tipo   FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON mes.operacion            FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON receta.operacion         FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON mes.maquina_tipo         FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON mes.empleado_rol         FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON calidad.tipo_defecto     FOR SELECT TO authenticated USING (true);
@@ -151,9 +153,17 @@ CREATE POLICY "catalogos_update" ON public.color           FOR UPDATE TO authent
 CREATE POLICY "catalogos_insert" ON calidad.tipo_defecto   FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('catalogos.editar'));
 CREATE POLICY "catalogos_update" ON calidad.tipo_defecto   FOR UPDATE TO authenticated USING (jwt_has_permission('catalogos.editar'));
 
+-- Production config — produccion.configurar
+CREATE POLICY "catalogos_insert" ON public.articulo        FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('produccion.configurar'));
+CREATE POLICY "catalogos_update" ON public.articulo        FOR UPDATE TO authenticated USING (jwt_has_permission('produccion.configurar'));
+GRANT INSERT, UPDATE ON public.articulo TO authenticated;
+
 -- Production/system config — configuracion.admin only
 CREATE POLICY "catalogos_insert" ON mes.operacion          FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.admin'));
 CREATE POLICY "catalogos_update" ON mes.operacion          FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.admin'));
+CREATE POLICY "catalogos_insert" ON receta.operacion       FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.admin'));
+CREATE POLICY "catalogos_update" ON receta.operacion       FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.admin'));
+GRANT INSERT, UPDATE ON receta.operacion TO authenticated;
 CREATE POLICY "catalogos_insert" ON mes.maquina_tipo       FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.admin'));
 CREATE POLICY "catalogos_update" ON mes.maquina_tipo       FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.admin'));
 CREATE POLICY "catalogos_insert" ON mes.empleado_rol       FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.admin'));
