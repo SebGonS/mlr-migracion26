@@ -761,7 +761,8 @@ GROUP BY pd.partida_id, a.id, a.nombre, a.articulo_tipo_id, at.nombre, a.fibra
 ORDER BY 1, 2;
 
 
--- ── mes.vw_maquinas ───────────────────────────────────────────
+-- ── mes.vw_maquinas ───────────────────────────────────────────}
+drop view if exists mes.vw_maquinas;
 CREATE OR REPLACE VIEW mes.vw_maquinas AS
 SELECT
     m.id,
@@ -770,9 +771,13 @@ SELECT
     m.maquina_tipo_id,
     mt.codigo AS maquina_tipo_codigo,
     mt.nombre AS maquina_tipo_nombre,
+    mt.operacion_id,
+    m.capacidad_min_kg,
+    o.codigo   AS operacion_codigo,
     m.relacion_bano
 FROM mes.maquina m
-LEFT JOIN mes.maquina_tipo mt ON mt.id = m.maquina_tipo_id;
+LEFT JOIN mes.maquina_tipo mt ON mt.id = m.maquina_tipo_id
+LEFT JOIN mes.operacion o     ON o.id  = mt.operacion_id;
 
 -- ── mes.vw_partida_produccion_rollos ──────────────────────────
 CREATE OR REPLACE VIEW mes.vw_partida_produccion_rollos AS
@@ -793,7 +798,6 @@ GROUP BY p.id, l.item_id, vi.item_codigo, vi.item_nombre;
 -- ── inventario.vw_stock_items ─────────────────────────────────
 -- Item-level stock totals, location-agnostic — reads item_saldo (≈ SAP MARD).
 -- O(1) per item: no aggregation over lot history. Used by availability gates.
-DROP VIEW IF EXISTS inventario.vw_stock_general CASCADE;
 CREATE OR REPLACE VIEW inventario.vw_stock_items AS
 SELECT
     vi.item_id, vi.item_codigo, vi.item_nombre,
@@ -802,10 +806,9 @@ SELECT
     vi.unidad_id, vi.unidad_codigo
 FROM inventario.item_saldo si
 JOIN vw_items vi ON vi.item_id = si.item_id
-WHERE si.cantidad_actual > 0
+WHERE si.cantidad_actual != 0
 GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre,
          vi.item_tipo_id, vi.item_tipo_codigo, vi.unidad_id, vi.unidad_codigo;
-
 -- ── inventario.vw_stock_items_ubicacion ───────────────────────
 -- Item stock by location — exposes ubicacion_id for location-scoped checks.
 CREATE OR REPLACE VIEW inventario.vw_stock_items_ubicacion AS
@@ -817,7 +820,7 @@ SELECT
     vi.unidad_id, vi.unidad_codigo
 FROM inventario.item_saldo si
 JOIN vw_items vi ON vi.item_id = si.item_id
-WHERE si.cantidad_actual > 0;
+WHERE si.cantidad_actual != 0;
 
 -- ── inventario.vw_stock_items_valorado ───────────────────────
 -- Item stock + MAP valuation (≈ SAP MB52). Financial view only — not for
@@ -827,14 +830,19 @@ CREATE OR REPLACE VIEW inventario.vw_stock_items_valorado AS
 SELECT
     vi.item_id, vi.item_codigo, vi.item_nombre,
     vi.item_tipo_id, vi.item_tipo_codigo,
-    SUM(si.cantidad_actual)   AS cantidad_total,
+    SUM(si.cantidad_actual)                                  AS cantidad_total,
     vi.unidad_id, vi.unidad_codigo,
     iv.precio_promedio,
-    iv.stock_valorado
+    -- When stock is negative the MAP-maintained stock_valorado floors at 0 and
+    -- is stale. Compute from net quantity × MAP price instead.
+    CASE
+        WHEN SUM(si.cantidad_actual) >= 0 THEN iv.stock_valorado
+        ELSE ROUND((SUM(si.cantidad_actual) * COALESCE(iv.precio_promedio, 0))::numeric, 4)
+    END::NUMERIC(16,4)                                       AS stock_valorado
 FROM inventario.item_saldo si
-JOIN  vw_items vi                    ON vi.item_id = si.item_id
+JOIN  vw_items vi                       ON vi.item_id = si.item_id
 LEFT JOIN inventario.item_valoracion iv ON iv.item_id = si.item_id
-WHERE si.cantidad_actual > 0
+WHERE si.cantidad_actual != 0
 GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre,
          vi.item_tipo_id, vi.item_tipo_codigo,
          vi.unidad_id, vi.unidad_codigo,
@@ -1078,11 +1086,25 @@ LEFT JOIN vw_items vi ON vi.item_id = sa.item_id
 LEFT JOIN inventario.lote l ON l.id = sa.lote_id;
 
 -- ── calidad.vw_lotes_pendientes_inspeccion ────────────────────
--- Shows all ROLLO lotes pending QC:
---   Output rolls: created by a partida_paso_ejecucion (always eligible)
---   Input rolls:  assigned via partida_componente to an EN_PRODUCCION partida
--- Step/machine context comes from the ejecucion path (NULL for input rolls).
--- Partida context is resolved from whichever path applies.
+-- Three QC eligibility paths:
+--
+--   Path A — pure output roll (pc.lote_id IS NULL):
+--     Lote was created by a partida_paso_ejecucion and is not a rework input.
+--     Inspectable once against the ejecucion that created it.
+--
+--   Path B — original input roll (pc.lote_id IS NOT NULL, documento_tipo != 'partida_paso_ejecucion'):
+--     Raw fabric roll assigned to a partida via partida_componente.
+--     Inspectable per paso, as long as not yet consumed (lote_saldo > 0).
+--
+--   Path C — rework input roll (pc.lote_id IS NOT NULL, documento_tipo = 'partida_paso_ejecucion'):
+--     Output lote from a previous partida now assigned as input to a rework child
+--     (crear_reproceso Case B). Pe.id points to the OLD ejecucion; active_ppe resolves
+--     the CURRENT rework paso. The old inspection is irrelevant here.
+--     Treated identically to Path B — pc.lote_id IS NOT NULL is the discriminator.
+--
+-- The lateral fires for Paths B and C (pc.lote_id IS NOT NULL).
+-- All context columns (ejecucion, paso, operacion, maquina, partida) are sourced from
+-- active_ppe/pc for Paths B+C, and from pe/pp for Path A.
 -- DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion;
 CREATE OR REPLACE VIEW calidad.vw_lotes_pendientes_inspeccion AS
 SELECT
@@ -1093,8 +1115,14 @@ SELECT
     vi.item_nombre,
     l.documento_tipo,
     l.documento_id,
-    COALESCE(pe.id,     active_ppe.ejecucion_id)        AS partida_paso_ejecucion_id,
-    COALESCE(pp.id,     active_ppe.paso_id)             AS partida_paso_id,
+    CASE WHEN pc.lote_id IS NOT NULL
+         THEN active_ppe.ejecucion_id
+         ELSE pe.id
+    END                                                 AS partida_paso_ejecucion_id,
+    CASE WHEN pc.lote_id IS NOT NULL
+         THEN active_ppe.paso_id
+         ELSE pp.id
+    END                                                 AS partida_paso_id,
     m.id                                                AS maquina_id,
     m.codigo                                            AS maquina_codigo,
     o.id                                                AS operacion_id,
@@ -1117,7 +1145,9 @@ LEFT JOIN mes.partida_paso_ejecucion pe
     ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
 LEFT JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
 LEFT JOIN mes.partida_componente pc ON pc.lote_id = l.id
--- For input rolls: resolve the currently active paso ejecucion in the assigned partida
+-- Fires for Paths B and C: any lote in partida_componente (original input or rework input).
+-- EN_PROCESO takes priority; falls back to most recently started COMPLETADO paso so rolls
+-- remain inspectable in the window between step completion and next step starting.
 LEFT JOIN LATERAL (
     SELECT ppe.id           AS ejecucion_id,
            ppe.maquina_id   AS active_maquina_id,
@@ -1126,27 +1156,45 @@ LEFT JOIN LATERAL (
     FROM mes.partida_paso_ejecucion ppe
     JOIN mes.partida_paso pp2 ON pp2.id = ppe.partida_paso_id
     WHERE pp2.partida_id = pc.partida_id
-      AND ppe.estado = 'EN_PROCESO'
-      AND pe.id IS NULL
+      AND ppe.estado IN ('EN_PROCESO', 'COMPLETADO')
+    ORDER BY
+        CASE WHEN ppe.estado = 'EN_PROCESO' THEN 0 ELSE 1 END,
+        pp2.secuencia DESC,
+        ppe.fyh_inicio DESC
     LIMIT 1
-) active_ppe ON true
-LEFT JOIN mes.operacion o ON o.id = COALESCE(pp.operacion_id, active_ppe.active_operacion_id)
-LEFT JOIN mes.maquina m   ON m.id = COALESCE(pe.maquina_id,   active_ppe.active_maquina_id)
-LEFT JOIN mes.partida p ON p.id = COALESCE(pp.partida_id, pc.partida_id)
+) active_ppe ON pc.lote_id IS NOT NULL
+LEFT JOIN mes.operacion o ON o.id = CASE WHEN pc.lote_id IS NOT NULL
+                                         THEN active_ppe.active_operacion_id
+                                         ELSE pp.operacion_id END
+LEFT JOIN mes.maquina m   ON m.id = CASE WHEN pc.lote_id IS NOT NULL
+                                         THEN active_ppe.active_maquina_id
+                                         ELSE pe.maquina_id END
+LEFT JOIN mes.partida p   ON p.id = CASE WHEN pc.lote_id IS NOT NULL
+                                         THEN pc.partida_id
+                                         ELSE pp.partida_id END
 LEFT JOIN tercero c    ON c.id  = l.propietario_id
 LEFT JOIN prioridad pr ON pr.id = p.prioridad_id
 WHERE (
-    -- Output roll: ejecucion exists, no inspection recorded for it yet
-    (pe.id IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM calidad.inspeccion ci
-        WHERE ci.lote_id = l.id AND ci.partida_paso_ejecucion_id = pe.id
-    ))
+    -- Path A: pure output roll — inspectable once against the creating ejecucion
+    (pc.lote_id IS NULL
+     AND pe.id IS NOT NULL
+     AND NOT EXISTS (
+         SELECT 1 FROM calidad.inspeccion ci
+         WHERE ci.lote_id = l.id AND ci.partida_paso_ejecucion_id = pe.id
+     ))
     OR
-    -- Input roll: currently active in a paso, no inspection recorded for that paso yet
-    (active_ppe.ejecucion_id IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM calidad.inspeccion ci
-        WHERE ci.lote_id = l.id AND ci.partida_paso_ejecucion_id = active_ppe.ejecucion_id
-    ))
+    -- Paths B+C: input roll (original or rework re-entry) — inspectable per paso.
+    -- lote_saldo guard drops consumed rolls once PROD_CONSUMO is posted.
+    (pc.lote_id IS NOT NULL
+     AND active_ppe.ejecucion_id IS NOT NULL
+     AND NOT EXISTS (
+         SELECT 1 FROM calidad.inspeccion ci
+         WHERE ci.lote_id = l.id AND ci.partida_paso_ejecucion_id = active_ppe.ejecucion_id
+     )
+     AND EXISTS (
+         SELECT 1 FROM inventario.lote_saldo ls
+         WHERE ls.lote_id = l.id AND ls.cantidad_actual > 0
+     ))
 );
 
 -- ── calidad.vw_inspecciones ───────────────────────────────────
@@ -1257,6 +1305,7 @@ WHERE e.activo = true;
 -- Execution columns (estado, fyh_inicio/fin, maquina, empleado) come from the
 -- latest partida_paso_ejecucion row — they were removed from partida_paso in step 04.
 -- maquina_planificada_id replaces the dropped maquina_asignada_id on partida_paso.
+DROP VIEW IF EXISTS mes.vw_pasos;
 CREATE OR REPLACE VIEW mes.vw_pasos AS
 SELECT
     pp.id                                                                  AS paso_id,
@@ -1295,6 +1344,22 @@ SELECT
     pe.relacion_bano_real,
     pe.cantidad,
     pe.notas,
+    pe.ancho_entrada,
+    pe.ancho_salida,
+    pe.velocidad,
+    pe.entrada,
+    pe.salida,
+    pe.rendimiento,
+    pe.pases,
+    pe.malla_alimentacion,
+    -- TERMOFIJADO extension
+    pt.ancho_marco,
+    pt.vel_maquina,
+    pt.vel_alimentacion,
+    pt.densidad_entrada,
+    pt.densidad_salida,
+    pt.lm,
+    pt.galga,
     -- Scheduling context
     prog.id                                                                AS programacion_id,
     prog.fecha                                                             AS fecha_programada,
@@ -1314,13 +1379,16 @@ LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
 LEFT JOIN LATERAL (
     SELECT id, estado, maquina_id, empleado_id,
            fyh_inicio, fyh_fin, ph_real, temperatura_real,
-           relacion_bano_real, cantidad, notas
+           relacion_bano_real, cantidad, notas,
+           ancho_entrada, ancho_salida, velocidad,
+           entrada, salida, rendimiento, pases, malla_alimentacion
     FROM mes.partida_paso_ejecucion
     WHERE partida_paso_id = pp.id
     ORDER BY fyh_inicio DESC NULLS LAST
     LIMIT 1
 ) pe ON true
 LEFT JOIN mes.maquina m ON m.id = COALESCE(pe.maquina_id, pp.maquina_planificada_id)
+LEFT JOIN mes.partida_paso_ejecucion_termofijado pt ON pt.ejecucion_id = pe.id
 LEFT JOIN mes.programacion prog ON prog.actividad_tipo = 'partida_paso'
                                 AND prog.actividad_id  = pp.id;
 
@@ -1613,6 +1681,7 @@ SELECT
     p.id                                                                      AS partida_id,
     EXTRACT(YEAR FROM p.fyh_cre)::TEXT
         || '-' || LPAD(p.numero::TEXT, 4, '0')                              AS partida_codigo,
+    p.partida_origen_id,
     p.tercero_id,
     ter.nombre                                                                AS cliente,
     p.color_x_cliente_id,
@@ -1737,9 +1806,7 @@ GRANT USAGE ON SCHEMA inventario TO authenticated;
 GRANT USAGE ON SCHEMA calidad    TO authenticated;
 GRANT INSERT ON calidad.inspeccion      TO authenticated;
 GRANT INSERT ON calidad.inspeccion_foto TO authenticated;
-GRANT INSERT, UPDATE ON mes.operacion   TO authenticated;
-
-
+GRANT SELECT,INSERT, UPDATE ON mes.operacion   TO authenticated;
 /*
 -- ═══════════════════════════════════════════════════════════════
 -- REVERSAL — undoes step 8 in full. Run then comment back out.

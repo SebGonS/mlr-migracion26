@@ -342,6 +342,122 @@ $$;
 
 
 -- ───────────────────────────────────────────────────────────────
+-- inventario.registrar_ajuste
+-- Emergency admin adjustment for known saldo drift.
+-- Positive p_cantidad → AJUSTE_POS (creates a new lote, credits stock).
+-- Negative p_cantidad → AJUSTE_NEG (FIFO debit from existing lotes).
+-- Requires inventario.editar. observacion is mandatory.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION inventario.registrar_ajuste(
+    p_item_id       INT,
+    p_ubicacion_id  INT,
+    p_cantidad      NUMERIC,
+    p_observacion   TEXT
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes'
+AS $$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id            int := get_user_id();
+    v_doc_movimiento_id BIGINT;
+    v_tipo_id           SMALLINT;
+    v_lote_id           INT;
+    v_precio            NUMERIC(12,4);
+    v_fifo_result       JSONB;
+BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF p_cantidad = 0 THEN
+        RAISE EXCEPTION 'La cantidad del ajuste no puede ser cero.';
+    END IF;
+
+    IF p_observacion IS NULL OR trim(p_observacion) = '' THEN
+        RAISE EXCEPTION 'La observación es obligatoria para registrar un ajuste.';
+    END IF;
+
+    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
+
+    SELECT COALESCE(iv.precio_promedio, 0)
+    INTO v_precio
+    FROM inventario.item_valoracion iv
+    WHERE iv.item_id = p_item_id;
+
+    IF p_cantidad > 0 THEN
+        -- AJUSTE_POS: create a new lote and credit stock
+        SELECT id INTO v_tipo_id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS';
+
+        INSERT INTO inventario.lote (item_id, documento_tipo, cantidad)
+        VALUES (p_item_id, 'AJUSTE', p_cantidad)
+        RETURNING id INTO v_lote_id;
+
+        INSERT INTO inventario.item_movimientos (
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            destino_ubicacion_id, cantidad, precio_unitario,
+            documento_tipo, documento_id, observacion
+        ) VALUES (
+            v_doc_movimiento_id, p_item_id, v_lote_id, v_tipo_id,
+            p_ubicacion_id, p_cantidad, v_precio,
+            'AJUSTE', v_lote_id, p_observacion
+        );
+
+    ELSE
+        -- AJUSTE_NEG: FIFO debit from existing lotes
+        SELECT id INTO v_tipo_id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG';
+
+        v_fifo_result := mes.calcular_fifo(
+            jsonb_build_array(jsonb_build_object('item_id', p_item_id, 'cantidad', ABS(p_cantidad)))
+        );
+
+        IF v_fifo_result IS NULL OR jsonb_array_length(v_fifo_result) = 0 THEN
+            RAISE EXCEPTION 'Stock insuficiente para registrar ajuste negativo de % en item #%.',
+                ABS(p_cantidad), p_item_id;
+        END IF;
+
+        INSERT INTO inventario.item_movimientos (
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, cantidad, precio_unitario,
+            documento_tipo, documento_id, observacion
+        )
+        SELECT
+            v_doc_movimiento_id,
+            (f->>'item_id')::INT,
+            (f->>'lote_id')::INT,
+            v_tipo_id,
+            (f->>'ubicacion_id')::INT,
+            (f->>'cantidad')::NUMERIC,
+            v_precio,
+            'AJUSTE', v_doc_movimiento_id, p_observacion
+        FROM jsonb_array_elements(v_fifo_result) f;
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_ajuste', v_usr_id, jsonb_build_object(
+        'item_id', p_item_id, 'ubicacion_id', p_ubicacion_id,
+        'cantidad', p_cantidad, 'observacion', p_observacion
+    ));
+
+    RETURN format('Ajuste de % registrado para item #% (doc #%).',
+                  p_cantidad, p_item_id, v_doc_movimiento_id);
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_ajuste - User: %, item: %, Error: %, Detail: %',
+              v_usr_id, p_item_id, v_message, v_detail;
+    RAISE;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION inventario.registrar_ajuste(INT, INT, NUMERIC, TEXT) TO authenticated;
+
+
+-- ───────────────────────────────────────────────────────────────
 -- inventario.get_item_movimientos_cuadre
 -- Returns movement history for one item in the time window covered
 -- by the given cuadre (previous cuadre close → this cuadre snapshot).

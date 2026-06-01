@@ -74,6 +74,8 @@ $$;
 -- Unit conversion via item_insumo_detalle.medida (canonical unit per item):
 --   g/L → quantity × 5 L/kg liquor ratio ÷ 1000 g/kg  (matches legacy view logic)
 --   %   → quantity × 10 g/L per % ÷ 1000 g/kg
+-- factor_stock applied after unit conversion: recipe quantities are in usage-form units
+-- (e.g. diluted solution), price is per solid-equivalent kg from stock.
 --
 -- Price source priority:
 --   1. Most recent doc.factura_proveedor_detalle.precio_unitario
@@ -96,6 +98,7 @@ AS $$
                 WHEN '%'   THEN (10.0 / 1000.0)
                 ELSE            (1.0  / 1000.0)
               END
+            * iid.factor_stock
             * COALESCE(
                 -- Authoritative: latest supplier invoice line (ex-IGV)
                 (

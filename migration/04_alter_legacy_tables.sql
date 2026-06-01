@@ -47,6 +47,8 @@ FOR EACH ROW EXECUTE FUNCTION public.fn_trg_gen_codigo_color();
 
 -- ── color_x_cliente ────────────────────────────────────────────
 ALTER TABLE color_x_cliente ADD COLUMN IF NOT EXISTS hex text;
+-- cliente_id replaced by tercero_id linkage; drop NOT NULL if it existed in production
+ALTER TABLE color_x_cliente ALTER COLUMN cliente_id DROP NOT NULL;
 
 -- ── estado ─────────────────────────────────────────────────────
 ALTER TABLE estado
