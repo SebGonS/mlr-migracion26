@@ -80,7 +80,7 @@ BEGIN
         INSERT INTO item_insumo_detalle (item_id, medida, insumo_tipo_id, colorante_tipo_id)
         VALUES (
             p_item_id,
-            p_item->>'medida',
+            (p_item->>'medida')::medida_enum,
             (p_item->>'insumo_tipo_id')::SMALLINT,
             CASE
                 WHEN p_item ? 'colorante_tipo_id' THEN (p_item->>'colorante_tipo_id')::SMALLINT

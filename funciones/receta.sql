@@ -79,7 +79,7 @@ END;$$;
 -- Transitions a recipe to a new state.
 --
 -- On APROBADO: atomically moves any existing approved recipe for the
--- same spec (color × articulo × tenido × antipilling) to HISTORICO
+-- same spec (color × articulo × tenido × antipilling × tipo_receta) to HISTORICO
 -- before approving this one. The partial unique index then allows
 -- the new APROBADO to be committed cleanly.
 --
@@ -171,6 +171,7 @@ BEGIN
           AND fibra              = v_receta.fibra
           AND tenido_id          = v_receta.tenido_id
           AND flg_antipilling    = v_receta.flg_antipilling
+          AND tipo_receta_id     IS NOT DISTINCT FROM v_receta.tipo_receta_id
           AND flg_produccion     = true   -- trigger-maintained: true only when APROBADO
           AND id                <> p_receta_id;
     END IF;
@@ -190,18 +191,20 @@ END;$$;
 -- Returns the full recipe as JSONB: header + ordered pasos + insumos per paso.
 -- Returns NULL if p_receta_id does not exist.
 -- ───────────────────────────────────────
-
+-- SELECT * FROM vw_colores
 CREATE OR REPLACE FUNCTION receta.get_tenido(p_receta_id INT)
 RETURNS JSONB
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-SET search_path TO 'iam', 'public', 'receta'
+SET search_path TO 'iam', 'public', 'receta', 'doc'
 AS $$
     SELECT jsonb_build_object(
         'id',                 t.id,
         'color_x_cliente_id', t.color_x_cliente_id,
         'color_nombre',       vc.color,
+        'tercero_nombre',      vc.cliente,
+        'tercero_id',          vc.tercero_id,
         'color_hex',          vc.color_x_cliente_hex,
         'articulo_tipo_id',   t.articulo_tipo_id,
         'articulo_nombre',    at.nombre,
@@ -217,6 +220,7 @@ AS $$
         'flg_produccion',     t.flg_produccion,
         'fyh_produccion',     t.fyh_produccion,
         'fyh_cre',            t.fyh_cre,
+        'costo_estimado_kg',  doc.fn_get_costo_receta(t.id),
         'pasos', COALESCE((
             SELECT jsonb_agg(
                 jsonb_build_object(
@@ -237,11 +241,34 @@ AS $$
                                 'item_codigo', i.codigo,
                                 'item_nombre', i.nombre,
                                 'cantidad',    tpi.cantidad,
+                                'medida',      iid.medida,
+                                'factor_stock', iid.factor_stock,
+                                'precio_kg',   pr.precio_kg,
+                                'costo_linea', ROUND(
+                                    tpi.cantidad
+                                    * CASE iid.medida
+                                        WHEN 'g/L' THEN (5.0  / 1000.0)
+                                        WHEN '%'   THEN (10.0 / 1000.0)
+                                        ELSE            (1.0  / 1000.0)
+                                      END
+                                    * iid.factor_stock
+                                    * COALESCE(pr.precio_kg, 0),
+                                    4
+                                ),
                                 'orden',       tpi.orden
                             ) ORDER BY tpi.orden
                         )
                         FROM receta.tenido_paso_insumo tpi
                         JOIN public.item i ON i.id = tpi.item_id
+                        JOIN public.item_insumo_detalle iid ON iid.item_id = tpi.item_id
+                        LEFT JOIN LATERAL (
+                            SELECT COALESCE(
+                                (SELECT fpd.precio_unitario FROM doc.factura_proveedor_detalle fpd
+                                 WHERE fpd.item_id = tpi.item_id ORDER BY fpd.fyh_cre DESC LIMIT 1),
+                                (SELECT cd.precio_unitario FROM doc.compra_detalle cd
+                                 WHERE cd.item_id = tpi.item_id ORDER BY cd.fyh_cre DESC LIMIT 1)
+                            ) AS precio_kg
+                        ) pr ON true
                         WHERE tpi.paso_id = tp.id
                     ), '[]'::jsonb)
                 ) ORDER BY tp.orden
@@ -260,8 +287,9 @@ AS $$
     WHERE t.id = p_receta_id;
 $$;
 
+-- SELECT receta.get_tenido(5431)
 
--- ───────────────────────────────────────
+
 -- actualizar_tenido
 -- Updates header fields and optionally replaces all pasos + insumos.
 -- Guard: only allowed in EN_DESARROLLO or RE_LAB states.

@@ -14,6 +14,9 @@
 -- Parameters (edit before running):
 --   v_guia_remision_id  : the guia_remision.id to set AS the new documento_id
 --   v_partida_id        : the partida.id currently on the rows to fix
+--   v_item_ids          : item filter — leave empty to process ALL items in the partida
+--                         populate to restrict to specific items (e.g. one guia covers
+--                         only the rib rolls, another covers the regular rolls)
 --
 -- Steps (in order):
 --   1. INSERT into doc.guia_remision_detalle (item_id, lote_id, cantidad) from the target lotes
@@ -42,32 +45,33 @@ FROM   inventario.lote
 WHERE  documento_tipo = 'GUIA_REMISION'
 AND    documento_id   = 681;    -- ← v_guia_remision_id
 */
-
+SELECT * FROM doc.guia_remision WHERE correlativo IN ('394','481' )
 -- ── EXECUTE BLOCK ─────────────────────────────────────────────
 -- Wrap the DO body in BEGIN / ROLLBACK for a rehearsal run;
 -- swap to COMMIT (or remove the savepoint wrapper) when ready.
 -- -------------------------------------------------------------
 DO $$
 DECLARE
-    v_guia_remision_id  INT := 681;   -- ← CHANGE THIS  (new documento_id to set)
-    v_partida_id        INT := 5190;  -- ← CHANGE THIS  (current documento_id to match)
+    v_guia_remision_id  INT   := 700;             -- ← CHANGE THIS  (new documento_id to set)
+    v_partida_id        INT   := 5194;            -- ← CHANGE THIS  (current documento_id to match)
+    v_item_ids          INT[] := ARRAY[]::INT[];  -- ← CHANGE or leave empty for all items
 
     v_grd_inserted      INT;
     v_lotes_updated     INT;
     v_movs_updated      INT;
 BEGIN
-    RAISE NOTICE 'Reassigning PARTIDA % → GUIA_REMISION % ...', v_partida_id, v_guia_remision_id;
+    RAISE NOTICE 'Reassigning PARTIDA % → GUIA_REMISION % (item filter: %) ...',
+        v_partida_id, v_guia_remision_id,
+        CASE WHEN cardinality(v_item_ids) > 0 THEN v_item_ids::TEXT ELSE 'ALL' END;
 
     -- 1. Insert guia_remision_detalle rows from the target lotes
-    --    (reads lote before the update so item_id / lote_id / cantidad are still queryable)
     INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, lote_id, cantidad)
-    SELECT v_guia_remision_id,
-           l.item_id,
-           l.id,  
-           l.cantidad
+    SELECT v_guia_remision_id, l.item_id, l.id, l.cantidad
     FROM   inventario.lote l
     WHERE  l.documento_tipo = 'PARTIDA'
-      AND  l.documento_id   = v_partida_id;
+      AND  l.documento_id   = v_partida_id
+      AND  (cardinality(v_item_ids) = 0 OR l.item_id = ANY(v_item_ids))
+    ON CONFLICT (guia_remision_id, item_id, lote_id, ubicacion_id) DO NOTHING;
 
     GET DIAGNOSTICS v_grd_inserted = ROW_COUNT;
     RAISE NOTICE '  doc.guia_remision_detalle rows inserted: %', v_grd_inserted;
@@ -77,17 +81,24 @@ BEGIN
     SET    documento_tipo = 'GUIA_REMISION',
            documento_id   = v_guia_remision_id
     WHERE  documento_tipo = 'PARTIDA'
-      AND  documento_id   = v_partida_id;
+      AND  documento_id   = v_partida_id
+      AND  (cardinality(v_item_ids) = 0 OR item_id = ANY(v_item_ids));
 
     GET DIAGNOSTICS v_lotes_updated = ROW_COUNT;
     RAISE NOTICE '  inventario.lote rows updated: %', v_lotes_updated;
 
     -- 3. Update inventario.item_movimientos
-    UPDATE inventario.item_movimientos
+    --    Join lote (already flipped in step 2) to apply the item filter
+    UPDATE inventario.item_movimientos m
     SET    documento_tipo = 'GUIA_REMISION',
            documento_id   = v_guia_remision_id
-    WHERE  documento_tipo = 'PARTIDA'
-      AND  documento_id   = v_partida_id;
+    FROM   inventario.lote l
+    WHERE  m.lote_id        = l.id
+      AND  m.documento_tipo = 'PARTIDA'
+      AND  m.documento_id   = v_partida_id
+      AND  l.documento_tipo = 'GUIA_REMISION'    -- lote already flipped in step 2
+      AND  l.documento_id   = v_guia_remision_id
+      AND  (cardinality(v_item_ids) = 0 OR l.item_id = ANY(v_item_ids));
 
     GET DIAGNOSTICS v_movs_updated = ROW_COUNT;
     RAISE NOTICE '  inventario.item_movimientos rows updated: %', v_movs_updated;

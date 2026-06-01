@@ -1,7 +1,7 @@
 ﻿-- =============================================================================
 -- Step 10: Authorization — JWT hook and RLS policies
 -- get_user_id() is defined in step 3 (migration/03_base_functions.sql).
--- Re-running is safe (CREATE OR REPLACE / IF NOT EXISTS).
+-- Re-running is safe: functions use CREATE OR REPLACE; policies use DROP IF EXISTS + CREATE.
 -- =============================================================================
 
 
@@ -112,6 +112,24 @@ ALTER TABLE mes.empleado_rol         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE calidad.tipo_defecto     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE inventario.item_movimiento_tipo ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "auth_read" ON public.unidad;
+DROP POLICY IF EXISTS "auth_read" ON public.unidad_conversion;
+DROP POLICY IF EXISTS "auth_read" ON public.item_tipo;
+DROP POLICY IF EXISTS "auth_read" ON public.insumo_tipo;
+DROP POLICY IF EXISTS "auth_read" ON public.colorante_tipo;
+DROP POLICY IF EXISTS "auth_read" ON public.articulo_tipo;
+DROP POLICY IF EXISTS "auth_read" ON public.articulo;
+DROP POLICY IF EXISTS "auth_read" ON public.color;
+DROP POLICY IF EXISTS "auth_read" ON public.cliente;
+DROP POLICY IF EXISTS "auth_read" ON public.proveedor;
+DROP POLICY IF EXISTS "auth_read" ON doc.guia_remision_tipo;
+DROP POLICY IF EXISTS "auth_read" ON mes.operacion;
+DROP POLICY IF EXISTS "auth_read" ON receta.operacion;
+DROP POLICY IF EXISTS "auth_read" ON mes.maquina_tipo;
+DROP POLICY IF EXISTS "auth_read" ON mes.empleado_rol;
+DROP POLICY IF EXISTS "auth_read" ON calidad.tipo_defecto;
+DROP POLICY IF EXISTS "auth_read" ON inventario.item_movimiento_tipo;
+
 CREATE POLICY "auth_read" ON public.unidad            FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON public.unidad_conversion FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON public.item_tipo         FOR SELECT TO authenticated USING (true);
@@ -142,6 +160,29 @@ CREATE POLICY "auth_read" ON inventario.item_movimiento_tipo FOR SELECT TO authe
 -- -----------------------------------------------------------------------------
 
 -- Master data — catalogos.editar
+DROP POLICY IF EXISTS "catalogos_insert" ON public.unidad;
+DROP POLICY IF EXISTS "catalogos_update" ON public.unidad;
+DROP POLICY IF EXISTS "catalogos_insert" ON public.insumo_tipo;
+DROP POLICY IF EXISTS "catalogos_update" ON public.insumo_tipo;
+DROP POLICY IF EXISTS "catalogos_insert" ON public.colorante_tipo;
+DROP POLICY IF EXISTS "catalogos_update" ON public.colorante_tipo;
+DROP POLICY IF EXISTS "catalogos_insert" ON public.color;
+DROP POLICY IF EXISTS "catalogos_update" ON public.color;
+DROP POLICY IF EXISTS "catalogos_insert" ON calidad.tipo_defecto;
+DROP POLICY IF EXISTS "catalogos_update" ON calidad.tipo_defecto;
+DROP POLICY IF EXISTS "catalogos_insert" ON public.articulo;
+DROP POLICY IF EXISTS "catalogos_update" ON public.articulo;
+DROP POLICY IF EXISTS "catalogos_insert" ON public.articulo_tipo;
+DROP POLICY IF EXISTS "catalogos_update" ON public.articulo_tipo;
+DROP POLICY IF EXISTS "catalogos_insert" ON mes.operacion;
+DROP POLICY IF EXISTS "catalogos_update" ON mes.operacion;
+DROP POLICY IF EXISTS "catalogos_insert" ON receta.operacion;
+DROP POLICY IF EXISTS "catalogos_update" ON receta.operacion;
+DROP POLICY IF EXISTS "catalogos_insert" ON mes.maquina_tipo;
+DROP POLICY IF EXISTS "catalogos_update" ON mes.maquina_tipo;
+DROP POLICY IF EXISTS "catalogos_insert" ON mes.empleado_rol;
+DROP POLICY IF EXISTS "catalogos_update" ON mes.empleado_rol;
+
 CREATE POLICY "catalogos_insert" ON public.unidad          FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('catalogos.editar'));
 CREATE POLICY "catalogos_update" ON public.unidad          FOR UPDATE TO authenticated USING (jwt_has_permission('catalogos.editar'));
 CREATE POLICY "catalogos_insert" ON public.insumo_tipo     FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('catalogos.editar'));
@@ -157,6 +198,11 @@ CREATE POLICY "catalogos_update" ON calidad.tipo_defecto   FOR UPDATE TO authent
 CREATE POLICY "catalogos_insert" ON public.articulo        FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('produccion.configurar'));
 CREATE POLICY "catalogos_update" ON public.articulo        FOR UPDATE TO authenticated USING (jwt_has_permission('produccion.configurar'));
 GRANT INSERT, UPDATE ON public.articulo TO authenticated;
+
+-- System config — configuracion.admin only
+CREATE POLICY "catalogos_insert" ON public.articulo_tipo   FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.admin'));
+CREATE POLICY "catalogos_update" ON public.articulo_tipo   FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.admin'));
+GRANT INSERT, UPDATE ON public.articulo_tipo TO authenticated;
 
 -- Production/system config — configuracion.admin only
 CREATE POLICY "catalogos_insert" ON mes.operacion          FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.admin'));
@@ -185,6 +231,16 @@ ALTER TABLE inventario.item_movimientos           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE inventario.pesaje                     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE inventario.lote_rollo_detalle         ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "inventario_ver" ON public.item;
+DROP POLICY IF EXISTS "inventario_ver" ON public.item_insumo_detalle;
+DROP POLICY IF EXISTS "inventario_ver" ON public.item_rollo_detalle;
+DROP POLICY IF EXISTS "inventario_ver" ON inventario.almacen;
+DROP POLICY IF EXISTS "inventario_ver" ON inventario.ubicacion;
+DROP POLICY IF EXISTS "inventario_ver" ON inventario.lote;
+DROP POLICY IF EXISTS "inventario_ver" ON inventario.item_movimientos;
+DROP POLICY IF EXISTS "inventario_ver" ON inventario.pesaje;
+DROP POLICY IF EXISTS "ver_lote_rollo"  ON inventario.lote_rollo_detalle;
+
 CREATE POLICY "inventario_ver" ON public.item                        FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
 CREATE POLICY "inventario_ver" ON public.item_insumo_detalle         FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
 CREATE POLICY "inventario_ver" ON public.item_rollo_detalle          FOR SELECT TO authenticated USING (jwt_has_permission('inventario.ver'));
@@ -211,6 +267,22 @@ ALTER TABLE doc.letra_factura                 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.factura                       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.factura_detalle               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.compra_factura_proveedor      ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "comercial_ver" ON mes.partida;
+DROP POLICY IF EXISTS "comercial_ver" ON mes.partida_detalle;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.guia_remision;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.guia_remision_detalle;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.catalogo_precios;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.compra;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.compra_detalle;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.compra_guia_remision;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.factura_proveedor;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.factura_proveedor_detalle;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.letra;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.letra_factura;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.factura;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.factura_detalle;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.compra_factura_proveedor;
 
 CREATE POLICY "comercial_ver" ON mes.partida                    FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON mes.partida_detalle            FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
@@ -239,6 +311,18 @@ ALTER TABLE mes.partida_paso_ejecucion       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.programacion                 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.lavado_maquina               ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "produccion_ver"               ON mes.maquina;
+DROP POLICY IF EXISTS "produccion_configurar_insert" ON mes.maquina;
+DROP POLICY IF EXISTS "produccion_configurar_update" ON mes.maquina;
+DROP POLICY IF EXISTS "produccion_ver" ON mes.empleado;
+DROP POLICY IF EXISTS "produccion_ver" ON mes.ruta_plantilla;
+DROP POLICY IF EXISTS "produccion_ver" ON mes.ruta_plantilla_detalle;
+DROP POLICY IF EXISTS "produccion_ver" ON mes.partida_componente;
+DROP POLICY IF EXISTS "produccion_ver" ON mes.partida_paso;
+DROP POLICY IF EXISTS "produccion_ver" ON mes.partida_paso_ejecucion;
+DROP POLICY IF EXISTS "produccion_ver" ON mes.programacion;
+DROP POLICY IF EXISTS "produccion_ver" ON mes.lavado_maquina;
+
 CREATE POLICY "produccion_ver"        ON mes.maquina FOR SELECT TO authenticated USING     (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_configurar_insert" ON mes.maquina FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('produccion.configurar'));
 CREATE POLICY "produccion_configurar_update" ON mes.maquina FOR UPDATE TO authenticated USING     (jwt_has_permission('produccion.configurar'));
@@ -256,6 +340,10 @@ ALTER TABLE calidad.inspeccion         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE calidad.inspeccion_defecto ENABLE ROW LEVEL SECURITY;
 ALTER TABLE calidad.inspeccion_foto    ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "calidad_ver" ON calidad.inspeccion;
+DROP POLICY IF EXISTS "calidad_ver" ON calidad.inspeccion_defecto;
+DROP POLICY IF EXISTS "calidad_ver" ON calidad.inspeccion_foto;
+
 CREATE POLICY "calidad_ver" ON calidad.inspeccion         FOR SELECT TO authenticated USING (jwt_has_permission('calidad.ver'));
 CREATE POLICY "calidad_ver" ON calidad.inspeccion_defecto FOR SELECT TO authenticated USING (jwt_has_permission('calidad.ver'));
 CREATE POLICY "calidad_ver" ON calidad.inspeccion_foto    FOR SELECT TO authenticated USING (jwt_has_permission('calidad.ver'));
@@ -266,16 +354,22 @@ CREATE POLICY "calidad_ver" ON calidad.inspeccion_foto    FOR SELECT TO authenti
 -- -----------------------------------------------------------------------------
 
 ALTER TABLE public.usuario  ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "own_row"        ON public.usuario;
+DROP POLICY IF EXISTS "admin_read_all" ON public.usuario;
 CREATE POLICY "own_row"        ON public.usuario FOR SELECT TO authenticated USING (auth.uid() = auth_id);
 CREATE POLICY "admin_read_all" ON public.usuario FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
 
 ALTER TABLE iam.rol ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "auth_read" ON iam.rol;
 CREATE POLICY "auth_read" ON iam.rol FOR SELECT TO authenticated USING (true);
 
 ALTER TABLE iam.permiso     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE iam.user_rol    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE iam.rol_permiso ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "configuracion_ver" ON iam.permiso;
+DROP POLICY IF EXISTS "configuracion_ver" ON iam.user_rol;
+DROP POLICY IF EXISTS "configuracion_ver" ON iam.rol_permiso;
 CREATE POLICY "configuracion_ver" ON iam.permiso     FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
 CREATE POLICY "configuracion_ver" ON iam.user_rol    FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
 CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated USING (jwt_has_permission('configuracion.ver'));
@@ -338,7 +432,8 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- │ CONFIGURACIÓN SISTEMA                                                    │
 -- │  gestión de usuarios/roles                   │ configuracion.admin        │
 -- │  crear/modificar/eliminar almacen/ubicacion  │ configuracion.admin        │
--- │  INSERT/UPDATE operacion, maquina_tipo (RLS) │ configuracion.admin        │
+-- │  INSERT/UPDATE operacion, maquina_tipo,       │ configuracion.admin        │
+-- │  articulo_tipo (RLS)                          │                            │
 -- └─────────────────────────────────────────────┴────────────────────────────┘
 
 -- =============================================================================
