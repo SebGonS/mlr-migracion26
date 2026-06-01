@@ -126,8 +126,9 @@ WITH guias_partida AS (
           SELECT pp2.partida_id
           FROM mes.partida_paso pp2
           JOIN mes.partida p2 ON p2.id = pp2.partida_id
-          WHERE p2.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO','CREADA')
+          WHERE p2.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
             AND p2.fyh_elm IS NULL
+            AND pp2.estado NOT IN ('COMPLETADO', 'OMITIDO')
             AND (SELECT COUNT(*) FROM mes.partida_paso_ejecucion pe
                  WHERE pe.partida_paso_id = pp2.id AND pe.estado IN ('COMPLETADO','OMITIDO'))
                 <
@@ -177,8 +178,9 @@ FROM (
     LEFT JOIN public.valor vclr     ON vclr.id = cxc.valor_id
     LEFT JOIN guias_partida gp      ON gp.partida_id = p.id
     WHERE
-        p.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO', 'CREADA')
+        p.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
       AND p.fyh_elm IS NULL
+      AND pp.estado NOT IN ('COMPLETADO', 'OMITIDO')
       AND (SELECT COUNT(*) FROM mes.partida_paso_ejecucion pe
            WHERE pe.partida_paso_id = pp.id AND pe.estado IN ('COMPLETADO','OMITIDO'))
           <
@@ -234,9 +236,10 @@ SECURITY DEFINER
 SET search_path TO 'iam','public','mes'
 AS $function$
 DECLARE
-    v_usr_id         INT := get_user_id();
-    v_invalid_pasos  JSONB;
+    v_usr_id          INT := get_user_id();
+    v_invalid_pasos   JSONB;
     v_invalid_lavados JSONB;
+    v_partida_id      BIGINT;
 BEGIN
     IF NOT jwt_has_permission('produccion.programar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.programar'
@@ -283,6 +286,26 @@ BEGIN
         (elem->>'secuencia')::SMALLINT,
         elem->>'nota'
     FROM jsonb_array_elements(p_programaciones) elem;
+
+    -- Advance/revert PLANIFICADA ↔ PROGRAMADA for every affected partida.
+    -- actualizar_estado_partida is the single owner of estado_produccion.
+    FOR v_partida_id IN
+        SELECT DISTINCT pp.partida_id
+        FROM mes.partida_paso pp
+        WHERE pp.id IN (
+            SELECT (elem->>'actividad_id')::BIGINT
+            FROM jsonb_array_elements(p_programaciones) elem
+            WHERE elem->>'actividad_tipo' = 'partida_paso'
+        )
+        UNION
+        SELECT DISTINCT pp.partida_id
+        FROM mes.partida_paso pp
+        JOIN mes.programacion prog ON prog.actividad_tipo = 'partida_paso'
+                                  AND prog.actividad_id = pp.id
+        WHERE prog.fecha = p_fecha
+    LOOP
+        PERFORM mes.actualizar_estado_partida(v_partida_id);
+    END LOOP;
 
     RETURN 'Programación guardada correctamente para ' || p_fecha;
 END;
@@ -2780,7 +2803,15 @@ DECLARE
     v_hay_en_proceso   boolean;
     v_todos_terminados boolean;
     v_hay_pasos        boolean;
+    v_hay_programacion boolean;
+    v_estado_actual    partida_estado_produccion_enum;
 BEGIN
+    SELECT estado_produccion INTO v_estado_actual
+    FROM mes.partida WHERE id = p_partida_id;
+
+    -- Never touch terminal states
+    IF v_estado_actual IN ('CERRADA', 'CANCELADA') THEN RETURN; END IF;
+
     SELECT
         BOOL_OR(EXISTS (
             SELECT 1 FROM mes.partida_paso_ejecucion pe
@@ -2795,23 +2826,47 @@ BEGIN
     FROM mes.partida_paso pp
     WHERE pp.partida_id = p_partida_id;
 
-    IF NOT v_hay_pasos THEN RETURN; END IF;
-
-    IF v_todos_terminados THEN
+    -- Execution-layer transitions take priority
+    IF v_hay_pasos AND v_todos_terminados THEN
         UPDATE mes.partida
         SET estado_produccion = 'TECO',
             fyh_fin           = COALESCE(fyh_fin, NOW()),
             fyh_mod           = NOW()
-        WHERE id = p_partida_id
-          AND estado_produccion NOT IN ('CERRADA','CANCELADA');
-    ELSIF v_hay_en_proceso THEN
+        WHERE id = p_partida_id;
+        RETURN;
+    END IF;
+
+    IF v_hay_pasos AND v_hay_en_proceso THEN
         UPDATE mes.partida
         SET estado_produccion = 'EN_PRODUCCION',
             fyh_inicio        = COALESCE(fyh_inicio, NOW()),
             fyh_fin           = NULL,
             fyh_mod           = NOW()
-        WHERE id = p_partida_id
-          AND estado_produccion NOT IN ('CERRADA','CANCELADA');
+        WHERE id = p_partida_id;
+        RETURN;
+    END IF;
+
+    -- Planning-layer transitions: only when no execution has started
+    IF v_estado_actual NOT IN ('EN_PRODUCCION', 'TECO') THEN
+        IF NOT v_hay_pasos THEN RETURN; END IF;  -- no steps yet, stay CREADA
+
+        SELECT EXISTS (
+            SELECT 1
+            FROM mes.partida_paso pp
+            JOIN mes.programacion prog
+              ON prog.actividad_tipo = 'partida_paso'
+             AND prog.actividad_id   = pp.id
+             AND prog.fecha         >= CURRENT_DATE
+            WHERE pp.partida_id = p_partida_id
+        ) INTO v_hay_programacion;
+
+        IF v_hay_programacion THEN
+            UPDATE mes.partida SET estado_produccion = 'PROGRAMADA', fyh_mod = NOW()
+            WHERE id = p_partida_id AND estado_produccion != 'PROGRAMADA';
+        ELSE
+            UPDATE mes.partida SET estado_produccion = 'PLANIFICADA', fyh_mod = NOW()
+            WHERE id = p_partida_id AND estado_produccion != 'PLANIFICADA';
+        END IF;
     END IF;
 END;
 $$;
@@ -3171,6 +3226,8 @@ BEGIN
     VALUES ('crear_reproceso', v_usr_id,
             p_datos || jsonb_build_object('partida_id', p_partida_id));
 
+    PERFORM mes.actualizar_estado_partida(v_child_id);
+
     RETURN jsonb_build_object(
         'reproceso_partida_id', v_child_id,
         'partida_origen_id',    v_root_id,
@@ -3346,6 +3403,35 @@ BEGIN
                         WHERE pe.partida_paso_id = opp.id
                     ),
                     'estado', opp.estado,
+                    'consumo', COALESCE((
+                        SELECT jsonb_agg(jsonb_build_object(
+                            'id',                  m.id,
+                            'item_id',             m.item_id,
+                            'item_codigo',         vi_mov.item_codigo,
+                            'item_nombre',         vi_mov.item_nombre,
+                            'lote_id',             m.lote_id,
+                            'cantidad',            m.cantidad,
+                            'unidad',              vi_mov.unidad_codigo,
+                            'motivo_id',           m.motivo_id,
+                            'motivo_codigo',       mot.codigo,
+                            'origen_ubicacion_id', m.origen_ubicacion_id,
+                            'origen_ubicacion',    ubi.nombre,
+                            'origen_almacen',      al.nombre
+                        ) ORDER BY m.fyh_cre)
+                        FROM inventario.item_movimientos m
+                        LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
+                        LEFT JOIN inventario.item_movimiento_motivo mot ON mot.id = m.motivo_id
+                        LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
+                        LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
+                        WHERE m.documento_tipo = 'partida_paso_ejecucion'
+                          AND m.documento_id IN (
+                              SELECT pe.id FROM mes.partida_paso_ejecucion pe
+                              WHERE pe.partida_paso_id = opp.id
+                          )
+                          AND m.item_movimiento_tipo_id = (
+                              SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO'
+                          )
+                    ), '[]'::jsonb),
                     'ejecuciones', COALESCE((
                         SELECT jsonb_agg(
                             jsonb_build_object(
@@ -3438,13 +3524,16 @@ BEGIN
                 'flg_tenido',         lrd_in.flg_tenido,
                 'flg_antipilling',    lrd_in.flg_antipilling,
                 'color_x_cliente_id', lrd_in.color_x_cliente_id,
-                'tenido_id',          lrd_in.tenido_id
+                'tenido_id',          lrd_in.tenido_id,
+                'peso_real',          ps.peso_real,
+                'flg_pesado',         (ps.lote_id IS NOT NULL)
             ) ORDER BY opi.id)
             FROM mes.partida_componente opi
             LEFT JOIN inventario.lote l ON l.id = opi.lote_id
             LEFT JOIN vw_items vi_mat ON vi_mat.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_in ON lrd_in.lote_id = l.id
             LEFT JOIN doc.guia_remision gr_in ON gr_in.id = lrd_in.guia_remision_id
+            LEFT JOIN inventario.pesaje ps ON ps.lote_id = l.id
             WHERE opi.partida_id = p.id
               AND opi.lote_id IS NOT NULL
         ), '[]'::jsonb),
@@ -3492,6 +3581,46 @@ BEGIN
             LEFT JOIN inventario.lote_rollo_detalle lrd_out ON lrd_out.lote_id = l.id
             LEFT JOIN doc.guia_remision gr_out ON gr_out.id = lrd_out.guia_remision_id
             WHERE l.documento_tipo = 'partida_paso_ejecucion'
+        ), '[]'::jsonb),
+
+        -- Lotes flagged for reproceso — two sources:
+        --   1. output lotes (post-production) where estado_calidad = 'REPROCESO'
+        --   2. input lotes (pre-output QC) where reserved roll was flagged before final paso completed
+        'lotes_reproceso', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'lote_id',    src.lote_id,
+                'lote_codigo', src.lote_codigo,
+                'item_nombre', src.item_nombre,
+                'cantidad',   src.cantidad,
+                'unidad',     src.unidad
+            ) ORDER BY src.lote_id)
+            FROM (
+                -- Source 1: output lotes produced by this partida's executions
+                SELECT l.id AS lote_id,
+                       EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || LPAD(l.secuencia::TEXT, 5, '0') AS lote_codigo,
+                       vi.item_nombre,
+                       l.cantidad,
+                       vi.unidad_codigo AS unidad
+                FROM inventario.lote l
+                JOIN mes.partida_paso_ejecucion pe ON pe.id = l.documento_id
+                JOIN mes.partida_paso opp          ON opp.id = pe.partida_paso_id AND opp.partida_id = p.id
+                LEFT JOIN vw_items vi ON vi.item_id = l.item_id
+                WHERE l.documento_tipo = 'partida_paso_ejecucion'
+                  AND l.estado_calidad = 'REPROCESO'
+                UNION ALL
+                -- Source 2: reserved input lotes flagged before production completes
+                SELECT l.id AS lote_id,
+                       EXTRACT(YEAR FROM l.fyh_cre)%100 || '-' || LPAD(l.secuencia::TEXT, 5, '0') AS lote_codigo,
+                       vi.item_nombre,
+                       l.cantidad,
+                       vi.unidad_codigo AS unidad
+                FROM mes.partida_componente pc
+                JOIN inventario.lote l ON l.id = pc.lote_id
+                LEFT JOIN vw_items vi ON vi.item_id = l.item_id
+                WHERE pc.partida_id = p.id
+                  AND pc.lote_id IS NOT NULL
+                  AND l.estado_calidad = 'REPROCESO'
+            ) src
         ), '[]'::jsonb),
 
         -- Direct rework partidas (partida_origen_id = this partida; no grandchildren)

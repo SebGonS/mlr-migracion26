@@ -591,7 +591,6 @@ CREATE TABLE doc.compra_factura_proveedor (
     compra_id            BIGINT NOT NULL REFERENCES doc.compra(id),
     factura_proveedor_id BIGINT NOT NULL REFERENCES doc.factura_proveedor(id),
     PRIMARY KEY (compra_id, factura_proveedor_id),
-    nota     TEXT,
     usr_cre  INT,
     fyh_cre  TIMESTAMPTZ DEFAULT NOW()
 );

@@ -32,22 +32,23 @@ SELECT id, estado_produccion FROM mes.partida WHERE id = 5229;   -- <- v_partida
 SELECT COUNT(*) FROM mes.partida_componente
 WHERE partida_id = 5229 AND lote_id IS NOT NULL;                 -- expect 0
 */
----5252 guia 2186
-SELECT i.id,i.nombre,pd.cantidad,COUNT(*) FROM mes.partida_detalle pd
-JOIN item i ON i.id = pd.item_id 
-LEFT JOIN mes.partida_componente pc ON pc.partida_id = pd.partida_id
-JOIN inventario.lote ON pc.lote_id = lote.id AND lote.item_id = i.id 
-WHERE pd.partida_id=5252
-GROUP BY 1,2,3
+-- ---5252 guia 2186
+-- SELECT i.id,i.nombre,pd.cantidad,COUNT(*) FROM mes.partida_detalle pd
+-- JOIN item i ON i.id = pd.item_id 
+-- LEFT JOIN mes.partida_componente pc ON pc.partida_id = pd.partida_id
+-- JOIN inventario.lote ON pc.lote_id = lote.id AND lote.item_id = i.id 
+-- WHERE pd.partida_id=5252
+-- GROUP BY 1,2,3
+-- ;
+-- SELECT * FROM mes.partida_detalle WHERE partida_id=5252
+-- SELECT i.id,i.nombre,pd.cantidad,COUNT(*) FROM mes.partida_detalle pd
+-- JOIN item i ON i.id = pd.item_id 
+-- LEFT JOIN mes.partida_detalle pc ON pc.partida_id = pd.partida_id
+-- WHERE pd.partida_id=5252
+-- GROUP BY 1,2,3
 ;
-SELECT * FROM mes.partida_detalle WHERE partida_id=5252
-SELECT i.id,i.nombre,pd.cantidad,COUNT(*) FROM mes.partida_detalle pd
-JOIN item i ON i.id = pd.item_id 
-LEFT JOIN mes.partida_detalle pc ON pc.partida_id = pd.partida_id
-WHERE pd.partida_id=5252
-GROUP BY 1,2,3
-;
-SELECT * FROM mes.partida WHERE id=5252
+SELECT * FROM mes.partida WHERE id=5253
+SELECT * FROM partida WHERE id=5253
 -- -- EXECUTE BLOCK ------------------------------------------
 DO $$
 DECLARE
@@ -55,8 +56,8 @@ DECLARE
     v_tercero_id        INT         := 214;                      -- <- leave NULL for CLIENTE_ENVIO_PROCESO; set for COMPRA_INGRESO (supplier)
     v_serie             TEXT        := '00';                      -- <- CHANGE
     v_correlativo       TEXT        := '2186';                      -- <- CHANGE
-    v_fecha_emision     TIMESTAMPTZ := '2026-05-20 00:00:00-5';                      -- <- CHANGE
-    v_partida_id        INT         := 5252;                      -- <- CHANGE
+    v_fecha_emision     TIMESTAMPTZ := '2026-05-22 00:00:00-5';                      -- <- CHANGE
+    v_partida_id        INT         := 5253;                      -- <- CHANGE
     v_peso_kg_por_rollo NUMERIC     := 20.0;                      -- <- CHANGE  nominal kg/roll
 
     -- List every (item_id, n_rollos) pair for this guia.

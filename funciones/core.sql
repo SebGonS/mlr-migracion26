@@ -615,6 +615,8 @@ BEGIN
     WHERE r.code IN ('jefe_planta', 'compras')
       AND v_usr_id <> ur.user_id;
 
+    PERFORM mes.actualizar_estado_partida(v_partida_id);
+
     RETURN jsonb_build_object(
         'partida_id', v_partida_id,
         'message',    format('Orden de producción #%s creada correctamente.', v_partida_id)
@@ -866,6 +868,8 @@ BEGIN
           SELECT 1 FROM mes.partida_paso_ejecucion pe
           WHERE pe.partida_paso_id = mes.partida_paso.id
       );
+
+    PERFORM mes.actualizar_estado_partida(p_partida_id);
 
     RETURN format('%s pasos actualizados para orden #%s.', v_count, p_partida_id);
 

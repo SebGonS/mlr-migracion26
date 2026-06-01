@@ -39,6 +39,19 @@ BEGIN
         END IF;
     END IF;
 
+    -- Validate facturas belong to the declared proveedor
+    IF p_datos->'factura_ids' IS NOT NULL AND jsonb_array_length(p_datos->'factura_ids') > 0 THEN
+        IF EXISTS (
+            SELECT 1 FROM doc.factura_proveedor fp
+            WHERE fp.id IN (
+                SELECT jsonb_array_elements_text(p_datos->'factura_ids')::bigint
+            )
+            AND fp.tercero_id IS DISTINCT FROM (p_datos->>'tercero_id')::INT
+        ) THEN
+            RAISE EXCEPTION 'Una o más facturas no pertenecen al proveedor indicado.';
+        END IF;
+    END IF;
+
     -- Insert header
     INSERT INTO doc.compra(tercero_id, fecha, observacion, usr_cre)
     VALUES (
@@ -65,6 +78,13 @@ BEGIN
         ON CONFLICT DO NOTHING;
     END IF;
 
+    -- Link facturas
+    IF p_datos->'factura_ids' IS NOT NULL AND jsonb_array_length(p_datos->'factura_ids') > 0 THEN
+        INSERT INTO doc.compra_factura_proveedor(compra_id, factura_proveedor_id, usr_cre)
+        SELECT v_compra_id, jsonb_array_elements_text(p_datos->'factura_ids')::bigint, v_usr_id
+        ON CONFLICT DO NOTHING;
+    END IF;
+
     RETURN v_compra_id;
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
@@ -78,7 +98,10 @@ $function$;
 -- actualizar_compra
 -- Updates editable fields of a purchase order.
 -- Blocked if the compra is already anulada.
--- Optionally replaces all line items when 'detalle' key is present.
+-- Optional full-replace semantics when key is present:
+--   'detalle'     → replaces all line items
+--   'guia_ids'    → replaces all guia links
+--   'factura_ids' → replaces all factura links
 -- tercero_id is immutable after creation.
 -- ───────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION doc.actualizar_compra(
@@ -91,9 +114,10 @@ SECURITY DEFINER
 SET search_path TO 'iam', 'public', 'doc'
 AS $function$
 DECLARE
-    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id  int := get_user_id();
-    v_fyh_elm timestamptz;
+    v_message   text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id    int := get_user_id();
+    v_fyh_elm   timestamptz;
+    v_tercero_id int;
 BEGIN
     IF NOT jwt_has_permission('comercial.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
@@ -104,7 +128,7 @@ BEGIN
     VALUES ('actualizar_compra', v_usr_id,
             jsonb_build_object('compra_id', p_compra_id) || p_datos);
 
-    SELECT fyh_elm INTO v_fyh_elm
+    SELECT fyh_elm, tercero_id INTO v_fyh_elm, v_tercero_id
     FROM doc.compra WHERE id = p_compra_id FOR UPDATE;
 
     IF NOT FOUND THEN
@@ -133,6 +157,48 @@ BEGIN
                    (d->>'precio_unitario')::NUMERIC,
                    v_usr_id
             FROM jsonb_array_elements(p_datos->'detalle') d;
+        END IF;
+    END IF;
+
+    -- Replace guia links only when 'guia_ids' key is explicitly present
+    IF p_datos ? 'guia_ids' THEN
+        IF jsonb_array_length(p_datos->'guia_ids') > 0 THEN
+            IF EXISTS (
+                SELECT 1 FROM doc.guia_remision
+                WHERE id IN (SELECT jsonb_array_elements_text(p_datos->'guia_ids')::bigint)
+                  AND tercero_id IS DISTINCT FROM v_tercero_id
+            ) THEN
+                RAISE EXCEPTION 'Una o más guías no pertenecen al proveedor de la compra #%.', p_compra_id;
+            END IF;
+        END IF;
+
+        DELETE FROM doc.compra_guia_remision WHERE compra_id = p_compra_id;
+
+        IF jsonb_array_length(p_datos->'guia_ids') > 0 THEN
+            INSERT INTO doc.compra_guia_remision(compra_id, guia_remision_id)
+            SELECT p_compra_id, jsonb_array_elements_text(p_datos->'guia_ids')::bigint
+            ON CONFLICT DO NOTHING;
+        END IF;
+    END IF;
+
+    -- Replace factura links only when 'factura_ids' key is explicitly present
+    IF p_datos ? 'factura_ids' THEN
+        IF jsonb_array_length(p_datos->'factura_ids') > 0 THEN
+            IF EXISTS (
+                SELECT 1 FROM doc.factura_proveedor
+                WHERE id IN (SELECT jsonb_array_elements_text(p_datos->'factura_ids')::bigint)
+                  AND tercero_id IS DISTINCT FROM v_tercero_id
+            ) THEN
+                RAISE EXCEPTION 'Una o más facturas no pertenecen al proveedor de la compra #%.', p_compra_id;
+            END IF;
+        END IF;
+
+        DELETE FROM doc.compra_factura_proveedor WHERE compra_id = p_compra_id;
+
+        IF jsonb_array_length(p_datos->'factura_ids') > 0 THEN
+            INSERT INTO doc.compra_factura_proveedor(compra_id, factura_proveedor_id, usr_cre)
+            SELECT p_compra_id, jsonb_array_elements_text(p_datos->'factura_ids')::bigint, v_usr_id
+            ON CONFLICT DO NOTHING;
         END IF;
     END IF;
 
@@ -169,6 +235,13 @@ BEGIN
 
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('registrar_factura_proveedor', v_usr_id, p_datos);
+
+    IF COALESCE((p_datos->>'subtotal')::NUMERIC, 0) <= 0 THEN
+        RAISE EXCEPTION 'El subtotal debe ser mayor a cero.';
+    END IF;
+    IF COALESCE((p_datos->>'total')::NUMERIC, 0) <= 0 THEN
+        RAISE EXCEPTION 'El total debe ser mayor a cero.';
+    END IF;
 
     -- subtotal + igv must equal total (tolerance matches table CHECK: < 0.01)
     IF ABS(
@@ -549,16 +622,16 @@ END;
 $function$;
 
 -- ───────────────────────────────────────────────────────────────
--- vincular_factura_compra
--- Links a factura_proveedor to a compra via the junction table.
--- Idempotent (ON CONFLICT DO NOTHING). Validates same proveedor.
--- A compra can be linked to multiple facturas (e.g. factura-en-0
--- + real invoice, or split shipments).
+-- vincular_facturas_compra
+-- Links one or more facturas to an existing compra.
+-- Validates each factura belongs to the compra's proveedor.
+-- Idempotent: ON CONFLICT DO NOTHING.
 -- ───────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION doc.vincular_factura_compra(
-    p_compra_id  bigint,
-    p_factura_id bigint,
-    p_nota       text DEFAULT NULL
+DROP FUNCTION IF EXISTS doc.vincular_factura_compra(bigint, bigint, text);
+
+CREATE OR REPLACE FUNCTION doc.vincular_facturas_compra(
+    p_compra_id   bigint,
+    p_factura_ids jsonb   -- [1, 2, 3]
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -567,53 +640,54 @@ SET search_path TO 'iam', 'public', 'doc'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id       int := get_user_id();
-    v_compra_prov  int;
-    v_factura_prov int;
+    v_usr_id    int := get_user_id();
+    v_proveedor int;
+    v_linked    int;
 BEGIN
     IF NOT jwt_has_permission('comercial.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    SELECT tercero_id INTO v_compra_prov
+    SELECT tercero_id INTO v_proveedor
     FROM doc.compra WHERE id = p_compra_id;
+
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Compra #% no encontrada.', p_compra_id;
     END IF;
 
-    SELECT tercero_id INTO v_factura_prov
-    FROM doc.factura_proveedor WHERE id = p_factura_id;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Factura #% no encontrada.', p_factura_id;
+    IF EXISTS (
+        SELECT 1 FROM doc.factura_proveedor
+        WHERE id IN (SELECT jsonb_array_elements_text(p_factura_ids)::bigint)
+          AND tercero_id IS DISTINCT FROM v_proveedor
+    ) THEN
+        RAISE EXCEPTION 'Una o más facturas no pertenecen al proveedor de la compra #%.', p_compra_id;
     END IF;
 
-    IF v_compra_prov IS DISTINCT FROM v_factura_prov THEN
-        RAISE EXCEPTION 'Proveedor de compra (%) y factura (%) no coinciden.',
-            v_compra_prov, v_factura_prov;
-    END IF;
-
-    INSERT INTO doc.compra_factura_proveedor (compra_id, factura_proveedor_id, nota, usr_cre)
-    VALUES (p_compra_id, p_factura_id, p_nota, v_usr_id)
+    INSERT INTO doc.compra_factura_proveedor(compra_id, factura_proveedor_id, usr_cre)
+    SELECT p_compra_id, jsonb_array_elements_text(p_factura_ids)::bigint, v_usr_id
     ON CONFLICT DO NOTHING;
 
-    RETURN format('Factura #%s vinculada a compra #%s.', p_factura_id, p_compra_id);
+    GET DIAGNOSTICS v_linked = ROW_COUNT;
+
+    RETURN format('%s factura(s) vinculada(s) a compra #%s.', v_linked, p_compra_id);
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in vincular_factura_compra - User: %, compra: %, factura: %, Error: %',
-        v_usr_id, p_compra_id, p_factura_id, v_message;
+    RAISE LOG 'Error in vincular_facturas_compra - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
     RAISE;
 END;
 $function$;
 
 -- ───────────────────────────────────────────────────────────────
--- desvincular_factura_compra
--- Removes a specific compra ↔ factura link from the junction.
+-- desvincular_facturas_compra
+-- Removes one or more factura links from a compra.
 -- ───────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION doc.desvincular_factura_compra(
-    p_compra_id  bigint,
-    p_factura_id bigint
+DROP FUNCTION IF EXISTS doc.desvincular_factura_compra(bigint, bigint);
+
+CREATE OR REPLACE FUNCTION doc.desvincular_facturas_compra(
+    p_compra_id   bigint,
+    p_factura_ids jsonb   -- [1, 2, 3]
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -622,30 +696,31 @@ SET search_path TO 'iam', 'public', 'doc'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id int := get_user_id();
+    v_usr_id   int := get_user_id();
+    v_unlinked int;
 BEGIN
     IF NOT jwt_has_permission('comercial.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('desvincular_factura_compra', v_usr_id,
-            jsonb_build_object('compra_id', p_compra_id, 'factura_id', p_factura_id));
-
-    DELETE FROM doc.compra_factura_proveedor
-    WHERE compra_id = p_compra_id AND factura_proveedor_id = p_factura_id;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Vínculo entre compra #% y factura #% no encontrado.', p_compra_id, p_factura_id;
+    IF NOT EXISTS (SELECT 1 FROM doc.compra WHERE id = p_compra_id) THEN
+        RAISE EXCEPTION 'Compra #% no encontrada.', p_compra_id;
     END IF;
 
-    RETURN format('Factura #%s desvinculada de compra #%s.', p_factura_id, p_compra_id);
+    DELETE FROM doc.compra_factura_proveedor
+    WHERE compra_id = p_compra_id
+      AND factura_proveedor_id IN (
+          SELECT jsonb_array_elements_text(p_factura_ids)::bigint
+      );
+
+    GET DIAGNOSTICS v_unlinked = ROW_COUNT;
+
+    RETURN format('%s factura(s) desvinculada(s) de compra #%s.', v_unlinked, p_compra_id);
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in desvincular_factura_compra - User: %, compra: %, factura: %, Error: %',
-        v_usr_id, p_compra_id, p_factura_id, v_message;
+    RAISE LOG 'Error in desvincular_facturas_compra - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
     RAISE;
 END;
 $function$;
@@ -657,8 +732,8 @@ GRANT EXECUTE ON FUNCTION doc.registrar_letra(jsonb)                        TO a
 GRANT EXECUTE ON FUNCTION doc.pagar_letra(bigint, date)                     TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.vincular_guias_compra(bigint, jsonb)          TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.desvincular_guias_compra(bigint, jsonb)       TO authenticated;
-GRANT EXECUTE ON FUNCTION doc.vincular_factura_compra(bigint, bigint, text) TO authenticated;
-GRANT EXECUTE ON FUNCTION doc.desvincular_factura_compra(bigint, bigint)    TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.vincular_facturas_compra(bigint, jsonb)   TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.desvincular_facturas_compra(bigint, jsonb) TO authenticated;
 
 
 -- ───────────────────────────────────────────────────────────────
@@ -714,8 +789,7 @@ SELECT jsonb_build_object(
             'fecha_emision',        fp.fecha_emision,
             'total',                fp.total,
             'moneda',               fp.moneda,
-            'estado_pago',          fp.estado_pago,
-            'nota',                 cfp.nota
+            'estado_pago',          fp.estado_pago
         ) ORDER BY fp.fecha_emision, fp.id)
         FROM doc.compra_factura_proveedor cfp
         JOIN doc.factura_proveedor fp ON fp.id = cfp.factura_proveedor_id
@@ -791,8 +865,7 @@ SELECT jsonb_build_object(
         SELECT jsonb_agg(jsonb_build_object(
             'compra_id',   c.id,
             'fecha',       c.fecha,
-            'observacion', c.observacion,
-            'nota',        cfp.nota
+            'observacion', c.observacion
         ) ORDER BY c.fecha, c.id)
         FROM doc.compra_factura_proveedor cfp
         JOIN doc.compra c ON c.id = cfp.compra_id

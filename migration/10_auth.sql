@@ -397,7 +397,7 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- │  registrar/anular guia_remision              │ comercial.crear/editar     │
 -- │  crear_compra, vincular_*                    │ comercial.crear            │
 -- │  registrar_factura_proveedor                 │ comercial.crear            │
--- │  registrar_letra, vincular_factura_compra    │ comercial.editar           │
+-- │  registrar_letra, vincular_facturas_compra   │ comercial.editar           │
 -- │  pagar_letra                                 │ comercial.editar           │
 -- ├─────────────────────────────────────────────┼────────────────────────────┤
 -- │ INVENTARIO                                                               │
