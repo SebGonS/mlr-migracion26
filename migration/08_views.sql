@@ -265,13 +265,12 @@ GRANT SELECT ON mes.vw_partidas TO anon, authenticated;
 
 -- ── doc.vw_compras ────────────────────────────────────────────
 -- List view for purchase orders.
--- estado_ingreso: derived from compra_detalle (ordered) vs quantities
---   received via linked guias (guia_remision_detalle).  Comparison is at
---   the (compra, item) level — same granularity the linkage allows.
+-- estado_ingreso: derived from compra_detalle.cantidad_recibida
+--   (maintained by doc.ingresar_compra — guia linkage has no effect on it).
 --   'sin_lineas'  → compra header only, no detail lines
---   'pendiente'   → no guias linked yet
+--   'pendiente'   → nothing received yet
 --   'parcial'     → some items partially received
---   'completo'    → all ordered quantities covered by received quantities
+--   'completo'    → all ordered quantities received
 DROP VIEW IF EXISTS doc.vw_compras;
 CREATE OR REPLACE VIEW doc.vw_compras AS
 SELECT
@@ -292,10 +291,10 @@ SELECT
     COALESCE(letras.monto_letras_pendiente, 0) AS monto_letras_pendiente,
     -- Receipt progress derived from linked guias
     CASE
-        WHEN det.total_items = 0                   THEN 'sin_lineas'
-        WHEN COALESCE(guias.total_guias, 0) = 0    THEN 'pendiente'
-        WHEN recepcion.qty_pendiente <= 0           THEN 'completo'
-        ELSE                                             'parcial'
+        WHEN det.total_items = 0                              THEN 'sin_lineas'
+        WHEN COALESCE(recepcion.qty_recibida, 0) = 0          THEN 'pendiente'
+        WHEN COALESCE(recepcion.qty_pendiente, 0) <= 0        THEN 'completo'
+        ELSE                                                       'parcial'
     END                                        AS estado_ingreso,
     c.observacion,
     c.fyh_elm,
@@ -336,8 +335,9 @@ LEFT JOIN LATERAL (
     WHERE cfp.compra_id = c.id
 ) letras ON true
 LEFT JOIN LATERAL (
-    -- qty_pendiente reads denormalized columns — no guia join needed.
-    SELECT SUM(cd.cantidad - cd.cantidad_recibida) AS qty_pendiente
+    SELECT
+        SUM(cd.cantidad - cd.cantidad_recibida) AS qty_pendiente,
+        SUM(cd.cantidad_recibida)               AS qty_recibida
     FROM doc.compra_detalle cd
     WHERE cd.compra_id = c.id
 ) recepcion ON true;

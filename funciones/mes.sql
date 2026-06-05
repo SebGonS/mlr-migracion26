@@ -129,7 +129,7 @@ $$;
 CREATE OR REPLACE FUNCTION mes.get_actividades_sin_programar()
 RETURNS jsonb
 LANGUAGE sql STABLE
-SET search_path TO 'public','doc','mes','inventario'
+SET search_path TO 'public','doc','mes','inventario','receta'
 AS $$
 WITH guias_partida AS (
     SELECT
@@ -162,6 +162,18 @@ WITH guias_partida AS (
             )
       )
     GROUP BY pc.partida_id
+),
+rollos_partida AS (
+    SELECT
+        pc.partida_id,
+        COUNT(*) FILTER (WHERE ird.flg_rib = false) AS cantidad_regular,
+        COUNT(*) FILTER (WHERE ird.flg_rib = true)  AS cantidad_rib,
+        COUNT(*)                                     AS total_rollos
+    FROM mes.partida_componente pc
+    JOIN inventario.lote l      ON l.id        = pc.lote_id
+    JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+    WHERE pc.lote_id IS NOT NULL
+    GROUP BY pc.partida_id
 )
 SELECT COALESCE(jsonb_agg(row_obj ORDER BY fyh_cre DESC), '[]'::jsonb)
 FROM (
@@ -173,29 +185,43 @@ FROM (
             'actividad_id',       pp.id,
             'paso_id',            pp.id,
             'partida_id',         p.id,
-            'partida_origen_id',         p.partida_origen_id,
+            'partida_origen_id',  p.partida_origen_id,
             'operacion_id',       o.id,
             'operacion',          o.nombre,
             'operacion_codigo',   o.codigo,
             'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
             'articulo_tipo_id',   p.articulo_tipo_id,
+            'articulo',           at.nombre,
             'cliente',            c.nombre,
             'color',              vc.color,
             'color_hex',          vc.color_hex,
             'valor',              vclr.valor,
             'tenido',             t.tenido,
+            'ancho',              p.ancho,
+            'malla',              p.malla,
+            'rendimiento',        p.rendimiento,
+            'fibra',              p.fibra,
+            'receta_tenido_id',   pp.receta_id,
+            'tipo_receta',        tr.tipo_receta,
+            'total_rollos',       rp.total_rollos,
+            'cantidad_regular',   rp.cantidad_regular,
+            'cantidad_rib',       rp.cantidad_rib,
             'guias',              gp.guias,
             'ejecucion_fyh_inicio', ppe.fyh_inicio
         ) AS row_obj
     FROM mes.partida_paso pp
     JOIN mes.operacion o ON o.id = pp.operacion_id
     JOIN mes.partida p   ON p.id = pp.partida_id
-    LEFT JOIN tenido t              ON t.id  = p.tenido_id
-    LEFT JOIN tercero c             ON c.id  = p.tercero_id
+    LEFT JOIN receta.tenido rt      ON rt.id  = pp.receta_id
+    LEFT JOIN tipo_receta tr        ON tr.id  = rt.tipo_receta_id
+    LEFT JOIN articulo_tipo at      ON at.id  = p.articulo_tipo_id
+    LEFT JOIN tenido t              ON t.id   = p.tenido_id
+    LEFT JOIN tercero c             ON c.id   = p.tercero_id
     LEFT JOIN vw_colores vc         ON vc.color_x_cliente_id = p.color_x_cliente_id
     LEFT JOIN color_x_cliente cxc   ON cxc.id = p.color_x_cliente_id
     LEFT JOIN public.valor vclr     ON vclr.id = cxc.valor_id
     LEFT JOIN guias_partida gp      ON gp.partida_id = p.id
+    LEFT JOIN rollos_partida rp     ON rp.partida_id = p.id
     LEFT JOIN mes.partida_paso_ejecucion ppe ON ppe.partida_paso_id = pp.id AND ppe.estado = 'EN_PROCESO'
     WHERE
         p.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
@@ -253,7 +279,6 @@ SET search_path TO 'iam','public','mes'
 AS $function$
 DECLARE
     v_usr_id          INT := get_user_id();
-    v_invalid_pasos   JSONB;
     v_invalid_lavados JSONB;
     v_partida_id      BIGINT;
 BEGIN
@@ -4266,9 +4291,9 @@ $function$;
 
 GRANT EXECUTE ON FUNCTION mes.transferir_rollo_partida(INT, BIGINT, BIGINT, TEXT) TO authenticated;
 
-
+    
 -- SELECT mes.get_actividades_sin_programar()
 
-SELECT * FROm mes.partida_paso_ejecucion WHERE id=9378
-Error
-Pasos no programables (ya COMPLETADO/OMITIDO): [{"actividad_id": 9378}]
+-- SELECT * FROm mes.partida_paso_ejecucion WHERE id=9378
+-- Error
+-- Pasos no programables (ya COMPLETADO/OMITIDO): [{"actividad_id": 9378}]
