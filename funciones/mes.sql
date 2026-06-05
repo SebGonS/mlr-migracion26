@@ -3433,36 +3433,42 @@ BEGIN
                     'estado', opp.estado,
                     'consumo', COALESCE((
                         SELECT jsonb_agg(jsonb_build_object(
-                            'item_id',             m.item_id,
-                            'item_codigo',         vi_mov.item_codigo,
-                            'item_nombre',         vi_mov.item_nombre,
-                            'lote_id',             m.lote_id,
-                            'cantidad',            SUM(CASE WHEN mt.codigo = 'PROD_CONSUMO_REV' THEN -m.cantidad ELSE m.cantidad END),
-                            'unidad',              vi_mov.unidad_codigo,
-                            'motivo_id',           m.motivo_id,
-                            'motivo_codigo',       mot.codigo,
-                            'origen_ubicacion_id', m.origen_ubicacion_id,
-                            'origen_ubicacion',    ubi.nombre,
-                            'origen_almacen',      al.nombre
-                        ) ORDER BY vi_mov.item_nombre)
-                        FROM inventario.item_movimientos m
-                        LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
-                        LEFT JOIN inventario.item_movimiento_tipo mt ON mt.id = m.item_movimiento_tipo_id
-                        LEFT JOIN inventario.item_movimiento_motivo mot ON mot.id = m.motivo_id
-                        LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
-                        LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
-                        WHERE m.documento_tipo = 'partida_paso_ejecucion'
-                          AND m.documento_id IN (
-                              SELECT pe.id FROM mes.partida_paso_ejecucion pe
-                              WHERE pe.partida_paso_id = opp.id
-                          )
-                          AND m.item_movimiento_tipo_id IN (
-                              SELECT id FROM inventario.item_movimiento_tipo WHERE codigo IN ('PROD_CONSUMO', 'PROD_CONSUMO_REV')
-                          )
-                        GROUP BY m.item_id, vi_mov.item_codigo, vi_mov.item_nombre, m.lote_id,
-                                 vi_mov.unidad_codigo, m.motivo_id, mot.codigo,
-                                 m.origen_ubicacion_id, ubi.nombre, al.nombre
-                        HAVING SUM(CASE WHEN mt.codigo = 'PROD_CONSUMO_REV' THEN -m.cantidad ELSE m.cantidad END) > 0
+                            'item_id',             sub.item_id,
+                            'item_codigo',         sub.item_codigo,
+                            'item_nombre',         sub.item_nombre,
+                            'lote_id',             sub.lote_id,
+                            'cantidad',            sub.cantidad,
+                            'unidad',              sub.unidad,
+                            'motivo_id',           sub.motivo_id,
+                            'motivo_codigo',       sub.motivo_codigo,
+                            'origen_ubicacion_id', sub.origen_ubicacion_id,
+                            'origen_ubicacion',    sub.origen_ubicacion,
+                            'origen_almacen',      sub.origen_almacen
+                        ) ORDER BY sub.item_nombre)
+                        FROM (
+                            SELECT m.item_id, vi_mov.item_codigo, vi_mov.item_nombre, m.lote_id,
+                                   SUM(CASE WHEN mt.codigo = 'PROD_CONSUMO_REV' THEN -m.cantidad ELSE m.cantidad END) AS cantidad,
+                                   vi_mov.unidad_codigo AS unidad, m.motivo_id, mot.codigo AS motivo_codigo,
+                                   m.origen_ubicacion_id, ubi.nombre AS origen_ubicacion, al.nombre AS origen_almacen
+                            FROM inventario.item_movimientos m
+                            LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
+                            LEFT JOIN inventario.item_movimiento_tipo mt ON mt.id = m.item_movimiento_tipo_id
+                            LEFT JOIN inventario.item_movimiento_motivo mot ON mot.id = m.motivo_id
+                            LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
+                            LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
+                            WHERE m.documento_tipo = 'partida_paso_ejecucion'
+                              AND m.documento_id IN (
+                                  SELECT pe.id FROM mes.partida_paso_ejecucion pe
+                                  WHERE pe.partida_paso_id = opp.id
+                              )
+                              AND m.item_movimiento_tipo_id IN (
+                                  SELECT id FROM inventario.item_movimiento_tipo WHERE codigo IN ('PROD_CONSUMO', 'PROD_CONSUMO_REV')
+                              )
+                            GROUP BY m.item_id, vi_mov.item_codigo, vi_mov.item_nombre, m.lote_id,
+                                     vi_mov.unidad_codigo, m.motivo_id, mot.codigo,
+                                     m.origen_ubicacion_id, ubi.nombre, al.nombre
+                            HAVING SUM(CASE WHEN mt.codigo = 'PROD_CONSUMO_REV' THEN -m.cantidad ELSE m.cantidad END) > 0
+                        ) sub
                     ), '[]'::jsonb),
                     'ejecuciones', COALESCE((
                         SELECT jsonb_agg(
