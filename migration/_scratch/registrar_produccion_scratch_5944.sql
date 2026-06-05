@@ -1,3 +1,5 @@
+
+
 ----ROLLOS LA REAL
 BEGIN;
 DO $$
@@ -24,7 +26,11 @@ BEGIN
             pd.item_id,
             pd.cantidad::INT AS n_rollos   -- cantidad = roll count in partida_detalle
         FROM mes.partida_detalle pd
-        WHERE pd.partida_id IN (4610)
+        WHERE pd.partida_id IN (4502
+,4502
+,4452
+,4502
+,4502)
         ORDER BY pd.partida_id, pd.item_id
     LOOP
         -- New doc_movimiento_id groups all rolls of this (partida, item) together
@@ -108,13 +114,13 @@ $$;
 
 
 
--- SELECT * FROM mes.partida_paso WHERE partida_id=4610;
+-- SELECT * FROM mes.partida_paso WHERE partida_id=4502;
 
--- Delete existing partida_detalle for 4610, then insert from 4410
--- DELETE FROM mes.partida_detalle WHERE partida_id = 4610;
+-- Delete existing partida_detalle for 4502, then insert from 4410
+-- DELETE FROM mes.partida_detalle WHERE partida_id = 4502;
 
 -- INSERT INTO mes.partida_detalle (partida_id, item_id, cantidad, cantidad_producida, unidad_id, usr_cre, fyh_cre)
--- SELECT 4610, item_id, cantidad, cantidad_producida, unidad_id, usr_cre, fyh_cre
+-- SELECT 4502, item_id, cantidad, cantidad_producida, unidad_id, usr_cre, fyh_cre
 -- FROM mes.partida_detalle
 -- WHERE partida_id = 4410;
 
@@ -122,7 +128,7 @@ $$;
 ---Copy outpuit into reservation (componenete)
 
 -- INSERT INTO mes.partida_componente (partida_id, lote_id, cantidad_reservada, usr_cre)
--- SELECT 4610, l.id, l.cantidad, l.usr_cre
+-- SELECT 4502, l.id, l.cantidad, l.usr_cre
 -- FROM inventario.lote l
 -- JOIN mes.partida_paso_ejecucion pe ON pe.id = l.documento_id
 --                                    AND l.documento_tipo = 'partida_paso_ejecucion'
@@ -144,10 +150,10 @@ $$;
 
 
 SELECT * FROm mes.partida_paso_ejecucion WHERE partida_paso_id IN
-(SELECT id FROM mes.partida_paso WHERe partida_id=4610);
+(SELECT id FROM mes.partida_paso WHERe partida_id=4502);
 -- UPDATE mes.partida_paso_ejecucion set cantidad=18, fyh_inicio='2026-05-25 16:30:00.00+00', fyh_fin='2026-05-25 17:40:00.00+00' where id=1845
 -- DELETE FROM mes.partida_paso_ejecucion WHERE id=1846
--- State of partida 4610 + whether ghost fired on any of its lotes
+-- State of partida 4502 + whether ghost fired on any of its lotes
 
 -- SELECT mes.get_partida(5906)
 --check for ghost egress
@@ -175,11 +181,15 @@ SELECT
 FROM mes.partida p
 JOIN inventario.lote l ON l.documento_id = p.id AND l.documento_tipo = 'PARTIDA'
 JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
-WHERE p.id IN (4610)
+WHERE p.id IN (4502
+,4502
+,4452
+,4502
+,4502)
 GROUP BY 1,2,3,4,5,6,7
 ORDER BY ird.flg_rib, l.id;
 
--- SELECT * FROm inventario.pesaje WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4610);
+-- SELECT * FROm inventario.pesaje WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4502);
 
 --check for ghost egress
 SELECT
@@ -205,7 +215,7 @@ SELECT
 FROM mes.partida p
 JOIN inventario.lote l ON l.documento_id = p.id AND l.documento_tipo = 'PARTIDA'
 JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
-WHERE p.id = 4610
+WHERE p.id = 4502
 ORDER BY ird.flg_rib, l.id;
 
 --reverse ghost egress
@@ -221,7 +231,7 @@ ghost_egr AS (
     FROM inventario.item_movimientos m
     JOIN inventario.lote l ON l.id = m.lote_id
     WHERE m.documento_tipo  = 'PARTIDA'
-      AND m.documento_id    = 4610
+      AND m.documento_id    IN (4452,4502,4502,4502)
       AND m.item_movimiento_tipo_id = (
           SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_EGR'
       )
@@ -251,39 +261,52 @@ SELECT
     alm_cru.ubicacion_id,
     ge.cantidad,
     'PARTIDA',
-    4610,
+    4502,
     'Reversión: SERV_EGR fantasma se ejecutó incorrectamente en partida CREADA - restaurando balance para producción',
     ge.usr_cre,
     NOW(),
     NOW()
 FROM ghost_egr ge, alm_cru, doc;
+SELECT * FROM mes.partida_componente WHERE partida_id=4502;
+UPDATE mes.partida_componente 
+SET partida_id=4502
+WHERE partida_id=4452;
 
--- UPDATE mes.partida_paso SET operacion_id=2 WHERe partida_id=4610;
-SELECT * FROM mes.partida_paso WHERe partida_id=4610;
-SELECT * FROm partida WHERE id=4610;
-SELECT * FROm partida_x_recetas WHERE partida_id=4610;
-SELECT * FROm produccion_tenido WHERE partida_id=4610;
+-- UPDATE mes.partida_paso SET operacion_id=2 WHERe partida_id=4502;
+-- (4502,4502,4452,4502,4502)
+SELECT * FROM mes.partida_paso WHERe partida_id=4502;
+SELECT * FROm partida WHERE id=4502;
+SELECT * FROm partida_x_recetas WHERE partida_id=4502;
+SELECT * FROm produccion_tenido WHERE partida_id=4502;
+
+SELECT * FROm produccion_tenido WHERE partida_id=4502;
+
+
+(4500,5037,4452,4502,4502)
+SELECT * FROm partida_x_recetas WHERE partida_id IN (4502,4502,4452,4502,4502);
+SELECT * FROm produccion_tenido WHERE partida_id IN (4502,4502,4452,4502,4502);
 
 INSERT INTO mes.partida_paso(
     partida_id, secuencia, operacion_id, maquina_planificada_id,receta_id)
-    SELECT 4610, 1, 2, 3, (SELECT DISTINCT receta_id FROM partida_x_recetas WHERE partida_id=4610);
+    SELECT 4502, 1, 2, maquina_id,  receta_id
+    FROM partida_x_recetas WHERE partida_id=4502 AND flg_elm = False;
 
 INSERT INTO mes.partida_paso_ejecucion(
     partida_paso_id, cantidad, estado, maquina_id,receta_id, fyh_inicio, fyh_fin)
 SELECT 
-    (SELECT id FROM mes.partida_paso WHERE partida_id = 4610 AND operacion_id=2),
-    (SELECT COUNT(*) FROM mes.partida_componente WHERE partida_id = 4610 AND lote_id IS NOT NULL),
+    (SELECT id FROM mes.partida_paso WHERE partida_id = 4502 AND operacion_id=2),
+    (SELECT COUNT(*) FROM mes.partida_componente WHERE partida_id = 4502 AND lote_id IS NOT NULL),
     'EN_PROCESO',
-    3,
-    6367,--(SELECT receta_id FROM mes.partida_paso WHERE partida_id = 4610 AND operacion_id=2),
-    TIMESTAMPTZ '2026-05-19 18:10:00-05',
-    TIMESTAMPTZ '2026-05-20 01:05:00-05'
+    (SELECT maquina_planificada_id FROM mes.partida_paso WHERE partida_id = 4502 AND operacion_id=2),
+    6367,--(SELECT receta_id FROM mes.partida_paso WHERE partida_id = 4502 AND operacion_id=2),
+    TIMESTAMPTZ '2026-04-27 14:00:00-05',
+    TIMESTAMPTZ '2026-04-27 18:20:00-05'
 ;
 
 
 -- UPDATE mes.partida 
 -- SET estado_produccion = 'PROGRAMADA', fyh_mod = NOW() 
--- WHERE id = 4610 AND estado_produccion = 'CREADA';
+-- WHERE id = 4502 AND estado_produccion = 'CREADA';
 
 -- UPDATE mes.partida_paso_ejecucion SET 
 --     fyh_inicio = TIMESTAMPTZ '2026-03-20 14:10:00-05',
@@ -292,7 +315,7 @@ SELECT
 -- WHERE id IN (
 --     SELECT ppe.id FROM mes.partida_paso_ejecucion ppe
 --     JOIN mes.partida_paso pp ON pp.id = ppe.partida_paso_id
---     WHERE pp.partida_id = 4610
+--     WHERE pp.partida_id = 4502
 -- );
 
 ----JSON PAYLOAD
@@ -306,19 +329,19 @@ SELECT
 --     'output', jsonb_agg(jsonb_build_object('input_lote_id', l.id))
 -- )
 -- FROM inventario.lote l
--- WHERE l.documento_tipo = 'PARTIDA' AND l.documento_id = 4610;
+-- WHERE l.documento_tipo = 'PARTIDA' AND l.documento_id = 4502;
 
 -- SELECT mes.registrar_produccion((SELECT id FROm mes.partida_paso_ejecucion WHERE partida_paso_id IN
--- (SELECT id FROM mes.partida_paso WHERe partida_id=4610)), '{"output": [{"input_lote_id": 122731}, {"input_lote_id": 122732}, {"input_lote_id": 122733}, {"input_lote_id": 122734}, {"input_lote_id": 122735}, {"input_lote_id": 122736}, {"input_lote_id": 122738}, {"input_lote_id": 122739}, {"input_lote_id": 122740}, {"input_lote_id": 122741}, {"input_lote_id": 122742}, {"input_lote_id": 122743}, {"input_lote_id": 122744}, {"input_lote_id": 122745}, {"input_lote_id": 122746}, {"input_lote_id": 122748}, {"input_lote_id": 122749}, {"input_lote_id": 122750}, {"input_lote_id": 122751}, {"input_lote_id": 122752}, {"input_lote_id": 122737}, {"input_lote_id": 122747}], "peso_rib": 90.6, "ubicacion_id": 9}')
+-- (SELECT id FROM mes.partida_paso WHERe partida_id=4502)), '{"output": [{"input_lote_id": 122731}, {"input_lote_id": 122732}, {"input_lote_id": 122733}, {"input_lote_id": 122734}, {"input_lote_id": 122735}, {"input_lote_id": 122736}, {"input_lote_id": 122738}, {"input_lote_id": 122739}, {"input_lote_id": 122740}, {"input_lote_id": 122741}, {"input_lote_id": 122742}, {"input_lote_id": 122743}, {"input_lote_id": 122744}, {"input_lote_id": 122745}, {"input_lote_id": 122746}, {"input_lote_id": 122748}, {"input_lote_id": 122749}, {"input_lote_id": 122750}, {"input_lote_id": 122751}, {"input_lote_id": 122752}, {"input_lote_id": 122737}, {"input_lote_id": 122747}], "peso_rib": 90.6, "ubicacion_id": 9}')
 
-
--- update mes.partida_paso_ejecucion set estado='EN_PROCESO' where id=(SELECT id FROm mes.partida_paso_ejecucion WHERE partida_paso_id IN
--- (SELECT id 
--- FROM mes.partida_paso WHERe partida_id=4610 AND operacion_id=2))
+UPDATE mes.partida SET estado_produccion='PROGRAMADA' WHERE id=4502;
+update mes.partida_paso_ejecucion set estado='EN_PROCESO' where id=(SELECT id FROm mes.partida_paso_ejecucion WHERE partida_paso_id IN
+(SELECT id 
+FROM mes.partida_paso WHERe partida_id=4502 AND operacion_id=2));
 
 SELECT mes.registrar_produccion(
     (SELECT id FROM mes.partida_paso_ejecucion
-     WHERE partida_paso_id IN (SELECT id FROM mes.partida_paso WHERE partida_id = 4610 AND operacion_id=2)
+     WHERE partida_paso_id IN (SELECT id FROM mes.partida_paso WHERE partida_id = 4502 AND operacion_id=2)
        AND estado = 'EN_PROCESO'),
     (SELECT jsonb_build_object(
         'ubicacion_id', (SELECT ub.id FROM inventario.ubicacion ub
@@ -331,30 +354,33 @@ SELECT mes.registrar_produccion(
      FROM mes.partida_componente pc
      JOIN inventario.lote l      ON l.id = pc.lote_id
      JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
-     WHERE pc.partida_id = 4610 AND pc.lote_id IS NOT NULL)
+     WHERE pc.partida_id = 4502 AND pc.lote_id IS NOT NULL)
 );
 
-SELECT * FROM mes.partida_paso_ejecucion 
-WHERE partida_paso_id= (SELECT id FROM mes.partida_paso WHERE partida_id=4143 AND operacion_id=2);
---2105
-SELECT * FROM inventario.lote WHERE documento_tipo='partida_paso_ejecucion' AND documento_id=2105;
+-- SELECT * FROM mes.partida_paso_ejecucion 
+-- WHERE partida_paso_id= (SELECT id FROM mes.partida_paso WHERE partida_id=4143 AND operacion_id=2);
+-- --2105
+-- SELECT * FROM inventario.lote WHERE documento_tipo='partida_paso_ejecucion' AND documento_id=2105;
 
 
 update mes.partida_paso set estado='COMPLETADO' 
-where partida_id= 4610;
+where partida_id= 4502;
 
--- (SELECT id FROM mes.partida_paso WHERe partida_id=4610);
+UPDATE mes.partida SET estado_produccion='TECO' WHERE id=4502;
+UPDATE mes.partida SET estado_comercial='PENDIENTE' WHERE id=4502;
+
+-- (SELECT id FROM mes.partida_paso WHERe partida_id=4502);
 update mes.partida_paso_ejecucion set estado='COMPLETADO' where id=(SELECT id FROm mes.partida_paso_ejecucion WHERE partida_paso_id IN
-(SELECT id FROM mes.partida_paso WHERe partida_id=4610));
+(SELECT id FROM mes.partida_paso WHERe partida_id=4502));
 
 update mes.partida_paso_ejecucion set estado='COMPLETADO' 
 where id=(SELECT id FROm mes.partida_paso_ejecucion WHERE partida_paso_id IN
-(SELECT id FROM mes.partida_paso WHERe partida_id=4610));
+(SELECT id FROM mes.partida_paso WHERe partida_id=4502));
 
 SELECT * FROM mes.partida_paso_ejecucion WHERE partida_paso_id IN
-(SELECT id FROM mes.partida_paso WHERe partida_id=4610)
+(SELECT id FROM mes.partida_paso WHERe partida_id=4502)
 
-UPDATE mes.partida SET estado_produccion='TECO' WHERE id=4610;
+UPDATE mes.partida SET estado_produccion='TECO' WHERE id=4502;
 
 SELECT * FROm inventario.lote WHERE secuencia=28733
 
@@ -571,16 +597,16 @@ WHERE articulo_tipo_id IN (38,44)
 
 
 
- -- How many lotes were created for partida 4610?
-SELECT COUNT(*) FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4610;
+ -- How many lotes were created for partida 4502?
+SELECT COUNT(*) FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4502;
 
 -- Was registrar_produccion successful (output lotes exist)?
 SELECT COUNT(*) FROM inventario.lote WHERE documento_tipo='partida_paso_ejecucion'
   AND documento_id IN (SELECT id FROM mes.partida_paso_ejecucion
-                       WHERE partida_paso_id IN (SELECT id FROM mes.partida_paso WHERE partida_id=4610));
+                       WHERE partida_paso_id IN (SELECT id FROM mes.partida_paso WHERE partida_id=4502));
 
 -- Current partida state
-SELECT estado_produccion FROM mes.partida WHERE id=4610;
+SELECT estado_produccion FROM mes.partida WHERE id=4502;
 
 
 BEGIN;
@@ -589,24 +615,24 @@ BEGIN;
 DELETE FROM inventario.item_movimientos
 WHERE lote_id IN (
     SELECT id FROM inventario.lote
-    WHERE documento_tipo = 'PARTIDA' AND documento_id = 4610
+    WHERE documento_tipo = 'PARTIDA' AND documento_id = 4502
 );
 
 -- 2. partida_componente reservations
 DELETE FROM mes.partida_componente
-WHERE partida_id = 4610
-  AND lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4610);
+WHERE partida_id = 4502
+  AND lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4502);
 
 -- 3. the 46 lotes
-DELETE FROM inventario.lote WHERE documento_tipo = 'PARTIDA' AND documento_id = 4610;
+DELETE FROM inventario.lote WHERE documento_tipo = 'PARTIDA' AND documento_id = 4502;
 
 -- 4. ejecucion + paso added by the script
 DELETE FROM mes.partida_paso_ejecucion
-WHERE partida_paso_id IN (SELECT id FROM mes.partida_paso WHERE partida_id=4610 AND operacion_id=2);
-DELETE FROM mes.partida_paso WHERE partida_id=4610 AND operacion_id=2;
+WHERE partida_paso_id IN (SELECT id FROM mes.partida_paso WHERE partida_id=4502 AND operacion_id=2);
+DELETE FROM mes.partida_paso WHERE partida_id=4502 AND operacion_id=2;
 
 -- CHECK before committing
-SELECT COUNT(*) FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4610;
+SELECT COUNT(*) FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4502;
 
 BEGIN;
 
@@ -614,7 +640,7 @@ BEGIN;
 CREATE TEMP TABLE _lote_class AS
 WITH expected AS (
     SELECT item_id, cantidad::INT AS expected_count
-    FROM mes.partida_detalle WHERE partida_id = 4610
+    FROM mes.partida_detalle WHERE partida_id = 4502
 ),
 ranked AS (
     SELECT l.id, l.item_id, l.cantidad,
@@ -622,7 +648,7 @@ ranked AS (
            e.expected_count
     FROM inventario.lote l
     JOIN expected e ON e.item_id = l.item_id
-    WHERE l.documento_tipo = 'PARTIDA' AND l.documento_id = 4610
+    WHERE l.documento_tipo = 'PARTIDA' AND l.documento_id = 4502
 )
 SELECT id, item_id, cantidad,
        CASE WHEN rn <= expected_count THEN 'valid' ELSE 'bad' END AS status
@@ -638,13 +664,13 @@ DELETE FROM inventario.lote             WHERE id      IN (SELECT id FROM _lote_c
 
 -- 2. Re-add valid lotes to partida_componente (no-op if already there)
 INSERT INTO mes.partida_componente (partida_id, lote_id, cantidad_reservada, usr_cre)
-SELECT 4610, id, cantidad, NULL
+SELECT 4502, id, cantidad, NULL
 FROM _lote_class WHERE status = 'valid'
 ON CONFLICT (partida_id, lote_id) WHERE lote_id IS NOT NULL DO NOTHING;
 
 -- Final check
 SELECT COUNT(*) AS valid_lotes   FROM _lote_class WHERE status='valid';
-SELECT COUNT(*) AS in_componente FROM mes.partida_componente WHERE partida_id=4610 AND lote_id IS NOT NULL;
+SELECT COUNT(*) AS in_componente FROM mes.partida_componente WHERE partida_id=4502 AND lote_id IS NOT NULL;
 
 -- COMMIT; / ROLLBACK;
 
@@ -660,12 +686,12 @@ SELECT * FROM mes.partida_paso_ejecucion WHERE partida_paso_id IN (SELECT id FRO
 -- 1. What partida_detalle says should exist (source of truth)
 SELECT item_id, cantidad::INT AS expected_rolls
 FROM mes.partida_detalle
-WHERE partida_id = 4610;
+WHERE partida_id = 4502;
 
 -- 2. What lotes actually exist, per item
 SELECT item_id, COUNT(*) AS actual_lotes, MIN(id) AS first_id, MAX(id) AS last_id
 FROM inventario.lote
-WHERE documento_tipo = 'PARTIDA' AND documento_id = 4610
+WHERE documento_tipo = 'PARTIDA' AND documento_id = 4502
 GROUP BY item_id ORDER BY item_id;
 
 -- 3. How many movements exist for those lotes (and what type)
@@ -673,21 +699,21 @@ SELECT imt.codigo, COUNT(*) AS cnt
 FROM inventario.item_movimientos m
 JOIN inventario.item_movimiento_tipo imt ON imt.id = m.item_movimiento_tipo_id
 WHERE m.lote_id IN (
-    SELECT id FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4610
+    SELECT id FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4502
 )
 GROUP BY imt.codigo;
 
 -- 4. partida_componente state
 SELECT COUNT(*) AS componente_rows
 FROM mes.partida_componente
-WHERE partida_id = 4610 AND lote_id IS NOT NULL;
+WHERE partida_id = 4502 AND lote_id IS NOT NULL;
 
 -- 5. partida_paso and ejecucion state
 SELECT pp.id, pp.operacion_id, pp.secuencia,
        ppe.id AS ejecucion_id, ppe.estado, ppe.fyh_inicio, ppe.fyh_fin
 FROM mes.partida_paso pp
 LEFT JOIN mes.partida_paso_ejecucion ppe ON ppe.partida_paso_id = pp.id
-WHERE pp.partida_id = 4610;
+WHERE pp.partida_id = 4502;
 
 
 
@@ -701,7 +727,7 @@ BEGIN;
 CREATE TEMP TABLE _lote_class AS
 WITH expected AS (
     SELECT item_id, cantidad::INT AS expected_count
-    FROM mes.partida_detalle WHERE partida_id = 4610
+    FROM mes.partida_detalle WHERE partida_id = 4502
 ),
 ranked AS (
     SELECT l.id, l.item_id, l.cantidad,
@@ -709,7 +735,7 @@ ranked AS (
            e.expected_count
     FROM inventario.lote l
     JOIN expected e ON e.item_id = l.item_id
-    WHERE l.documento_tipo = 'PARTIDA' AND l.documento_id = 4610
+    WHERE l.documento_tipo = 'PARTIDA' AND l.documento_id = 4502
 )
 SELECT id, item_id, cantidad,
        CASE WHEN rn <= expected_count THEN 'valid' ELSE 'bad' END AS status
@@ -742,19 +768,19 @@ SELECT
     (SELECT ub.id FROM inventario.ubicacion ub
      JOIN inventario.almacen alm ON alm.id = ub.almacen_id
      WHERE alm.codigo = 'ALM_CRU' LIMIT 1),
-    lc.cantidad, 'PARTIDA', 4610,
-    'Ingreso artificial de rollo MLR propio para partida 4610', NULL
+    lc.cantidad, 'PARTIDA', 4502,
+    'Ingreso artificial de rollo MLR propio para partida 4502', NULL
 FROM _lote_class lc WHERE lc.status = 'valid';
 
 -- 3. Restore partida_componente for valid lotes
 INSERT INTO mes.partida_componente (partida_id, lote_id, cantidad_reservada, usr_cre)
-SELECT 4610, id, cantidad, NULL
+SELECT 4502, id, cantidad, NULL
 FROM _lote_class WHERE status = 'valid';
 
 -- Final verification
-SELECT COUNT(*) AS lotes   FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4610;
+SELECT COUNT(*) AS lotes   FROM inventario.lote WHERE documento_tipo='PARTIDA' AND documento_id=4502;
 SELECT COUNT(*) AS movs    FROM inventario.item_movimientos WHERE lote_id IN (SELECT id FROM _lote_class WHERE status='valid');
-SELECT COUNT(*) AS comps   FROM mes.partida_componente WHERE partida_id=4610 AND lote_id IS NOT NULL;
+SELECT COUNT(*) AS comps   FROM mes.partida_componente WHERE partida_id=4502 AND lote_id IS NOT NULL;
 
 -- COMMIT; / ROLLBACK;
 -- ══════════════════════════════════════════════════════════════════

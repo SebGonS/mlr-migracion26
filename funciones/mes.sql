@@ -132,35 +132,27 @@ LANGUAGE sql STABLE
 SET search_path TO 'public','doc','mes','inventario','receta'
 AS $$
 WITH
--- Pre-aggregate once to replace per-row correlated subqueries
-ejecuciones_cnt AS (
-    SELECT partida_paso_id, COUNT(*) AS cnt
-    FROM mes.partida_paso_ejecucion
-    WHERE estado IN ('COMPLETADO', 'OMITIDO')
-    GROUP BY partida_paso_id
-),
-lotes_cnt AS (
-    SELECT partida_id, COUNT(*) AS cnt
-    FROM mes.partida_componente
-    WHERE lote_id IS NOT NULL
-    GROUP BY partida_id
-),
--- Compute the pending set once; reused by guias_partida, rollos_partida, and the main SELECT
-pasos_pendientes AS (
+pasos_pendientes AS MATERIALIZED (
     SELECT pp.id AS partida_paso_id, pp.partida_id
     FROM mes.partida_paso pp
-    JOIN mes.partida p           ON p.id  = pp.partida_id
-    LEFT JOIN ejecuciones_cnt ec ON ec.partida_paso_id = pp.id
-    LEFT JOIN lotes_cnt lc       ON lc.partida_id      = pp.partida_id
-    LEFT JOIN mes.programacion prog_sched
-           ON prog_sched.actividad_tipo = 'partida_paso'
-          AND prog_sched.actividad_id   = pp.id
-          AND prog_sched.fecha         >= CURRENT_DATE
+    JOIN mes.partida p ON p.id = pp.partida_id
     WHERE p.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
       AND p.fyh_elm IS NULL
       AND pp.estado NOT IN ('COMPLETADO', 'OMITIDO')
-      AND COALESCE(ec.cnt, 0) < COALESCE(lc.cnt, 0)
-      AND prog_sched.id IS NULL
+      AND EXISTS (
+          SELECT 1 FROM mes.partida_componente pc
+          WHERE pc.partida_id = pp.partida_id AND pc.lote_id IS NOT NULL
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM mes.partida_paso_ejecucion pe
+          WHERE pe.partida_paso_id = pp.id AND pe.estado = 'EN_PROCESO'
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM mes.programacion prog
+          WHERE prog.actividad_tipo = 'partida_paso'
+            AND prog.actividad_id = pp.id
+            AND prog.fecha >= CURRENT_DATE
+      )
 ),
 guias_partida AS (
     SELECT
@@ -262,7 +254,6 @@ FROM (
       AND prog_lav.id IS NULL
 ) sub;
 $$;
-
 
 
 -- ═══════════════════════════════════════════════════════════════

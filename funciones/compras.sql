@@ -537,17 +537,11 @@ AS $$
         FROM inventario.item_movimientos im
         JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
         WHERE imt.codigo = 'COMPRA_ING'
-          AND im.fyh_elm IS NULL
           AND im.item_id = cd.item_id
-          AND (
-              (im.documento_tipo = 'guia_remision'
-               AND im.documento_id IN (
-                   SELECT guia_remision_id FROM doc.compra_guia_remision
-                   WHERE compra_id = p_compra_id
-               ))
-              OR
-              (im.documento_tipo = 'compra'
-               AND im.documento_id = p_compra_id)
+          AND im.documento_tipo = 'guia_remision'
+          AND im.documento_id IN (
+              SELECT guia_remision_id FROM doc.compra_guia_remision
+              WHERE compra_id = p_compra_id
           )
     ), 0)
     WHERE cd.compra_id = p_compra_id;
@@ -824,7 +818,7 @@ SELECT jsonb_build_object(
             'total',                fp.total,
             'moneda',               fp.moneda,
             'estado_pago',          fp.estado_pago,
-            'nota',                 cfp.nota
+            'observacion',          fp.observacion
         ) ORDER BY fp.fecha_emision, fp.id)
         FROM doc.compra_factura_proveedor cfp
         JOIN doc.factura_proveedor fp ON fp.id = cfp.factura_proveedor_id
@@ -1390,10 +1384,11 @@ DECLARE
     v_flg_rib       boolean;
     v_flg_rollo     boolean;
     v_precio        numeric;
+    v_fecha_mov     TIMESTAMPTZ;
     i               int;
 BEGIN
-    IF NOT jwt_has_permission('compras.ingresar') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere compras.ingresar'
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
@@ -1416,6 +1411,7 @@ BEGIN
         WHERE alm.codigo = 'ALM_CRU' LIMIT 1;
     END IF;
 
+    v_fecha_mov  := COALESCE((p_datos->>'fecha_recepcion')::TIMESTAMPTZ, now());
     v_doc_mov_id := nextval('inventario.mov_doc_seq');
 
     FOR v_elem IN SELECT jsonb_array_elements(p_datos->'items') LOOP
@@ -1457,11 +1453,11 @@ BEGIN
                 INSERT INTO inventario.item_movimientos (
                     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
                     origen_ubicacion_id, destino_ubicacion_id,
-                    cantidad, precio_unitario, documento_tipo, documento_id, observacion, usr_cre
+                    cantidad, precio_unitario, fecha_hora, documento_tipo, documento_id, observacion, usr_cre
                 ) VALUES (
                     v_doc_mov_id, v_item_id, v_lote_id, v_mov_tipo_id,
                     NULL, v_ubicacion_id,
-                    v_peso_rollo, v_precio, 'compra', v_compra_id,
+                    v_peso_rollo, v_precio, v_fecha_mov, 'compra', v_compra_id,
                     'Ingreso compra #' || v_compra_id, v_usr_id
                 );
             END LOOP;
@@ -1475,11 +1471,11 @@ BEGIN
             INSERT INTO inventario.item_movimientos (
                 doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
                 origen_ubicacion_id, destino_ubicacion_id,
-                cantidad, precio_unitario, documento_tipo, documento_id, observacion, usr_cre
+                cantidad, precio_unitario, fecha_hora, documento_tipo, documento_id, observacion, usr_cre
             ) VALUES (
                 v_doc_mov_id, v_item_id, v_lote_id, v_mov_tipo_id,
                 NULL, v_ubicacion_id,
-                v_cantidad, v_precio, 'compra', v_compra_id,
+                v_cantidad, v_precio, v_fecha_mov, 'compra', v_compra_id,
                 'Ingreso compra #' || v_compra_id, v_usr_id
             );
 
