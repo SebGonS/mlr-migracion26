@@ -10,7 +10,7 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 
 WITH v AS (
-    SELECT 5950 AS v_partida_id  -- ← EDIT THIS
+    SELECT 5177 AS v_partida_id  -- ← EDIT THIS
 )
 
 -- ── Gate 1: partida estado_produccion & soft-delete
@@ -192,3 +192,4 @@ ORDER BY gate, paso_id;
 -- SELEcT * FROM mes.partida_paso_ejecucion WHERE partida_paso_id IN (7783)
 
 --SELECT mes.get_partida(5194)
+

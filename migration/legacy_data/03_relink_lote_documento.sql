@@ -1,12 +1,12 @@
 -- ============================================================
 -- Fix documento linkage: reassign lotes & movements from
---   documento_tipo = 'PARTIDA'  →  'GUIA_REMISION'
+--   documento_tipo = 'PARTIDA'  →  'guia_remision'
 --
 -- Use case: rows in lote and item_movimientos are currently
 -- tagged as PARTIDA but should point back to the guia_remision
 -- that originated them.
 --
--- Source of new values  : inventario.lote WHERE documento_tipo='GUIA_REMISION' AND documento_id=v_guia_remision_id
+-- Source of new values  : inventario.lote WHERE documento_tipo='guia_remision' AND documento_id=v_guia_remision_id
 -- Targets to UPDATE     :
 --   inventario.lote              WHERE documento_tipo='PARTIDA' AND documento_id=v_partida_id
 --   inventario.item_movimientos  WHERE documento_tipo='PARTIDA' AND documento_id=v_partida_id
@@ -42,7 +42,7 @@ AND    documento_id   = 5190;   -- ← v_partida_id
 -- New values they will be set to (confirm these exist):
 SELECT documento_tipo, documento_id
 FROM   inventario.lote
-WHERE  documento_tipo = 'GUIA_REMISION'
+WHERE  documento_tipo = 'guia_remision'
 AND    documento_id   = 681;    -- ← v_guia_remision_id
 */
 SELECT * FROM doc.guia_remision WHERE correlativo IN ('394','481' )
@@ -78,7 +78,7 @@ BEGIN
 
     -- 2. Update inventario.lote
     UPDATE inventario.lote
-    SET    documento_tipo = 'GUIA_REMISION',
+    SET    documento_tipo = 'guia_remision',
            documento_id   = v_guia_remision_id
     WHERE  documento_tipo = 'PARTIDA'
       AND  documento_id   = v_partida_id
@@ -90,13 +90,13 @@ BEGIN
     -- 3. Update inventario.item_movimientos
     --    Join lote (already flipped in step 2) to apply the item filter
     UPDATE inventario.item_movimientos m
-    SET    documento_tipo = 'GUIA_REMISION',
+    SET    documento_tipo = 'guia_remision',
            documento_id   = v_guia_remision_id
     FROM   inventario.lote l
     WHERE  m.lote_id        = l.id
       AND  m.documento_tipo = 'PARTIDA'
       AND  m.documento_id   = v_partida_id
-      AND  l.documento_tipo = 'GUIA_REMISION'    -- lote already flipped in step 2
+      AND  l.documento_tipo = 'guia_remision'    -- lote already flipped in step 2
       AND  l.documento_id   = v_guia_remision_id
       AND  (cardinality(v_item_ids) = 0 OR l.item_id = ANY(v_item_ids));
 
@@ -114,12 +114,12 @@ $$;
 /*
 SELECT id, numero, item_id, cantidad, documento_tipo, documento_id
 FROM   inventario.lote
-WHERE  documento_tipo = 'GUIA_REMISION'
+WHERE  documento_tipo = 'guia_remision'
 AND    documento_id   = 681;    -- ← v_guia_remision_id
 
 SELECT id, lote_id, tipo, cantidad, documento_tipo, documento_id
 FROM   inventario.item_movimientos
-WHERE  documento_tipo = 'GUIA_REMISION'
+WHERE  documento_tipo = 'guia_remision'
 AND    documento_id   = 681;    -- ← v_guia_remision_id
 
 SELECT id, guia_remision_id, item_id, lote_id, ubicacion_id, cantidad

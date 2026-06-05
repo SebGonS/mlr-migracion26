@@ -269,7 +269,7 @@ BEGIN
             (f->>'ubicacion_id')::INT,
             (f->>'cantidad')::NUMERIC,
             iv.precio_promedio,        -- stamp MAP at time of adjustment
-            'CUADRE',
+            'cuadre',
             p_cuadre_id
         FROM jsonb_array_elements(v_fifo_result) f
         LEFT JOIN inventario.item_valoracion iv ON iv.item_id = (f->>'item_id')::INT;
@@ -292,7 +292,7 @@ BEGIN
     LOOP
         WITH ins_lote AS (
             INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad)
-            VALUES (v_rec.item_id, 'CUADRE', p_cuadre_id, v_rec.diferencia)
+            VALUES (v_rec.item_id, 'cuadre', p_cuadre_id, v_rec.diferencia)
             RETURNING id
         ),
         ins_lrd AS (
@@ -321,7 +321,7 @@ BEGIN
             v_ubicacion_id,
             v_rec.diferencia,
             v_rec.precio,    -- enter at MAP so weighted average stays stable
-            'CUADRE',
+            'cuadre',
             p_cuadre_id
         FROM ins_lote;
     END LOOP;
@@ -394,7 +394,7 @@ BEGIN
         SELECT id INTO v_tipo_id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS';
 
         INSERT INTO inventario.lote (item_id, documento_tipo, cantidad)
-        VALUES (p_item_id, 'AJUSTE', p_cantidad)
+        VALUES (p_item_id, 'ajuste', p_cantidad)
         RETURNING id INTO v_lote_id;
 
         INSERT INTO inventario.item_movimientos (
@@ -404,7 +404,7 @@ BEGIN
         ) VALUES (
             v_doc_movimiento_id, p_item_id, v_lote_id, v_tipo_id,
             p_ubicacion_id, p_cantidad, v_precio,
-            'AJUSTE', v_lote_id, p_observacion
+            'ajuste', v_lote_id, p_observacion
         );
 
     ELSE
@@ -433,7 +433,7 @@ BEGIN
             (f->>'ubicacion_id')::INT,
             (f->>'cantidad')::NUMERIC,
             v_precio,
-            'AJUSTE', v_doc_movimiento_id, p_observacion
+            'ajuste', v_doc_movimiento_id, p_observacion
         FROM jsonb_array_elements(v_fifo_result) f;
     END IF;
 
@@ -687,180 +687,6 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_produccion(BIGINT, NUMERIC, NUMERIC) TO authenticated;
-
--- ═══════════════════════════════════════════════════════════════
--- inventario.registrar_pesaje_grupo
---
--- Group-scoped ingress weighing. Called when the scheduler weighs
--- rolls grouped by (partida ▸ guía ▸ ítem ▸ tipo) — i.e., the user
--- provides one total weight for all rolls of a specific item arriving
--- on a specific guía within a partida.
---
--- Distributes p_peso_total_kg evenly across the matched rolls.
--- Same chain as registrar_pesaje_produccion: upserts pesaje,
--- posts PESAJE_POS/NEG to item_movimientos, updates lote.cantidad.
--- Raises if any matched roll already has a PROD_CONSUMO movement.
--- ═══════════════════════════════════════════════════════════════
-DROP FUNCTION IF EXISTS inventario.registrar_pesaje_grupo(BIGINT, BIGINT, BIGINT, BOOLEAN, NUMERIC);
-
-CREATE OR REPLACE FUNCTION inventario.registrar_pesaje_grupo(
-    p_partida_id        BIGINT,
-    p_guia_remision_id  BIGINT,   -- NULL = rolls with no guia
-    p_item_id           BIGINT,
-    p_flg_rib           BOOLEAN,
-    p_peso_total_kg     NUMERIC
-)
-RETURNS text
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'iam','public','inventario','mes','doc'
-AS $$
-DECLARE
-    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id            int := get_user_id();
-    v_pesaje_pos_id     smallint;
-    v_pesaje_neg_id     smallint;
-    v_doc_movimiento_id bigint;
-    v_cantidad          int;
-    v_peso_por_rollo    numeric;
-    v_updated           int := 0;
-BEGIN
-    IF NOT jwt_has_permission('inventario.editar') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-
-    IF NOT EXISTS (SELECT 1 FROM mes.partida WHERE id = p_partida_id) THEN
-        RAISE EXCEPTION 'partida #% no encontrado.', p_partida_id;
-    END IF;
-
-    -- Guard: no roll in this group may already be in production
-    IF EXISTS (
-        SELECT 1
-        FROM mes.partida_componente pc
-        JOIN inventario.lote l                      ON l.id = pc.lote_id AND l.fyh_elm IS NULL
-        JOIN item_rollo_detalle ird                 ON ird.item_id = l.item_id AND ird.flg_rib = p_flg_rib
-        LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-        JOIN inventario.item_movimientos im         ON im.lote_id = l.id
-        JOIN inventario.item_movimiento_tipo imt    ON imt.id = im.item_movimiento_tipo_id
-        WHERE pc.partida_id = p_partida_id
-          AND l.item_id     = p_item_id
-          AND (
-              (p_guia_remision_id IS NULL AND lrd.guia_remision_id IS NULL)
-              OR lrd.guia_remision_id = p_guia_remision_id
-          )
-          AND imt.codigo = 'PROD_CONSUMO'
-    ) THEN
-        RAISE EXCEPTION
-            'No se puede modificar pesos: uno o más rollos del grupo ya tienen movimientos de producción (partida #%, ítem #%, guía #%).',
-            p_partida_id, p_item_id, p_guia_remision_id;
-    END IF;
-
-    -- Count rolls in this specific (partida, guia, item, tipo) group
-    SELECT COUNT(DISTINCT l.id)
-    INTO v_cantidad
-    FROM mes.partida_componente pc
-    JOIN inventario.lote l                      ON l.id = pc.lote_id AND l.fyh_elm IS NULL
-    JOIN item_rollo_detalle ird                 ON ird.item_id = l.item_id AND ird.flg_rib = p_flg_rib
-    LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-    WHERE pc.partida_id = p_partida_id
-      AND l.item_id     = p_item_id
-      AND (
-          (p_guia_remision_id IS NULL AND lrd.guia_remision_id IS NULL)
-          OR lrd.guia_remision_id = p_guia_remision_id
-      );
-
-    IF v_cantidad = 0 THEN
-        RAISE EXCEPTION 'No se encontraron rollos para el grupo (partida #%, ítem #%, guía #%, rib=%).',
-            p_partida_id, p_item_id, p_guia_remision_id, p_flg_rib;
-    END IF;
-
-    v_peso_por_rollo := ROUND(p_peso_total_kg / v_cantidad, 4);
-
-    SELECT id INTO v_pesaje_pos_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_POS';
-    SELECT id INTO v_pesaje_neg_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PESAJE_NEG';
-    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
-
-    WITH rolls AS (
-        SELECT DISTINCT ON (l.id)
-            l.id       AS lote_id,
-            l.item_id,
-            l.cantidad AS peso_anterior,
-            sa.ubicacion_id,
-            v_peso_por_rollo AS peso_nuevo
-        FROM mes.partida_componente pc
-        JOIN inventario.lote l                      ON l.id = pc.lote_id AND l.fyh_elm IS NULL
-        JOIN item_rollo_detalle ird                 ON ird.item_id = l.item_id AND ird.flg_rib = p_flg_rib
-        LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-        JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
-        WHERE pc.partida_id = p_partida_id
-          AND l.item_id     = p_item_id
-          AND (
-              (p_guia_remision_id IS NULL AND lrd.guia_remision_id IS NULL)
-              OR lrd.guia_remision_id = p_guia_remision_id
-          )
-        ORDER BY l.id
-    ),
-    pesajes AS (
-        INSERT INTO inventario.pesaje (lote_id, tipo, peso_real, usr_cre)
-        SELECT r.lote_id, 'INGRESO', r.peso_nuevo, v_usr_id
-        FROM rolls r
-        ON CONFLICT (lote_id) DO UPDATE
-            SET peso_real = EXCLUDED.peso_real,
-                tipo      = EXCLUDED.tipo
-        RETURNING lote_id
-    ),
-    movimientos AS (
-        INSERT INTO inventario.item_movimientos (
-            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-            origen_ubicacion_id, destino_ubicacion_id,
-            cantidad, documento_tipo, documento_id
-        )
-        SELECT
-            v_doc_movimiento_id,
-            r.item_id, r.lote_id,
-            CASE WHEN r.peso_nuevo > r.peso_anterior THEN v_pesaje_pos_id
-                 ELSE v_pesaje_neg_id END,
-            CASE WHEN r.peso_nuevo < r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
-            CASE WHEN r.peso_nuevo > r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
-            ABS(r.peso_nuevo - r.peso_anterior),
-            'partida', p_partida_id
-        FROM rolls r
-        JOIN pesajes p ON p.lote_id = r.lote_id
-        WHERE r.peso_nuevo <> r.peso_anterior
-    )
-    UPDATE inventario.lote l
-    SET cantidad = r.peso_nuevo
-    FROM rolls r
-    WHERE l.id = r.lote_id;
-
-    GET DIAGNOSTICS v_updated = ROW_COUNT;
-
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('registrar_pesaje_grupo', v_usr_id, jsonb_build_object(
-        'partida_id',       p_partida_id,
-        'guia_remision_id', p_guia_remision_id,
-        'item_id',          p_item_id,
-        'flg_rib',          p_flg_rib,
-        'peso_total_kg',    p_peso_total_kg
-    ));
-
-    RETURN format(
-        'Pesaje registrado: partida #%s, ítem #%s, guía #%s, rib=%s → %s rollos × %s kg (total %s kg).',
-        p_partida_id, p_item_id, COALESCE(p_guia_remision_id::text, 'sin guía'), p_flg_rib,
-        v_cantidad, v_peso_por_rollo, p_peso_total_kg
-    );
-
-EXCEPTION WHEN OTHERS THEN
-    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
-        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error en registrar_pesaje_grupo - User: %, partida: %, item: %, guia: %, Error: %, Detail: %',
-              v_usr_id, p_partida_id, p_item_id, p_guia_remision_id, v_message, v_detail;
-    RAISE;
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_grupo(BIGINT, BIGINT, BIGINT, BOOLEAN, NUMERIC) TO authenticated;
 
 -- ═══════════════════════════════════════════════════════════════
 -- inventario.registrar_pesaje_guia  (prorated)
@@ -1134,7 +960,7 @@ BEGIN
             CASE WHEN r.peso_nuevo < r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
             CASE WHEN r.peso_nuevo > r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
             ABS(r.peso_nuevo - r.peso_anterior),
-            'GUIA_REMISION', p_guia_id
+            'guia_remision', p_guia_id
         FROM rolls r
         JOIN pesajes p ON p.lote_id = r.lote_id
         WHERE r.peso_nuevo <> r.peso_anterior
@@ -1548,6 +1374,141 @@ END;
 $function$;
 
 GRANT EXECUTE ON FUNCTION inventario.corregir_pesaje_produccion(BIGINT, NUMERIC, NUMERIC) TO authenticated;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- GET MOVIMIENTOS ITEM — full movement ledger for one item
+--   Returns header (stock, MAP price) + chronological movement
+--   timeline with running balance. Polymorphic document context
+--   resolved for partida_paso_ejecucion and guia_remision.
+--   Frontend filters by date client-side (dataset is small per item).
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION inventario.get_movimientos_item(p_item_id INT)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'public', 'inventario', 'mes', 'doc'
+AS $function$
+DECLARE
+    v_item   JSONB;
+    v_movs   JSONB;
+BEGIN
+    -- Header
+    SELECT jsonb_build_object(
+        'item_id',        it.id,
+        'item_codigo',    it.codigo,
+        'item_nombre',    it.nombre,
+        'item_tipo',      ity.descripcion,
+        'flg_fungible',   it.flg_fungible,
+        'unidad',         u.codigo,
+        'stock_actual',   COALESCE(sg.cantidad_total, 0),
+        'precio_promedio', iv.precio_promedio,
+        'stock_valorado', ROUND((COALESCE(sg.cantidad_total, 0) * COALESCE(iv.precio_promedio, 0))::numeric, 4)
+    )
+    INTO v_item
+    FROM item it
+    JOIN item_tipo ity                  ON ity.id = it.item_tipo_id
+    JOIN unidad u                       ON u.id   = it.unidad_id
+    LEFT JOIN inventario.vw_stock_items sg  ON sg.item_id  = it.id
+    LEFT JOIN inventario.item_valoracion iv ON iv.item_id  = it.id
+    WHERE it.id = p_item_id;
+
+    IF v_item IS NULL THEN
+        RAISE EXCEPTION 'Item #% no encontrado.', p_item_id;
+    END IF;
+
+    -- Movements with running balance
+    SELECT jsonb_agg(
+        jsonb_build_object(
+            'id',                 m.id,
+            'fecha_hora',         m.fecha_hora,
+            'tipo_codigo',        m.tipo_codigo,
+            'tipo_nombre',        m.tipo_nombre,
+            'categoria',          m.categoria,
+            'factor',             m.factor,
+            'cantidad',           m.cantidad,
+            'cantidad_neta',      m.cantidad_neta,
+            'saldo_acumulado',    m.saldo_acumulado,
+            'lote_id',            m.lote_id,
+            'motivo_codigo',      m.motivo_codigo,
+            'motivo_nombre',      m.motivo_nombre,
+            'origen_ubicacion',   m.origen_ubicacion,
+            'destino_ubicacion',  m.destino_ubicacion,
+            'observacion',        m.observacion,
+            'documento',          m.documento
+        )
+        ORDER BY m.fecha_hora, m.id
+    )
+    INTO v_movs
+    FROM (
+        SELECT
+            im.id,
+            im.fecha_hora,
+            imt.codigo              AS tipo_codigo,
+            imt.nombre              AS tipo_nombre,
+            imt.categoria,
+            imt.factor,
+            im.cantidad,
+            im.cantidad * imt.factor AS cantidad_neta,
+            SUM(im.cantidad * imt.factor) OVER (
+                ORDER BY im.fecha_hora, im.id
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            )                        AS saldo_acumulado,
+            im.lote_id,
+            imm.codigo              AS motivo_codigo,
+            imm.nombre              AS motivo_nombre,
+            uo.nombre || COALESCE(' / ' || ao.nombre, '') AS origen_ubicacion,
+            ud.nombre || COALESCE(' / ' || ad.nombre, '') AS destino_ubicacion,
+            im.observacion,
+            CASE im.documento_tipo
+                WHEN 'partida_paso_ejecucion' THEN jsonb_build_object(
+                    'tipo',           'partida',
+                    'ejecucion_id',   ppe.id,
+                    'partida_id',     p.id,
+                    'partida_codigo', EXTRACT(YEAR FROM p.fyh_cre)::TEXT
+                                      || '-' || LPAD(p.numero::TEXT, 4, '0'),
+                    'operacion',      op.nombre
+                )
+                WHEN 'guia_remision' THEN jsonb_build_object(
+                    'tipo',      'guia',
+                    'guia_id',   gr.id,
+                    'numero',    gr.serie || '-' || gr.correlativo,
+                    'proveedor', t.nombre
+                )
+                ELSE NULL
+            END                      AS documento
+        FROM inventario.item_movimientos im
+        JOIN inventario.item_movimiento_tipo imt  ON imt.id = im.item_movimiento_tipo_id
+        LEFT JOIN inventario.item_movimiento_motivo imm ON imm.id = im.motivo_id
+        LEFT JOIN inventario.ubicacion uo ON uo.id = im.origen_ubicacion_id
+        LEFT JOIN inventario.almacen   ao ON ao.id = uo.almacen_id
+        LEFT JOIN inventario.ubicacion ud ON ud.id = im.destino_ubicacion_id
+        LEFT JOIN inventario.almacen   ad ON ad.id = ud.almacen_id
+        -- partida_paso_ejecucion context
+        LEFT JOIN mes.partida_paso_ejecucion ppe
+            ON ppe.id = im.documento_id
+           AND im.documento_tipo = 'partida_paso_ejecucion'
+        LEFT JOIN mes.partida_paso pp ON pp.id = ppe.partida_paso_id
+        LEFT JOIN mes.partida      p  ON p.id  = pp.partida_id
+        LEFT JOIN mes.operacion    op ON op.id = pp.operacion_id
+        -- guia_remision context
+        LEFT JOIN doc.guia_remision gr
+            ON gr.id = im.documento_id
+           AND im.documento_tipo = 'guia_remision'
+        LEFT JOIN tercero t ON t.id = gr.tercero_id
+        WHERE im.item_id = p_item_id
+    ) m;
+
+    RETURN jsonb_build_object(
+        'item',        v_item,
+        'movimientos', COALESCE(v_movs, '[]'::jsonb)
+    );
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION inventario.get_movimientos_item(INT) TO authenticated;
+
 
 -- CREATE OR REPLACE FUNCTION inventario.get_stock_rollo_detalles(p_item_id,p_ BIGINT)
 -- RETURNS JSONB

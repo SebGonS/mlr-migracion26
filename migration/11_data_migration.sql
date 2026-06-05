@@ -1923,7 +1923,7 @@ inserted_guias AS (
     GROUP BY 1,2
 )
 UPDATE inventario.lote 
-SET documento_tipo = 'GUIA_REMISION',
+SET documento_tipo = 'guia_remision',
 documento_id = i.id
 FROM compra_data c 
 JOIN inserted_guias i ON i.serie = c.serie AND i.correlativo = c.correlativo
@@ -1934,7 +1934,7 @@ guia_remision_id, item_id, cantidad
 )
 SELECT doc.guia_remision.id, l.item_id, l.cantidad
 FROM inventario.lote l
-JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_tipo='GUIA_REMISION';
+JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_tipo='guia_remision';
 
 SELECT setval(pg_get_serial_sequence('doc.guia_remision',        'id'), (SELECT MAX(id) FROM doc.guia_remision));
 SELECT setval(pg_get_serial_sequence('doc.guia_remision_detalle','id'), (SELECT MAX(id) FROM doc.guia_remision_detalle));
@@ -2096,13 +2096,13 @@ WHERE cid.cuadre_inventario_id IN (SELECT id FROM inventario.cuadre);
 -- ============================================================================
 -- Scope:   Insumo lotes whose legacy entrada_inventario had motivo ∈ (ajuste, reconteo)
 --          and whose timestamp matches a cuadre.fecha_cierre.
--- Effect:  Sets documento_tipo = 'CUADRE', documento_id = cuadre.id on those lotes,
+-- Effect:  Sets documento_tipo = 'cuadre', documento_id = cuadre.id on those lotes,
 --          overwriting the NULL originally set during the insumo lote INSERT.
 -- Must run BEFORE the INSUMO INGRESS MOVEMENTS block so the lote.documento_tipo
 -- values read there are already correct.
 -- ============================================================================
 UPDATE inventario.lote
-SET documento_tipo = 'CUADRE',
+SET documento_tipo = 'cuadre',
     documento_id   = ci.id
 FROM public.inventario i                                          -- legacy stock table (public schema)
 JOIN public.entrada_inventario_detalle eid ON i.entrada_inventario_detalle_id = eid.id
@@ -2130,8 +2130,8 @@ WHERE ei.motivo IN ('ajuste', 'reconteo')
 --          BACKFILL ROLL LOTES section below and have documento_tipo = 'PARTIDA').
 --
 -- Movement type mapping:
---   lote.documento_tipo = 'GUIA_REMISION'  → COMPRA_ING  (purchase arrival)
---   lote.documento_tipo = 'CUADRE'         → AJUSTE_POS  (positive adjustment from count)
+--   lote.documento_tipo = 'guia_remision'  → COMPRA_ING  (purchase arrival)
+--   lote.documento_tipo = 'cuadre'         → AJUSTE_POS  (positive adjustment from count)
 --   entrada_inventario.motivo = 'muestra'  → MUESTRA_ING (non-valorizable sample receipt)
 --   anything else (orphan/manual entries)  → AJUSTE_POS  (safe fallback)
 --
@@ -2173,8 +2173,8 @@ SELECT
     ls.item_id,
     ls.id,
     CASE ls.documento_tipo
-        WHEN 'GUIA_REMISION' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING')
-        WHEN 'CUADRE'        THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS')
+        WHEN 'guia_remision' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING')
+        WHEN 'cuadre'        THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS')
         ELSE CASE ls.motivo
             WHEN 'muestra' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'MUESTRA_ING')
             ELSE                (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS')
@@ -2210,7 +2210,7 @@ JOIN doc_posting dp
 --
 -- documento_tipo / documento_id on the movement:
 --   CUADRE-linked:      salida matches a cuadre by timestamp AND motivo ∈ (ajuste, reconteo)
---                       → documento_tipo = 'CUADRE', documento_id = cuadre.id
+--                       → documento_tipo = 'cuadre', documento_id = cuadre.id
 --                       → doc_movimiento_id reused from that cuadre's ingress posting
 --   PROD_CONSUMO + pxr: salida.partida_x_recetas_id IS NOT NULL
 --                       → documento_tipo = 'partida_paso', documento_id = opp.id (actual partida_paso.id)
@@ -2264,7 +2264,7 @@ doc_posting AS (
         COALESCE(
             (SELECT im.doc_movimiento_id
              FROM inventario.item_movimientos im
-             WHERE im.documento_tipo = 'CUADRE' AND im.documento_id = ci.id
+             WHERE im.documento_tipo = 'cuadre' AND im.documento_id = ci.id
              LIMIT 1),
             nextval('inventario.mov_doc_seq')
         ) AS doc_movimiento_id
@@ -2287,7 +2287,7 @@ SELECT
     (SELECT ub.id FROM inventario.ubicacion ub JOIN inventario.almacen alm ON alm.id = ub.almacen_id WHERE alm.codigo = 'ALM_INS'),
     sdxs.cantidad,
     CASE
-        WHEN dp.cuadre_id IS NOT NULL  THEN 'CUADRE'
+        WHEN dp.cuadre_id IS NOT NULL  THEN 'cuadre'
         WHEN mm.codigo = 'PROD_CONSUMO' AND si.partida_x_recetas_id IS NOT NULL THEN 'partida_paso'
     END,
     CASE
@@ -2971,7 +2971,7 @@ SELECT
 FROM inventario.lote l
 JOIN item i       ON i.id = l.item_id
 JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
-WHERE l.documento_tipo = 'GUIA_REMISION'
+WHERE l.documento_tipo = 'guia_remision'
   AND l.fyh_elm IS NULL
 
 UNION ALL
@@ -3012,7 +3012,7 @@ SELECT
 FROM inventario.lote l
 JOIN item i       ON i.id = l.item_id
 JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
-WHERE l.documento_tipo = 'CUADRE'
+WHERE l.documento_tipo = 'cuadre'
   AND l.fyh_elm IS NULL
 
 ON CONFLICT (lote_id) DO NOTHING;

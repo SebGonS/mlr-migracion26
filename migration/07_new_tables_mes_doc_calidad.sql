@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS mes.partida (
     ancho text,
     flg_antipilling boolean NOT NULL DEFAULT false,
     fecha_acordada date,                           -- agreed delivery date with client (SAP: EDATU)
+    observacion text,
     estado_produccion partida_estado_produccion_enum NOT NULL DEFAULT 'CREADA',
     -- Billing axis — orthogonal to production state.
     -- Updated when doc.factura lines are issued against this order.
@@ -109,12 +110,16 @@ SELECT 'DEVOLUCION_CLIENTE_SERVICIO', 'Devolución de cliente (material de servi
 FROM inventario.item_movimiento_tipo imt WHERE imt.codigo = 'SERV_DEV_ING';
 
 -- ── doc.guia_remision ─────────────────────────────────────────
+-- Acts as the delivery document for both inbound and outbound movements.
+-- serie/correlativo are nullable: headless records represent movement events
+-- where the legal document is handled externally (e.g. dispatch via separate system)
+-- or not yet registered. Both must be provided together or not at all.
 CREATE TABLE IF NOT EXISTS doc.guia_remision (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     guia_remision_tipo_id smallint NOT NULL REFERENCES doc.guia_remision_tipo(id),
     tercero_id  INT NOT NULL REFERENCES tercero(id),  -- the external party; direction derived from guia_remision_tipo.flg_emitida
-    serie TEXT NOT NULL,
-    correlativo TEXT NOT NULL,
+    serie TEXT,
+    correlativo TEXT,
     fecha_emision TIMESTAMPTZ NOT NULL,
     fecha_recepcion TIMESTAMPTZ DEFAULT now(),
     usr_cre int,
@@ -123,18 +128,26 @@ CREATE TABLE IF NOT EXISTS doc.guia_remision (
     fyh_mod timestamptz,
     usr_elm INT,
     fyh_elm TIMESTAMPTZ,
+    CONSTRAINT chk_guia_doc_fields CHECK ((serie IS NULL) = (correlativo IS NULL)),
     UNIQUE (tercero_id, serie, correlativo, guia_remision_tipo_id)
 );
 
 -- ── doc.guia_remision_detalle ─────────────────────────────────
+-- One row per physical guia line (linea = line number on the paper/PDF).
+-- n_rollos: roll count declared on the guia line (separate from cantidad which is weight).
+-- lote_id: populated for dispatch guias (identifies exact rolls going out);
+--          populated after ingress for inbound guias; NULL before lot creation.
+-- ubicacion_id: warehouse bin context when relevant.
 CREATE TABLE IF NOT EXISTS doc.guia_remision_detalle (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     guia_remision_id BIGINT NOT NULL REFERENCES doc.guia_remision(id),
+    linea SMALLINT NOT NULL DEFAULT 1,
     item_id INT NOT NULL REFERENCES item(id),
     lote_id int REFERENCES inventario.lote(id),
     ubicacion_id int REFERENCES inventario.ubicacion(id),
     cantidad NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
-    UNIQUE (guia_remision_id, item_id, lote_id, ubicacion_id)
+    n_rollos INT,
+    UNIQUE (guia_remision_id, linea)
 );
 
 -- ── inventario.pesaje ─────────────────────────────────────────
@@ -601,6 +614,9 @@ CREATE TABLE doc.compra_detalle (
     item_id         INT    NOT NULL REFERENCES item(id),
     cantidad        NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
     precio_unitario NUMERIC(12,4) NOT NULL CHECK (precio_unitario >= 0),
+    -- Denormalized from ledger (≈ SAP EKPO.WEMNG).
+    -- Maintained by compras.sql after every guia link or unlink.
+    cantidad_recibida  NUMERIC(12,4) NOT NULL DEFAULT 0,
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW()
 );
 

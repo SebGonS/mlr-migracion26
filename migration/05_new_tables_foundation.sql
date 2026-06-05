@@ -174,12 +174,12 @@ CREATE OR REPLACE VIEW inventario.vw_item_movimiento_categoria AS
 SELECT
     c.codigo::text AS codigo,
     CASE c.codigo
-        WHEN 'COMPRA'         THEN 'Compras'
+        WHEN 'compra'         THEN 'Compras'
         WHEN 'VENTA'          THEN 'Ventas'
         WHEN 'PRODUCCION'     THEN 'Producción'
         WHEN 'PROCESO_EXTERNO'THEN 'Proceso externo'
         WHEN 'DEVOLUCION'     THEN 'Devoluciones'
-        WHEN 'AJUSTE'         THEN 'Ajustes'
+        WHEN 'ajuste'         THEN 'Ajustes'
         WHEN 'TRANSFERENCIA'  THEN 'Transferencias'
     END AS nombre
 FROM unnest(enum_range(NULL::item_movimiento_tipo_categoria_enum)) AS c(codigo);
@@ -215,7 +215,7 @@ EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 INSERT INTO inventario.item_movimiento_tipo
 (codigo, nombre, categoria, factor, flg_afecta_stock, flg_valorizable, flg_recalcula_costo, req_partner, req_origen, req_destino, descripcion)
 VALUES
-('COMPRA_ING',       'Compra – Recepción',                        'COMPRA',          1,  true,  true,  true,  true,  false, true,  'Ingreso por compra local o importación'),
+('COMPRA_ING',       'Compra – Recepción',                        'compra',          1,  true,  true,  true,  true,  false, true,  'Ingreso por compra local o importación'),
 ('VENTA_EGR',        'Venta – Despacho',                          'VENTA',           -1, true,  true,  false, true,  true,  false, 'Salida por venta a cliente'),
 ('PROD_CONSUMO',     'Producción – Consumo MP',                   'PRODUCCION',      -1, true,  true,  false, false, true,  false, 'Consumo de materia prima hacia orden de producción'),
 ('PROD_ING',         'Producción – Ingreso PT',                   'PRODUCCION',      1,  true,  true,  true,  false, false, true,  'Ingreso de producto terminado'),
@@ -229,15 +229,15 @@ VALUES
 ('SERV_ING',         'Servicio – Recepción Material Cliente',     'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Recepción de material de cliente'),
 ('SERV_EGR',         'Servicio – Despacho Material Cliente',      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Despacho de material procesado al cliente'),
 ('SERV_DEV_ING',     'Servicio – Devolución Material Cliente',    'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Cliente devuelve material procesado'),
-('AJUSTE_POS',       'Ajuste Inventario (+)',                     'AJUSTE',          1,  true,  true,  true,  false, false, true,  'Corrección positiva de inventario'),
-('AJUSTE_NEG',       'Ajuste Inventario (-)',                     'AJUSTE',          -1, true,  true,  false, false, true,  false, 'Corrección negativa de inventario'),
-('PESAJE_POS',       'Pesaje – Corrección (+)',                   'AJUSTE',          1,  true,  false, false, false, false, true,  'Corrección de peso (real > declarado)'),
-('PESAJE_NEG',       'Pesaje – Corrección (-)',                   'AJUSTE',          -1, true,  false, false, false, true,  false, 'Corrección de peso (real < declarado)'),
+('AJUSTE_POS',       'Ajuste Inventario (+)',                     'ajuste',          1,  true,  true,  true,  false, false, true,  'Corrección positiva de inventario'),
+('AJUSTE_NEG',       'Ajuste Inventario (-)',                     'ajuste',          -1, true,  true,  false, false, true,  false, 'Corrección negativa de inventario'),
+('PESAJE_POS',       'Pesaje – Corrección (+)',                   'ajuste',          1,  true,  false, false, false, false, true,  'Corrección de peso (real > declarado)'),
+('PESAJE_NEG',       'Pesaje – Corrección (-)',                   'ajuste',          -1, true,  false, false, false, true,  false, 'Corrección de peso (real < declarado)'),
 -- Muestras: no valorizables ni recalculan costo — son movimientos de trazabilidad, no de compra.
 -- MUESTRA_ING cubre recepciones de muestra de proveedor sin documento de compra.
 -- MUESTRA_EGR cubre salidas de muestra (cliente, partida, etc.) registradas en salida_inventario con motivo='muestra'.
-('MUESTRA_ING',      'Muestra – Ingreso',                         'AJUSTE',          1,  true,  false, false, false, false, true,  'Ingreso de muestra de proveedor'),
-('MUESTRA_EGR',      'Muestra – Egreso',                          'AJUSTE',          -1, true,  false, false, false, true,  false, 'Salida de muestra para cliente/partida'),
+('MUESTRA_ING',      'Muestra – Ingreso',                         'ajuste',          1,  true,  false, false, false, false, true,  'Ingreso de muestra de proveedor'),
+('MUESTRA_EGR',      'Muestra – Egreso',                          'ajuste',          -1, true,  false, false, false, true,  false, 'Salida de muestra para cliente/partida'),
 -- Production reversals: paired with PROD_ING / PROD_CONSUMO to cancel a completed paso.
 -- PROD_ING_REV     reverses the output lote ingress  (factor -1, removes it from stock).
 -- PROD_CONSUMO_REV reverses the input lote backflush (factor +1, restores it to stock).
@@ -361,9 +361,9 @@ GRANT SELECT ON tercero TO authenticated;
 -- ── inventario.lote ───────────────────────────────────────────
 -- documento_tipo / documento_id: the business event that created this lote.
 -- Valid values:
---   'GUIA_REMISION'          → doc.guia_remision.id          (all external ingress: insumos via COMPRA_INGRESO, rolls via CLIENTE_ENVIO_PROCESO)
+--   'guia_remision'          → doc.guia_remision.id          (all external ingress: insumos via COMPRA_INGRESO, rolls via CLIENTE_ENVIO_PROCESO)
 --   'partida_paso_ejecucion' → mes.partida_paso_ejecucion.id (production output rolls — AFRU)
---   'CUADRE'                 → inventario.cuadre.id          (surplus lots from stock reconciliation)
+--   'cuadre'                 → inventario.cuadre.id          (surplus lots from stock reconciliation)
 -- Movements (item_movimientos) carry the same pair to group all postings
 -- from a single business event (≈ SAP MBLNR / MKPF).
 -- Note: guia_remision_tipo.item_movimiento_tipo_id drives which movement is posted

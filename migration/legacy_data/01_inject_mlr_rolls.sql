@@ -34,7 +34,7 @@ BEGIN
             -- 1. Create the lote (secuencia auto-assigned by trigger)
             INSERT INTO inventario.lote (
                 item_id,
-                documento_tipo,   -- 'AJUSTE' marks manual injection (no real cuadre doc)
+                documento_tipo,   -- 'ajuste' marks manual injection (no real cuadre doc)
                 documento_id,
                 cantidad,
                 propietario_id,   -- NULL = MLR-owned

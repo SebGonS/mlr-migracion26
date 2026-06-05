@@ -214,7 +214,8 @@ SELECT
     prof.nombre || ' ' || prof.apellido                                    AS creado_por,
     p.usr_mod,
     p.fyh_mod,
-    p.fyh_elm
+    p.fyh_elm,
+    p.observacion
 FROM mes.partida p
 LEFT JOIN tercero c        ON c.id  = p.tercero_id
 LEFT JOIN vw_colores vc    ON vc.color_x_cliente_id = p.color_x_cliente_id
@@ -335,18 +336,9 @@ LEFT JOIN LATERAL (
     WHERE cfp.compra_id = c.id
 ) letras ON true
 LEFT JOIN LATERAL (
-    -- Sum ordered qty vs received qty across all items in this compra.
-    -- Received = guia_remision_detalle rows for linked guias, matched by item_id.
-    SELECT SUM(cd.cantidad) - COALESCE(SUM(rec.cantidad_recibida), 0) AS qty_pendiente
+    -- qty_pendiente reads denormalized columns — no guia join needed.
+    SELECT SUM(cd.cantidad - cd.cantidad_recibida) AS qty_pendiente
     FROM doc.compra_detalle cd
-    LEFT JOIN LATERAL (
-        SELECT SUM(grd.cantidad) AS cantidad_recibida
-        FROM doc.compra_guia_remision cgr
-        JOIN doc.guia_remision_detalle grd
-            ON grd.guia_remision_id = cgr.guia_remision_id
-           AND grd.item_id = cd.item_id
-        WHERE cgr.compra_id = c.id
-    ) rec ON true
     WHERE cd.compra_id = c.id
 ) recepcion ON true;
 
@@ -833,12 +825,11 @@ SELECT
     SUM(si.cantidad_actual)                                  AS cantidad_total,
     vi.unidad_id, vi.unidad_codigo,
     iv.precio_promedio,
-    -- When stock is negative the MAP-maintained stock_valorado floors at 0 and
-    -- is stale. Compute from net quantity × MAP price instead.
-    CASE
-        WHEN SUM(si.cantidad_actual) >= 0 THEN iv.stock_valorado
-        ELSE ROUND((SUM(si.cantidad_actual) * COALESCE(iv.precio_promedio, 0))::numeric, 4)
-    END::NUMERIC(16,4)                                       AS stock_valorado
+    -- stock_valorado from item_valoracion is a MAP accounting figure that can
+    -- diverge from physical stock due to floor-at-zero behavior on negative
+    -- stock events. Always compute from net quantity × MAP price for display.
+    ROUND((SUM(si.cantidad_actual) * COALESCE(iv.precio_promedio, 0))::numeric, 4)::NUMERIC(16,4)
+                                                             AS stock_valorado
 FROM inventario.item_saldo si
 JOIN  vw_items vi                       ON vi.item_id = si.item_id
 LEFT JOIN inventario.item_valoracion iv ON iv.item_id = si.item_id
@@ -1876,3 +1867,6 @@ REVOKE USAGE ON SCHEMA mes        FROM authenticated;
 REVOKE USAGE ON SCHEMA inventario FROM authenticated;
 REVOKE USAGE ON SCHEMA calidad    FROM authenticated;
 */
+
+
+

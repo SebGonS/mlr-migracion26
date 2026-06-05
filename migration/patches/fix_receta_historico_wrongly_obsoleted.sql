@@ -154,3 +154,39 @@ COMMIT;
 
 
 SELECT * FROM receta.tenido t where t.id IN (6740,3911)
+
+
+Select * from vw_partidas_resumen where estado in ('Pendiente Receta', 'Pendiente Termofijar','Para Programar')
+
+
+
+ UPDATE mes.partida
+ SET estado_produccion ='PLANIFICADA'
+    WHERE id IN (Select partida from vw_partidas_resumen where estado in 
+    ('Pendiente Receta', 'Pendiente Termofijar','Para Programar') and cliente <> 'Fredy Gaytan')
+    and mes.partida.estado_produccion != 'PLANIFICADA';
+
+-- Step 1: verify
+-- Step 2: revert (run only after step 1 confirms the right rows)
+UPDATE mes.partida p
+SET estado_produccion = (a.old_data->>'estado_produccion')::mes.estado_produccion
+FROM audit.data_audit a
+JOIN public.tercero t ON t.id = (a.old_data->>'tercero_id')::int
+WHERE a.table_name = 'partida'
+  AND a.schema_name = 'mes'
+  AND a.operacion = 'UPDATE'
+  AND a.fyh_evento = '2026-06-02 15:55:03.59658+00'
+  AND t.nombre ILIKE '%Fredy%Gaytan%'
+  AND p.id = a.row_id;
+
+
+SELECT inventario.get_movimientos_item(27);
+SELECT get_insumo_movimientos_rango(27, '2024-01-01', '2026-12-31');
+
+-- Count AJUSTE_POS entries in new system vs reconteos in legacy
+SELECT imt.codigo, COUNT(*), SUM(im.cantidad)
+FROM inventario.item_movimientos im
+JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+WHERE im.item_id = 27
+  AND imt.factor = 1  -- ingress movements only
+GROUP BY imt.codigo;

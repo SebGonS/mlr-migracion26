@@ -79,7 +79,7 @@ CREATE TABLE receta.tenido (
     fibra              SMALLINT,
     tenido_id          INT      REFERENCES tenido(id),
     flg_antipilling    BOOLEAN  NOT NULL DEFAULT false,
-    tipo_receta_id     SMALLINT REFERENCES tipo_receta(id),
+    tipo_receta_id     SMALLINT NOT NULL REFERENCES tipo_receta(id),
     estado_id          SMALLINT NOT NULL REFERENCES estado_desarrollo_color(id),
     flg_produccion     BOOLEAN  NOT NULL DEFAULT false,
     fyh_produccion     TIMESTAMPTZ,

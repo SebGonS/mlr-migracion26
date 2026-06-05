@@ -30,6 +30,24 @@ WITH guias_partida AS (
           WHERE prog2.fecha = p_fecha AND prog2.actividad_tipo = 'partida_paso'
       )
     GROUP BY pc.partida_id
+),
+rollos_partida AS (
+    SELECT
+        pc.partida_id,
+        COUNT(*) FILTER (WHERE ird.flg_rib = false) AS cantidad_regular,
+        COUNT(*) FILTER (WHERE ird.flg_rib = true)  AS cantidad_rib,
+        COUNT(*)                                     AS total_rollos
+    FROM mes.partida_componente pc
+    JOIN inventario.lote l      ON l.id        = pc.lote_id
+    JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+    WHERE pc.lote_id IS NOT NULL
+      AND pc.partida_id IN (
+          SELECT pp2.partida_id
+          FROM mes.programacion prog2
+          JOIN mes.partida_paso pp2 ON pp2.id = prog2.actividad_id
+          WHERE prog2.fecha = p_fecha AND prog2.actividad_tipo = 'partida_paso'
+      )
+    GROUP BY pc.partida_id
 )
 SELECT COALESCE(jsonb_agg(row_obj), '[]'::jsonb)
 FROM (
@@ -58,13 +76,14 @@ FROM (
         'ancho',                     p.ancho,
         'malla',                     p.malla,
         'rendimiento',               p.rendimiento,
-        'articulo',                  vpa.articulo_nombre,
-        'fibra',                     vpa.fibra,
-        'total_rollos',              vpa.total_rollos,
-        'cantidad_total',            vpa.cantidad_total,
-        'cantidad_regular',          vpa.cantidad_regular,
-        'cantidad_rib',              vpa.cantidad_rib,
+        'articulo',                  at.nombre,
+        'fibra',                     p.fibra,
+        'total_rollos',              rp.total_rollos,
+        'cantidad_total',            rp.total_rollos,
+        'cantidad_regular',          rp.cantidad_regular,
+        'cantidad_rib',              rp.cantidad_rib,
         'guias',                     gp.guias,
+        'ejecucion_fyh_inicio',      ppe.fyh_inicio,
         -- Lavado maquina fields (null when actividad_tipo = 'partida_paso')
         'lavado_id',                 lm.id,
         'lavado_estado',             lm.estado,
@@ -89,7 +108,8 @@ FROM (
     LEFT JOIN vw_colores vc               ON vc.color_x_cliente_id = p.color_x_cliente_id
     LEFT JOIN color_x_cliente cxc         ON cxc.id = p.color_x_cliente_id
     LEFT JOIN public.valor vclr           ON vclr.id = cxc.valor_id
-    LEFT JOIN vw_partida_resumen_tenido vpa ON vpa.partida_id = p.id
+    LEFT JOIN articulo_tipo at            ON at.id         = p.articulo_tipo_id
+    LEFT JOIN rollos_partida rp           ON rp.partida_id = p.id
     LEFT JOIN guias_partida gp            ON gp.partida_id = p.id
     LEFT JOIN mes.lavado_maquina lm       ON prog.actividad_tipo = 'LAVADO_MAQUINA' AND lm.id = prog.actividad_id
     LEFT JOIN receta.lavado_maquina rlm   ON rlm.id = lm.receta_id
@@ -97,6 +117,7 @@ FROM (
     LEFT JOIN public.valor vo             ON vo.id  = rlm.valor_origen_id
     LEFT JOIN public.valor vd             ON vd.id  = rlm.valor_destino_id
     LEFT JOIN mes.empleado emp            ON emp.id = lm.empleado_id
+    LEFT JOIN mes.partida_paso_ejecucion ppe ON prog.actividad_tipo = 'partida_paso' AND ppe.partida_paso_id = pp.id AND ppe.estado = 'EN_PROCESO'
     WHERE prog.fecha = p_fecha
     ORDER BY prog.maquina_id, prog.secuencia
 ) sub;
@@ -135,10 +156,6 @@ WITH guias_partida AS (
                 (SELECT COUNT(*) FROM mes.partida_componente pc2
                  WHERE pc2.partida_id = pp2.partida_id AND pc2.lote_id IS NOT NULL)
             AND NOT EXISTS (
-                SELECT 1 FROM mes.partida_paso_ejecucion pe
-                WHERE pe.partida_paso_id = pp2.id AND pe.estado = 'EN_PROCESO'
-            )
-            AND NOT EXISTS (
                 SELECT 1 FROM mes.programacion prog
                 WHERE prog.actividad_tipo = 'partida_paso' AND prog.actividad_id = pp2.id
                   AND prog.fecha >= CURRENT_DATE
@@ -157,6 +174,7 @@ FROM (
             'paso_id',            pp.id,
             'partida_id',         p.id,
             'partida_origen_id',         p.partida_origen_id,
+            'operacion_id',       o.id,
             'operacion',          o.nombre,
             'operacion_codigo',   o.codigo,
             'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
@@ -166,7 +184,8 @@ FROM (
             'color_hex',          vc.color_hex,
             'valor',              vclr.valor,
             'tenido',             t.tenido,
-            'guias',              gp.guias
+            'guias',              gp.guias,
+            'ejecucion_fyh_inicio', ppe.fyh_inicio
         ) AS row_obj
     FROM mes.partida_paso pp
     JOIN mes.operacion o ON o.id = pp.operacion_id
@@ -177,6 +196,7 @@ FROM (
     LEFT JOIN color_x_cliente cxc   ON cxc.id = p.color_x_cliente_id
     LEFT JOIN public.valor vclr     ON vclr.id = cxc.valor_id
     LEFT JOIN guias_partida gp      ON gp.partida_id = p.id
+    LEFT JOIN mes.partida_paso_ejecucion ppe ON ppe.partida_paso_id = pp.id AND ppe.estado = 'EN_PROCESO'
     WHERE
         p.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
       AND p.fyh_elm IS NULL
@@ -186,10 +206,6 @@ FROM (
           <
           (SELECT COUNT(*) FROM mes.partida_componente pc
            WHERE pc.partida_id = pp.partida_id AND pc.lote_id IS NOT NULL)
-      AND NOT EXISTS (
-          SELECT 1 FROM mes.partida_paso_ejecucion pe
-          WHERE pe.partida_paso_id = pp.id AND pe.estado = 'EN_PROCESO'
-      )
       AND NOT EXISTS (
           SELECT 1 FROM mes.programacion prog
           WHERE prog.actividad_tipo = 'partida_paso' AND prog.actividad_id = pp.id
@@ -244,22 +260,6 @@ BEGIN
     IF NOT jwt_has_permission('produccion.programar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.programar'
             USING ERRCODE = 'insufficient_privilege';
-    END IF;
-
-    -- 1. Validate production pasos: must not be COMPLETADO or OMITIDO
-    SELECT jsonb_agg(jsonb_build_object('actividad_id', pp.id))
-    INTO v_invalid_pasos
-    FROM jsonb_array_elements(p_programaciones) elem
-    JOIN mes.partida_paso pp ON pp.id = (elem->>'actividad_id')::BIGINT
-    WHERE elem->>'actividad_tipo' = 'partida_paso'
-      AND EXISTS (
-          SELECT 1 FROM mes.partida_paso_ejecucion pe
-          WHERE pe.partida_paso_id = pp.id
-            AND pe.estado IN ('COMPLETADO', 'OMITIDO')
-      );
-
-    IF v_invalid_pasos IS NOT NULL THEN
-        RAISE EXCEPTION 'Pasos no programables (ya COMPLETADO/OMITIDO): %', v_invalid_pasos;
     END IF;
 
     -- 2. Validate lavados: must not be COMPLETADO
@@ -3297,6 +3297,7 @@ BEGIN
         'fyh_inicio', p.fyh_inicio,
         'fyh_fin', p.fyh_fin,
         'fyh_cre', p.fyh_cre,
+        'observacion', p.observacion,
 
         -- Planned output items
         'partida_detalles', COALESCE((
@@ -3405,21 +3406,21 @@ BEGIN
                     'estado', opp.estado,
                     'consumo', COALESCE((
                         SELECT jsonb_agg(jsonb_build_object(
-                            'id',                  m.id,
                             'item_id',             m.item_id,
                             'item_codigo',         vi_mov.item_codigo,
                             'item_nombre',         vi_mov.item_nombre,
                             'lote_id',             m.lote_id,
-                            'cantidad',            m.cantidad,
+                            'cantidad',            SUM(CASE WHEN mt.codigo = 'PROD_CONSUMO_REV' THEN -m.cantidad ELSE m.cantidad END),
                             'unidad',              vi_mov.unidad_codigo,
                             'motivo_id',           m.motivo_id,
                             'motivo_codigo',       mot.codigo,
                             'origen_ubicacion_id', m.origen_ubicacion_id,
                             'origen_ubicacion',    ubi.nombre,
                             'origen_almacen',      al.nombre
-                        ) ORDER BY m.fyh_cre)
+                        ) ORDER BY vi_mov.item_nombre)
                         FROM inventario.item_movimientos m
                         LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
+                        LEFT JOIN inventario.item_movimiento_tipo mt ON mt.id = m.item_movimiento_tipo_id
                         LEFT JOIN inventario.item_movimiento_motivo mot ON mot.id = m.motivo_id
                         LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
                         LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
@@ -3428,9 +3429,13 @@ BEGIN
                               SELECT pe.id FROM mes.partida_paso_ejecucion pe
                               WHERE pe.partida_paso_id = opp.id
                           )
-                          AND m.item_movimiento_tipo_id = (
-                              SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO'
+                          AND m.item_movimiento_tipo_id IN (
+                              SELECT id FROM inventario.item_movimiento_tipo WHERE codigo IN ('PROD_CONSUMO', 'PROD_CONSUMO_REV')
                           )
+                        GROUP BY m.item_id, vi_mov.item_codigo, vi_mov.item_nombre, m.lote_id,
+                                 vi_mov.unidad_codigo, m.motivo_id, mot.codigo,
+                                 m.origen_ubicacion_id, ubi.nombre, al.nombre
+                        HAVING SUM(CASE WHEN mt.codigo = 'PROD_CONSUMO_REV' THEN -m.cantidad ELSE m.cantidad END) > 0
                     ), '[]'::jsonb),
                     'ejecuciones', COALESCE((
                         SELECT jsonb_agg(
@@ -4147,4 +4152,123 @@ $function$;
 GRANT EXECUTE ON FUNCTION mes.generar_receta_lavado_maquina(BIGINT) TO authenticated;
 
 
+-- ═══════════════════════════════════════════════════════════════
+-- TRANSFERIR ROLLO ENTRE PARTIDAS
+-- Reassigns a roll lote from one partida to another.
+-- Use cases: missing roll routed to a sibling order for dyeing,
+-- then returned to the original order at dispatch.
+--
+-- Guards:
+--   1. Roll must be currently assigned to partida_origen.
+--   2. Roll must not have been consumed yet (PROD_CONSUMO movement
+--      is posted at the final closure step — compactado).
+--   3. Origen must not be TECO / CERRADA / CANCELADA.
+--   4. Destino must exist and not be TECO / CERRADA / CANCELADA.
+--   5. Roll must not already be assigned to destino.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.transferir_rollo_partida(
+    p_lote_id           INT,
+    p_partida_origen    BIGINT,
+    p_partida_destino   BIGINT,
+    p_observacion       TEXT DEFAULT NULL
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','mes','inventario'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id         int  := get_user_id();
+    v_estado_origen  partida_estado_produccion_enum;
+    v_estado_destino partida_estado_produccion_enum;
+BEGIN
+    IF NOT jwt_has_permission('produccion.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- 1. Roll assigned to origen
+    IF NOT EXISTS (
+        SELECT 1 FROM mes.partida_componente
+        WHERE lote_id = p_lote_id AND partida_id = p_partida_origen
+    ) THEN
+        RAISE EXCEPTION 'El rollo (lote #%) no está asignado a la partida #%.',
+            p_lote_id, p_partida_origen;
+    END IF;
+
+    -- 2. Roll not yet consumed (compactado has not posted its PROD_CONSUMO)
+    IF EXISTS (
+        SELECT 1 FROM inventario.item_movimientos im
+        JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+        WHERE im.lote_id = p_lote_id AND imt.codigo = 'PROD_CONSUMO'
+    ) THEN
+        RAISE EXCEPTION 'El rollo (lote #%) ya fue consumido en producción y no puede trasladarse.',
+            p_lote_id;
+    END IF;
+
+    -- 3. Origen state
+    SELECT estado_produccion INTO v_estado_origen FROM mes.partida WHERE id = p_partida_origen;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Partida origen #% no encontrada.', p_partida_origen;
+    END IF;
+    IF v_estado_origen IN ('TECO', 'CERRADA', 'CANCELADA') THEN
+        RAISE EXCEPTION 'La partida origen #% está en estado % y no permite modificaciones.',
+            p_partida_origen, v_estado_origen;
+    END IF;
+
+    -- 4. Destino state
+    SELECT estado_produccion INTO v_estado_destino FROM mes.partida WHERE id = p_partida_destino;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Partida destino #% no encontrada.', p_partida_destino;
+    END IF;
+    IF v_estado_destino IN ('TECO', 'CERRADA', 'CANCELADA') THEN
+        RAISE EXCEPTION 'La partida destino #% está en estado % y no puede recibir rollos.',
+            p_partida_destino, v_estado_destino;
+    END IF;
+
+    -- 5. Not already in destino (unique index would fire anyway, but explicit error is clearer)
+    IF EXISTS (
+        SELECT 1 FROM mes.partida_componente
+        WHERE lote_id = p_lote_id AND partida_id = p_partida_destino
+    ) THEN
+        RAISE EXCEPTION 'El rollo (lote #%) ya está asignado a la partida destino #%.',
+            p_lote_id, p_partida_destino;
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('transferir_rollo_partida', v_usr_id,
+            jsonb_build_object(
+                'lote_id',         p_lote_id,
+                'partida_origen',  p_partida_origen,
+                'partida_destino', p_partida_destino,
+                'observacion',     p_observacion
+            ));
+
+    UPDATE mes.partida_componente
+    SET partida_id = p_partida_destino,
+        usr_mod    = v_usr_id,
+        fyh_mod    = now()
+    WHERE lote_id    = p_lote_id
+      AND partida_id = p_partida_origen;
+
+    RETURN format('Rollo (lote #%s) trasladado de partida #%s a partida #%s.',
+                  p_lote_id, p_partida_origen, p_partida_destino);
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in transferir_rollo_partida - User: %, lote: %, origen: %, destino: %, Error: %',
+              v_usr_id, p_lote_id, p_partida_origen, p_partida_destino, v_message;
+    RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION mes.transferir_rollo_partida(INT, BIGINT, BIGINT, TEXT) TO authenticated;
+
+
 -- SELECT mes.get_actividades_sin_programar()
+
+SELECT * FROm mes.partida_paso_ejecucion WHERE id=9378
+Error
+Pasos no programables (ya COMPLETADO/OMITIDO): [{"actividad_id": 9378}]

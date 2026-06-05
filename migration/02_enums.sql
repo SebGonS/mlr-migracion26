@@ -13,12 +13,12 @@ CREATE TYPE calidad_estado_enum AS ENUM (
 );
 
 CREATE TYPE item_movimiento_tipo_categoria_enum AS ENUM (
-    'COMPRA',
+    'compra',
     'VENTA',
     'PRODUCCION',
     'PROCESO_EXTERNO',
     'DEVOLUCION',
-    'AJUSTE',
+    'ajuste',
     'TRANSFERENCIA'
 );
 

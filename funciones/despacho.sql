@@ -279,11 +279,11 @@ BEGIN
             SELECT 1
             FROM inventario.lote l
             JOIN inventario.item_movimientos im ON im.lote_id = l.id
-            WHERE l.documento_tipo = 'GUIA_REMISION'
+            WHERE l.documento_tipo = 'guia_remision'
               AND l.documento_id   = p_guia_id
               AND l.fyh_elm        IS NULL
               -- Any movement NOT from this guia means the lote was used downstream
-              AND NOT (im.documento_tipo = 'GUIA_REMISION' AND im.documento_id = p_guia_id)
+              AND NOT (im.documento_tipo = 'guia_remision' AND im.documento_id = p_guia_id)
         ) THEN
             RAISE EXCEPTION
                 'No se puede anular la guía #%: uno o más lotes recibidos ya tienen movimientos posteriores (consumo, producción o redespacho).',
@@ -331,11 +331,11 @@ BEGIN
         im.origen_ubicacion_id,    -- swap: origin becomes the new destination
         im.cantidad,
         NOW(),
-        'GUIA_REMISION',
+        'guia_remision',
         p_guia_id,
         'ANULACION guía #' || p_guia_id
     FROM inventario.item_movimientos im
-    WHERE im.documento_tipo = 'GUIA_REMISION'
+    WHERE im.documento_tipo = 'guia_remision'
       AND im.documento_id   = p_guia_id;
 
     GET DIAGNOSTICS v_mov_count = ROW_COUNT;
@@ -344,7 +344,7 @@ BEGIN
     IF NOT v_guia.flg_emitida THEN
         UPDATE inventario.lote
         SET usr_elm = v_usr_id, fyh_elm = NOW()
-        WHERE documento_tipo = 'GUIA_REMISION'
+        WHERE documento_tipo = 'guia_remision'
           AND documento_id   = p_guia_id
           AND fyh_elm        IS NULL;
 

@@ -2,7 +2,7 @@
 -- REVERSE: undo ingreso_rollos_guia.sql for a specific (guia, partida)
 --
 -- Identifies lotes created by that script as:
---   lote.documento_tipo = 'GUIA_REMISION'
+--   lote.documento_tipo = 'guia_remision'
 --   lote.documento_id   = v_guia_id
 --   AND assigned to v_partida_id via partida_componente
 --
@@ -24,7 +24,7 @@
 SELECT l.id AS lote_id, l.item_id, l.cantidad, pc.partida_id
 FROM inventario.lote l
 JOIN mes.partida_componente pc ON pc.lote_id = l.id
-WHERE l.documento_tipo = 'GUIA_REMISION'
+WHERE l.documento_tipo = 'guia_remision'
   AND l.documento_id   = 681          -- <- v_guia_id
   AND pc.partida_id    = 5190;        -- <- v_partida_id
 */
@@ -48,7 +48,7 @@ BEGIN
     SELECT ARRAY_AGG(l.id) INTO v_lote_ids
     FROM inventario.lote l
     JOIN mes.partida_componente pc ON pc.lote_id = l.id
-    WHERE l.documento_tipo = 'GUIA_REMISION'
+    WHERE l.documento_tipo = 'guia_remision'
       AND l.documento_id   = v_guia_id
       AND pc.partida_id    = v_partida_id;
 
@@ -92,7 +92,7 @@ BEGIN
     IF v_drop_guia THEN
         SELECT COUNT(*) INTO v_remaining_lotes
         FROM inventario.lote
-        WHERE documento_tipo = 'GUIA_REMISION'
+        WHERE documento_tipo = 'guia_remision'
           AND documento_id   = v_guia_id
           AND fyh_elm IS NULL;
 

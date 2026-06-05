@@ -28,7 +28,7 @@
 -- ───────────────────────────────────────
 
 -- p_data keys: color_x_cliente_id, articulo_tipo_id, fibra, tenido_id,
---              flg_antipilling (default false), tipo_receta_id (optional)
+--              flg_antipilling (default false), tipo_receta_id (required)
 CREATE OR REPLACE FUNCTION receta.crear_tenido(p_data JSONB)
 RETURNS INT
 LANGUAGE plpgsql

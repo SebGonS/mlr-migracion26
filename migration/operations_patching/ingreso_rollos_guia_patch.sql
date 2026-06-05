@@ -106,7 +106,7 @@ BEGIN
             INSERT INTO inventario.lote (
                 item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre
             )
-            VALUES (r.item_id, 'GUIA_REMISION', v_guia_id,
+            VALUES (r.item_id, 'guia_remision', v_guia_id,
                     v_peso_kg_por_rollo, v_propietario_id, NULL)
             RETURNING id INTO v_lote_id;
 
@@ -130,7 +130,7 @@ BEGIN
             VALUES (
                 v_doc_mov_id, r.item_id, v_lote_id, v_mov_tipo_id,
                 NULL, v_ubicacion_id, v_peso_kg_por_rollo,
-                'GUIA_REMISION', v_guia_id,
+                'guia_remision', v_guia_id,
                 'Patch ingreso guia_id=' || v_guia_id || ' partida=' || v_partida_id,
                 NULL
             );

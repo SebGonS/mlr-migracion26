@@ -521,6 +521,39 @@ END;
 $function$;
 
 -- ───────────────────────────────────────────────────────────────
+-- fn_refresh_compra_detalle_qtys  (manual re-sync utility)
+-- Recomputes cantidad_recibida from posted movements.
+-- Not called automatically — ingresar_compra increments inline.
+-- Use this for manual data corrections or backfills only.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.fn_refresh_compra_detalle_qtys(p_compra_id BIGINT)
+RETURNS void
+LANGUAGE sql
+SET search_path TO 'doc', 'inventario', 'public'
+AS $$
+    UPDATE doc.compra_detalle cd
+    SET cantidad_recibida = COALESCE((
+        SELECT SUM(im.cantidad)
+        FROM inventario.item_movimientos im
+        JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+        WHERE imt.codigo = 'COMPRA_ING'
+          AND im.fyh_elm IS NULL
+          AND im.item_id = cd.item_id
+          AND (
+              (im.documento_tipo = 'guia_remision'
+               AND im.documento_id IN (
+                   SELECT guia_remision_id FROM doc.compra_guia_remision
+                   WHERE compra_id = p_compra_id
+               ))
+              OR
+              (im.documento_tipo = 'compra'
+               AND im.documento_id = p_compra_id)
+          )
+    ), 0)
+    WHERE cd.compra_id = p_compra_id;
+$$;
+
+-- ───────────────────────────────────────────────────────────────
 -- vincular_guias_compra
 -- Links one or more guias to an existing compra.
 -- Validates each guia belongs to the compra's proveedor.
@@ -757,12 +790,13 @@ SELECT jsonb_build_object(
     'fyh_cre',     c.fyh_cre,
     'detalle', COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
-            'id',               cd.id,
-            'item_id',          cd.item_id,
-            'item_codigo',      i.codigo,
-            'item_nombre',      i.nombre,
-            'cantidad',         cd.cantidad,
-            'precio_unitario',  cd.precio_unitario
+            'id',                cd.id,
+            'item_id',           cd.item_id,
+            'item_codigo',       i.codigo,
+            'item_nombre',       i.nombre,
+            'cantidad',          cd.cantidad,
+            'precio_unitario',   cd.precio_unitario,
+            'cantidad_recibida', cd.cantidad_recibida
         ) ORDER BY cd.id)
         FROM doc.compra_detalle cd
         JOIN item i ON i.id = cd.item_id
@@ -789,7 +823,8 @@ SELECT jsonb_build_object(
             'fecha_emision',        fp.fecha_emision,
             'total',                fp.total,
             'moneda',               fp.moneda,
-            'estado_pago',          fp.estado_pago
+            'estado_pago',          fp.estado_pago,
+            'nota',                 cfp.nota
         ) ORDER BY fp.fecha_emision, fp.id)
         FROM doc.compra_factura_proveedor cfp
         JOIN doc.factura_proveedor fp ON fp.id = cfp.factura_proveedor_id
@@ -829,6 +864,7 @@ SELECT jsonb_build_object(
     'total',             fp.total,
     'estado_pago',       fp.estado_pago,
     'observacion',       fp.observacion,
+    'fyh_cre',           fp.fyh_cre,
     'lineas', COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
             'id',              fpd.id,
@@ -860,12 +896,21 @@ SELECT jsonb_build_object(
         FROM doc.letra_factura lf
         JOIN doc.letra l ON l.id = lf.letra_id
         WHERE lf.factura_proveedor_id = fp.id
+          AND l.estado != 'anulada'
     ), '[]'::jsonb),
     'compras', COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
             'compra_id',   c.id,
             'fecha',       c.fecha,
-            'observacion', c.observacion
+            'observacion', c.observacion,
+            'monto_total', COALESCE((
+                SELECT SUM(cd.cantidad * cd.precio_unitario)
+                FROM doc.compra_detalle cd WHERE cd.compra_id = c.id
+            ), 0),
+            'total_items', COALESCE((
+                SELECT COUNT(*) FROM doc.compra_detalle cd WHERE cd.compra_id = c.id
+            ), 0),
+            'fyh_elm',     c.fyh_elm
         ) ORDER BY c.fecha, c.id)
         FROM doc.compra_factura_proveedor cfp
         JOIN doc.compra c ON c.id = cfp.compra_id
@@ -1294,5 +1339,176 @@ BEGIN
     END IF;
 
     RETURN v_count;
+END;
+$$;
+
+-- ───────────────────────────────────────────────────────────────
+-- doc.ingresar_compra
+-- Posts stock movements for purchased items (insumos or rolls) against a compra.
+-- Primary use case: insumos (chemicals, dyes, etc.).
+-- Roll purchases are rare but supported via the same function.
+--
+-- Item type is detected automatically — no caller flag needed:
+--   INSUMO → one lote per line, cantidad = received quantity
+--   ROLLO  → one lote per roll, n_rollos required, cantidad = per-roll weight
+--
+-- To also register the physical guia (SUNAT document), call doc.crear_guia
+-- separately with tipo=COMPRA_INGRESO and compra_id. Independent — never posts
+-- movements. Can be called before or after this function.
+--
+-- p_datos shape:
+-- {
+--   "compra_id":   123,
+--   "ubicacion_id": 5,      -- optional, defaults to ALM_CRU
+--   "items": [
+--     { "item_id": 101, "cantidad": 50.5 },                              -- insumo
+--     { "item_id": 254, "cantidad": 380.0, "n_rollos": 19 },             -- rolls (prorated)
+--     { "item_id": 278, "cantidad": 1.2,   "n_rollos": 1, "prorate": false } -- roll (per-roll weight)
+--   ]
+-- }
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.ingresar_compra(p_datos jsonb)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'notification', 'public', 'inventario', 'mes', 'doc'
+AS $$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id        int     := get_user_id();
+    v_compra_id     bigint  := (p_datos->>'compra_id')::bigint;
+    v_mov_tipo_id   smallint;
+    v_doc_mov_id    bigint;
+    v_ubicacion_id  int;
+    v_lote_id       int;
+    v_elem          jsonb;
+    v_item_id       int;
+    v_cantidad      numeric;
+    v_n_rollos      int;
+    v_prorate       boolean;
+    v_peso_rollo    numeric;
+    v_flg_rib       boolean;
+    v_flg_rollo     boolean;
+    v_precio        numeric;
+    i               int;
+BEGIN
+    IF NOT jwt_has_permission('compras.ingresar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere compras.ingresar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('ingresar_compra', v_usr_id, p_datos);
+
+    IF NOT EXISTS (SELECT 1 FROM doc.compra WHERE id = v_compra_id AND fyh_elm IS NULL) THEN
+        RAISE EXCEPTION 'Compra % no existe o fue eliminada', v_compra_id;
+    END IF;
+
+    SELECT id INTO STRICT v_mov_tipo_id
+    FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING';
+
+    IF (p_datos->>'ubicacion_id') IS NOT NULL THEN
+        v_ubicacion_id := (p_datos->>'ubicacion_id')::int;
+    ELSE
+        SELECT ub.id INTO STRICT v_ubicacion_id
+        FROM inventario.ubicacion ub
+        JOIN inventario.almacen alm ON alm.id = ub.almacen_id
+        WHERE alm.codigo = 'ALM_CRU' LIMIT 1;
+    END IF;
+
+    v_doc_mov_id := nextval('inventario.mov_doc_seq');
+
+    FOR v_elem IN SELECT jsonb_array_elements(p_datos->'items') LOOP
+        v_item_id  := (v_elem->>'item_id')::int;
+        v_cantidad := (v_elem->>'cantidad')::numeric;
+        v_n_rollos := (v_elem->>'n_rollos')::int;  -- NULL for insumos
+
+        SELECT EXISTS (
+            SELECT 1 FROM item i
+            JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+            WHERE i.id = v_item_id
+        ) INTO v_flg_rollo;
+
+        SELECT precio_unitario INTO v_precio
+        FROM doc.compra_detalle
+        WHERE compra_id = v_compra_id AND item_id = v_item_id
+        ORDER BY id LIMIT 1;
+
+        IF v_flg_rollo AND v_n_rollos IS NOT NULL THEN
+            -- Roll path: one lote per roll
+            v_prorate    := COALESCE((v_elem->>'prorate')::boolean, true);
+
+            SELECT COALESCE(ird.flg_rib, false) INTO v_flg_rib
+            FROM item_rollo_detalle ird WHERE ird.item_id = v_item_id;
+
+            v_peso_rollo := CASE
+                WHEN v_prorate THEN v_cantidad / v_n_rollos
+                ELSE v_cantidad
+            END;
+
+            FOR i IN 1 .. v_n_rollos LOOP
+                INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre)
+                VALUES (v_item_id, 'compra', v_compra_id, v_peso_rollo, NULL, v_usr_id)
+                RETURNING id INTO v_lote_id;
+
+                INSERT INTO inventario.lote_rollo_detalle (lote_id, guia_remision_id, flg_tenido)
+                VALUES (v_lote_id, NULL, false);
+
+                INSERT INTO inventario.item_movimientos (
+                    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+                    origen_ubicacion_id, destino_ubicacion_id,
+                    cantidad, precio_unitario, documento_tipo, documento_id, observacion, usr_cre
+                ) VALUES (
+                    v_doc_mov_id, v_item_id, v_lote_id, v_mov_tipo_id,
+                    NULL, v_ubicacion_id,
+                    v_peso_rollo, v_precio, 'compra', v_compra_id,
+                    'Ingreso compra #' || v_compra_id, v_usr_id
+                );
+            END LOOP;
+
+        ELSE
+            -- Insumo path (primary): one lote for the full received quantity
+            INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre)
+            VALUES (v_item_id, 'compra', v_compra_id, v_cantidad, NULL, v_usr_id)
+            RETURNING id INTO v_lote_id;
+
+            INSERT INTO inventario.item_movimientos (
+                doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+                origen_ubicacion_id, destino_ubicacion_id,
+                cantidad, precio_unitario, documento_tipo, documento_id, observacion, usr_cre
+            ) VALUES (
+                v_doc_mov_id, v_item_id, v_lote_id, v_mov_tipo_id,
+                NULL, v_ubicacion_id,
+                v_cantidad, v_precio, 'compra', v_compra_id,
+                'Ingreso compra #' || v_compra_id, v_usr_id
+            );
+
+        END IF;
+
+        UPDATE doc.compra_detalle
+        SET cantidad_recibida = cantidad_recibida + v_cantidad
+        WHERE compra_id = v_compra_id AND item_id = v_item_id;
+
+    END LOOP;
+
+    INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
+    SELECT ur.user_id, 'Ingreso de compra',
+           COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id = v_usr_id), 'sistema')
+               || ' ingresó stock contra compra #' || v_compra_id,
+           'info',
+           jsonb_build_object('objeto_tipo', 'compra', 'compra_id', v_compra_id, 'doc_movimiento_id', v_doc_mov_id)
+    FROM iam.user_rol ur
+    LEFT JOIN iam.rol r ON ur.rol_id = r.id
+    WHERE r.code IN ('jefe_planta', 'compras', 'inventario') AND v_usr_id <> ur.user_id;
+
+    RETURN v_doc_mov_id;
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS
+        v_message = MESSAGE_TEXT, v_detail = PG_EXCEPTION_DETAIL,
+        v_hint = PG_EXCEPTION_HINT, v_context = PG_EXCEPTION_CONTEXT,
+        v_sqlstate = RETURNED_SQLSTATE;
+    RAISE EXCEPTION 'ingresar_compra: % | detail: % | hint: % | context: % | state: %',
+        v_message, v_detail, v_hint, v_context, v_sqlstate;
 END;
 $$;

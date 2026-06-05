@@ -1,4 +1,10 @@
 ﻿-- ============================================================
+-- DEPRECATED — COMPRA_INGRESO path replaced by doc.ingresar_compra
+--              or doc.crear_guia(compra_id=X) for the guia-in-hand case.
+--              CLIENTE_ENVIO_PROCESO path is still valid but should be
+--              run via doc.crear_guia directly rather than this script.
+--              Kept for historical reference only.
+-- ============================================================
 -- Ingresar rollos via guia_remision y asignar a partida
 --
 -- Use case: rolls arriving from a supplier (COMPRA_INGRESO) or
@@ -19,7 +25,10 @@
 --   v_correlativo   : correlativo from the physical guia
 --   v_fecha_emision : date on the physical guia
 --   v_partida_id    : partida.id these rolls are assigned to
---   v_peso_kg_por_rollo : nominal kg weight per roll
+--   v_prorate       : TRUE  → v_peso_regular / v_peso_rib are TOTALS, divided by n_rollos
+--                     FALSE → v_peso_regular / v_peso_rib are PER-ROLL weights (uniform)
+--   v_peso_regular  : kg for regular rolls (total or per-roll depending on v_prorate)
+--   v_peso_rib      : kg for rib rolls     (total or per-roll depending on v_prorate; 0 if none)
 --   v_rollos        : array of (item_id, n_rollos) pairs
 --                     one entry per item type (rollo + rib if both present)
 -- ============================================================
@@ -57,13 +66,15 @@ DECLARE
     v_serie             TEXT        := '00';                      -- <- CHANGE
     v_correlativo       TEXT        := '2186';                      -- <- CHANGE
     v_fecha_emision     TIMESTAMPTZ := '2026-05-22 00:00:00-5';                      -- <- CHANGE
-    v_partida_id        INT         := 5253;                      -- <- CHANGE
-    v_peso_kg_por_rollo NUMERIC     := 20.0;                      -- <- CHANGE  nominal kg/roll
+    v_partida_id    INT         := 5253;                            -- <- CHANGE
+    v_prorate       BOOLEAN     := TRUE;                            -- <- TRUE = totals prorated; FALSE = per-roll
+    v_peso_regular  NUMERIC     := 380.0;                          -- <- CHANGE  total or per-roll kg for regular rolls
+    v_peso_rib      NUMERIC     := 18.5;                           -- <- CHANGE  total or per-roll kg for rib rolls (0 if none)
 
     -- List every (item_id, n_rollos) pair for this guia.
     -- Example: ARRAY[(101, 18), (102, 4)]  where 102 is the rib item.
     v_rollos            INT[][]     := ARRAY[
-                                            
+
                                            ARRAY[254::INT, 19::INT]  ,ARRAY[278::INT, 1::INT]--, --<- CHANGE  [item_id, n_rollos]
                                        ];
 
@@ -76,6 +87,8 @@ DECLARE
     v_lote_id           INT;
     v_item_id           INT;
     v_n_rollos          INT;
+    v_peso_por_rollo    NUMERIC;
+    v_flg_rib           BOOLEAN;
     i                   INT;
     pair                INT[];
 BEGIN
@@ -137,6 +150,21 @@ BEGIN
         v_item_id  := pair[1];
         v_n_rollos := pair[2];
 
+        SELECT COALESCE(ird.flg_rib, FALSE)
+        INTO v_flg_rib
+        FROM item_rollo_detalle ird
+        WHERE ird.item_id = v_item_id;
+
+        v_peso_por_rollo := CASE
+            WHEN v_flg_rib AND     v_prorate THEN v_peso_rib     / v_n_rollos
+            WHEN v_flg_rib AND NOT v_prorate THEN v_peso_rib
+            WHEN                   v_prorate THEN v_peso_regular / v_n_rollos
+            ELSE                                  v_peso_regular
+        END;
+
+        RAISE NOTICE '  item_id=% flg_rib=% n_rollos=% peso_por_rollo=% (prorate=%)',
+            v_item_id, v_flg_rib, v_n_rollos, v_peso_por_rollo, v_prorate;
+
         FOR i IN 1 .. v_n_rollos LOOP
 
             -- a. Lote — tagged to the guia (correct origin, not PARTIDA)
@@ -145,9 +173,9 @@ BEGIN
             )
             VALUES (
                 v_item_id,
-                'GUIA_REMISION',
+                'guia_remision',
                 v_guia_id,
-                v_peso_kg_por_rollo,
+                v_peso_por_rollo,
                 v_propietario_id,
                 NULL
             )
@@ -164,7 +192,7 @@ BEGIN
             )
             VALUES (
                 v_partida_id, v_lote_id, NULL, NULL,
-                v_peso_kg_por_rollo, NULL
+                v_peso_por_rollo, NULL
             )
             ON CONFLICT (partida_id, lote_id) WHERE lote_id IS NOT NULL DO NOTHING;
 
@@ -183,8 +211,8 @@ BEGIN
                 v_mov_tipo_id,
                 NULL,             -- external origin, no internal source bin
                 v_ubicacion_id,
-                v_peso_kg_por_rollo,
-                'GUIA_REMISION',
+                v_peso_por_rollo,
+                'guia_remision',
                 v_guia_id,
                 'Ingreso via guia ' || v_serie || '-' || v_correlativo
                     || ' para partida ' || v_partida_id,
@@ -193,7 +221,7 @@ BEGIN
 
             -- e. One detail row per roll; cantidad = weight of this lote (mirrors crear_guia)
             INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, lote_id, cantidad)
-            VALUES (v_guia_id, v_item_id, v_lote_id, v_peso_kg_por_rollo)
+            VALUES (v_guia_id, v_item_id, v_lote_id, v_peso_por_rollo)
             ON CONFLICT (guia_remision_id, item_id, lote_id, ubicacion_id) DO NOTHING;
 
         END LOOP;
@@ -219,7 +247,7 @@ FROM inventario.lote l
 JOIN inventario.lote_rollo_detalle  lrd ON lrd.lote_id = l.id
 JOIN item_rollo_detalle             ird ON ird.item_id = l.item_id
 JOIN mes.partida_componente         pc  ON pc.lote_id  = l.id
-WHERE l.documento_tipo = 'GUIA_REMISION'
+WHERE l.documento_tipo = 'guia_remision'
   AND l.documento_id   = <guia_id_from_above>
 ORDER BY ird.flg_rib, l.id;
 
@@ -227,7 +255,7 @@ ORDER BY ird.flg_rib, l.id;
 SELECT m.item_id, m.lote_id, imt.codigo AS mov_tipo, m.cantidad
 FROM inventario.item_movimientos m
 JOIN inventario.item_movimiento_tipo imt ON imt.id = m.item_movimiento_tipo_id
-WHERE m.documento_tipo = 'GUIA_REMISION'
+WHERE m.documento_tipo = 'guia_remision'
   AND m.documento_id   = <guia_id_from_above>;
 
 -- guia_remision_detalle:
