@@ -11,12 +11,25 @@ SECURITY DEFINER
 SET search_path TO 'inventario', 'public'
 AS $$
 DECLARE
-    v_corte TIMESTAMPTZ;
+    v_almacen_ids INT[];
+    v_corte       TIMESTAMPTZ;
 BEGIN
+    -- Resolve which almacenes this movement touches via its ubicaciones.
+    SELECT array_agg(DISTINCT u.almacen_id)
+    INTO v_almacen_ids
+    FROM inventario.ubicacion u
+    WHERE u.id IN (NEW.origen_ubicacion_id, NEW.destino_ubicacion_id);
+
+    -- Global cuadres (almacen_id IS NULL) apply to all movements.
+    -- Warehouse-scoped cuadres apply only when the movement touches that almacen.
     SELECT MAX(fecha_cuadre)
     INTO v_corte
     FROM inventario.cuadre
-    WHERE estado <> 'cancelado';
+    WHERE estado <> 'cancelado'
+      AND (
+          almacen_id IS NULL
+          OR (v_almacen_ids IS NOT NULL AND almacen_id = ANY(v_almacen_ids))
+      );
 
     IF v_corte IS NOT NULL AND NEW.fecha_hora < v_corte THEN
         RAISE EXCEPTION

@@ -574,10 +574,13 @@ SELECT
     c.fecha_cuadre,
     c.fecha_cierre,
     c.estado,
+    c.almacen_id,
     (SELECT MAX(c2.fecha_cierre)
      FROM inventario.cuadre c2
      WHERE c2.estado = 'ejecutado'
-       AND c2.id < c.id) AS ult_cuadre_ejecutado_fecha
+       AND c2.id < c.id
+       AND (c2.almacen_id = c.almacen_id
+            OR (c2.almacen_id IS NULL AND c.almacen_id IS NULL))) AS ult_cuadre_ejecutado_fecha
 FROM inventario.cuadre c;
 
 GRANT SELECT ON inventario.cuadre         TO authenticated;

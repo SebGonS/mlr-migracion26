@@ -21,7 +21,7 @@
 -- Snapshots current insumo stock + MAP into cuadre_detalle.
 -- Returns the new cuadre_id (BIGINT).
 -- ───────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION inventario.crear_cuadre()
+CREATE OR REPLACE FUNCTION inventario.crear_cuadre(p_almacen_id INT DEFAULT NULL)
 RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -35,22 +35,24 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    -- Cancel any pending cuadres (borrador/preparado) before opening a new one.
-    -- Only one active cuadre makes sense at a time.
+    -- Cancel any pending cuadres for the same almacen (NULL = global).
+    -- Concurrent cuadres for different almacenes are allowed.
     UPDATE inventario.cuadre
     SET estado  = 'cancelado',
         usr_mod = get_user_id(),
         fyh_mod = now()
-    WHERE estado IN ('borrador', 'preparado');
+    WHERE estado IN ('borrador', 'preparado')
+      AND (almacen_id IS NOT DISTINCT FROM p_almacen_id);
 
-    INSERT INTO inventario.cuadre (usr_cre)
-    VALUES (get_user_id())
+    INSERT INTO inventario.cuadre (almacen_id, usr_cre)
+    VALUES (p_almacen_id, get_user_id())
     RETURNING id INTO v_cuadre_id;
 
     -- Source from item catalog (all INSUMOs), not vw_stock_items.
     -- vw_stock_items only includes items with qty > 0 — items fully consumed
     -- wouldn't appear on the count sheet, preventing discovery of phantom stock.
     -- cantidad_sistema = 0 for items with no open lotes; operators can still flag them.
+    -- When p_almacen_id is set, stock is summed only across that almacen's ubicaciones.
     INSERT INTO inventario.cuadre_detalle (
         cuadre_id,
         item_id,
@@ -75,8 +77,14 @@ BEGIN
          LIMIT 1)
     FROM item i
     JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
-    LEFT JOIN inventario.vw_stock_items  sg ON sg.item_id  = i.id
-    LEFT JOIN inventario.item_valoracion   iv ON iv.item_id  = i.id
+    LEFT JOIN (
+        SELECT si.item_id, SUM(si.cantidad_actual) AS cantidad_total
+        FROM inventario.item_saldo si
+        LEFT JOIN inventario.ubicacion u ON u.id = si.ubicacion_id
+        WHERE p_almacen_id IS NULL OR u.almacen_id = p_almacen_id
+        GROUP BY si.item_id
+    ) sg ON sg.item_id = i.id
+    LEFT JOIN inventario.item_valoracion iv ON iv.item_id = i.id
     WHERE i.fyh_elm IS NULL;
 
     RETURN v_cuadre_id;
@@ -187,6 +195,7 @@ DECLARE
     v_faltantes         JSONB;
     v_cuadre_estado     inventario.cuadre_estado_enum;
     v_fecha_cierre      TIMESTAMPTZ;
+    v_almacen_id        INT;
     v_doc_movimiento_id BIGINT;
     v_tipo_ajuste_neg   SMALLINT;
     v_tipo_ajuste_pos   SMALLINT;
@@ -213,8 +222,8 @@ BEGIN
     END IF;
 
     -- Guard: cuadre must be in borrador or preparado
-    SELECT estado, fecha_cierre
-    INTO v_cuadre_estado, v_fecha_cierre
+    SELECT estado, fecha_cierre, almacen_id
+    INTO v_cuadre_estado, v_fecha_cierre, v_almacen_id
     FROM inventario.cuadre WHERE id = p_cuadre_id;
 
     IF v_fecha_cierre IS NOT NULL OR v_cuadre_estado NOT IN ('borrador','preparado') THEN
@@ -230,11 +239,19 @@ BEGIN
     -- Cache movement type IDs and default ALM_INS location
     SELECT id INTO v_tipo_ajuste_neg FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG';
     SELECT id INTO v_tipo_ajuste_pos FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS';
-    SELECT u.id INTO v_ubicacion_id
-    FROM inventario.ubicacion u
-    JOIN inventario.almacen a ON a.id = u.almacen_id
-    WHERE a.codigo = 'ALM_INS'
-    LIMIT 1;
+    IF v_almacen_id IS NOT NULL THEN
+        SELECT u.id INTO v_ubicacion_id
+        FROM inventario.ubicacion u
+        WHERE u.almacen_id = v_almacen_id
+        ORDER BY u.id
+        LIMIT 1;
+    ELSE
+        SELECT u.id INTO v_ubicacion_id
+        FROM inventario.ubicacion u
+        JOIN inventario.almacen a ON a.id = u.almacen_id
+        WHERE a.codigo = 'ALM_INS'
+        LIMIT 1;
+    END IF;
 
     -- One posting event for the entire cuadre
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
@@ -475,11 +492,12 @@ SECURITY DEFINER
 SET search_path TO 'public','inventario','mes'
 AS $$
 DECLARE
-    v_fyh_desde TIMESTAMPTZ;
-    v_fyh_hasta TIMESTAMPTZ;
+    v_fyh_desde  TIMESTAMPTZ;
+    v_fyh_hasta  TIMESTAMPTZ;
+    v_almacen_id INT;
 BEGIN
-    SELECT ult_cuadre_ejecutado_fecha, fecha_cuadre
-    INTO v_fyh_desde, v_fyh_hasta
+    SELECT ult_cuadre_ejecutado_fecha, fecha_cuadre, almacen_id
+    INTO v_fyh_desde, v_fyh_hasta, v_almacen_id
     FROM inventario.vw_cuadre
     WHERE cuadre_id = p_cuadre_id;
 
@@ -508,6 +526,14 @@ BEGIN
         WHERE im.item_id   = p_item_id
           AND im.fecha_hora >= COALESCE(v_fyh_desde, '2020-01-01')
           AND im.fecha_hora <  v_fyh_hasta
+          AND (
+              v_almacen_id IS NULL
+              OR EXISTS (
+                  SELECT 1 FROM inventario.ubicacion u
+                  WHERE u.id IN (im.origen_ubicacion_id, im.destino_ubicacion_id)
+                    AND u.almacen_id = v_almacen_id
+              )
+          )
     );
 END;
 $$;
@@ -1179,7 +1205,7 @@ GRANT SELECT ON inventario.cuadre         TO authenticated;
 GRANT SELECT ON inventario.cuadre_detalle TO authenticated;
 
 -- Function execute grants (missing from funciones/inventario.sql)
-GRANT EXECUTE ON FUNCTION inventario.crear_cuadre()                           TO authenticated;
+GRANT EXECUTE ON FUNCTION inventario.crear_cuadre(INT)                        TO authenticated;
 GRANT EXECUTE ON FUNCTION inventario.get_cuadre(BIGINT)                       TO authenticated;
 GRANT EXECUTE ON FUNCTION inventario.update_cuadre_detalles(JSONB)            TO authenticated;
 GRANT EXECUTE ON FUNCTION inventario.finalizar_cuadre(BIGINT)                 TO authenticated;

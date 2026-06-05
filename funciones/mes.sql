@@ -131,7 +131,38 @@ RETURNS jsonb
 LANGUAGE sql STABLE
 SET search_path TO 'public','doc','mes','inventario','receta'
 AS $$
-WITH guias_partida AS (
+WITH
+-- Pre-aggregate once to replace per-row correlated subqueries
+ejecuciones_cnt AS (
+    SELECT partida_paso_id, COUNT(*) AS cnt
+    FROM mes.partida_paso_ejecucion
+    WHERE estado IN ('COMPLETADO', 'OMITIDO')
+    GROUP BY partida_paso_id
+),
+lotes_cnt AS (
+    SELECT partida_id, COUNT(*) AS cnt
+    FROM mes.partida_componente
+    WHERE lote_id IS NOT NULL
+    GROUP BY partida_id
+),
+-- Compute the pending set once; reused by guias_partida, rollos_partida, and the main SELECT
+pasos_pendientes AS (
+    SELECT pp.id AS partida_paso_id, pp.partida_id
+    FROM mes.partida_paso pp
+    JOIN mes.partida p           ON p.id  = pp.partida_id
+    LEFT JOIN ejecuciones_cnt ec ON ec.partida_paso_id = pp.id
+    LEFT JOIN lotes_cnt lc       ON lc.partida_id      = pp.partida_id
+    LEFT JOIN mes.programacion prog_sched
+           ON prog_sched.actividad_tipo = 'partida_paso'
+          AND prog_sched.actividad_id   = pp.id
+          AND prog_sched.fecha         >= CURRENT_DATE
+    WHERE p.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
+      AND p.fyh_elm IS NULL
+      AND pp.estado NOT IN ('COMPLETADO', 'OMITIDO')
+      AND COALESCE(ec.cnt, 0) < COALESCE(lc.cnt, 0)
+      AND prog_sched.id IS NULL
+),
+guias_partida AS (
     SELECT
         pc.partida_id,
         jsonb_agg(DISTINCT jsonb_build_object(
@@ -143,24 +174,7 @@ WITH guias_partida AS (
     JOIN doc.guia_remision             gr  ON gr.id           = lrd.guia_remision_id
     WHERE pc.lote_id           IS NOT NULL
       AND lrd.guia_remision_id IS NOT NULL
-      AND pc.partida_id IN (
-          SELECT pp2.partida_id
-          FROM mes.partida_paso pp2
-          JOIN mes.partida p2 ON p2.id = pp2.partida_id
-          WHERE p2.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
-            AND p2.fyh_elm IS NULL
-            AND pp2.estado NOT IN ('COMPLETADO', 'OMITIDO')
-            AND (SELECT COUNT(*) FROM mes.partida_paso_ejecucion pe
-                 WHERE pe.partida_paso_id = pp2.id AND pe.estado IN ('COMPLETADO','OMITIDO'))
-                <
-                (SELECT COUNT(*) FROM mes.partida_componente pc2
-                 WHERE pc2.partida_id = pp2.partida_id AND pc2.lote_id IS NOT NULL)
-            AND NOT EXISTS (
-                SELECT 1 FROM mes.programacion prog
-                WHERE prog.actividad_tipo = 'partida_paso' AND prog.actividad_id = pp2.id
-                  AND prog.fecha >= CURRENT_DATE
-            )
-      )
+      AND pc.partida_id IN (SELECT partida_id FROM pasos_pendientes)
     GROUP BY pc.partida_id
 ),
 rollos_partida AS (
@@ -173,6 +187,7 @@ rollos_partida AS (
     JOIN inventario.lote l      ON l.id        = pc.lote_id
     JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
     WHERE pc.lote_id IS NOT NULL
+      AND pc.partida_id IN (SELECT partida_id FROM pasos_pendientes)
     GROUP BY pc.partida_id
 )
 SELECT COALESCE(jsonb_agg(row_obj ORDER BY fyh_cre DESC), '[]'::jsonb)
@@ -209,9 +224,10 @@ FROM (
             'guias',              gp.guias,
             'ejecucion_fyh_inicio', ppe.fyh_inicio
         ) AS row_obj
-    FROM mes.partida_paso pp
-    JOIN mes.operacion o ON o.id = pp.operacion_id
-    JOIN mes.partida p   ON p.id = pp.partida_id
+    FROM pasos_pendientes pend
+    JOIN mes.partida_paso pp     ON pp.id = pend.partida_paso_id
+    JOIN mes.operacion o         ON o.id  = pp.operacion_id
+    JOIN mes.partida p           ON p.id  = pp.partida_id
     LEFT JOIN receta.tenido rt      ON rt.id  = pp.receta_id
     LEFT JOIN tipo_receta tr        ON tr.id  = rt.tipo_receta_id
     LEFT JOIN articulo_tipo at      ON at.id  = p.articulo_tipo_id
@@ -223,20 +239,6 @@ FROM (
     LEFT JOIN guias_partida gp      ON gp.partida_id = p.id
     LEFT JOIN rollos_partida rp     ON rp.partida_id = p.id
     LEFT JOIN mes.partida_paso_ejecucion ppe ON ppe.partida_paso_id = pp.id AND ppe.estado = 'EN_PROCESO'
-    WHERE
-        p.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
-      AND p.fyh_elm IS NULL
-      AND pp.estado NOT IN ('COMPLETADO', 'OMITIDO')
-      AND (SELECT COUNT(*) FROM mes.partida_paso_ejecucion pe
-           WHERE pe.partida_paso_id = pp.id AND pe.estado IN ('COMPLETADO','OMITIDO'))
-          <
-          (SELECT COUNT(*) FROM mes.partida_componente pc
-           WHERE pc.partida_id = pp.partida_id AND pc.lote_id IS NOT NULL)
-      AND NOT EXISTS (
-          SELECT 1 FROM mes.programacion prog
-          WHERE prog.actividad_tipo = 'partida_paso' AND prog.actividad_id = pp.id
-            AND prog.fecha >= CURRENT_DATE
-      )
 
     UNION ALL
 
@@ -252,12 +254,12 @@ FROM (
             'nota',                      lm.nota
         ) AS row_obj
     FROM mes.lavado_maquina lm
+    LEFT JOIN mes.programacion prog_lav
+           ON prog_lav.actividad_tipo = 'LAVADO_MAQUINA'
+          AND prog_lav.actividad_id   = lm.id
+          AND prog_lav.fecha         >= CURRENT_DATE
     WHERE lm.estado = 'PENDIENTE'
-      AND NOT EXISTS (
-          SELECT 1 FROM mes.programacion prog
-          WHERE prog.actividad_tipo = 'LAVADO_MAQUINA' AND prog.actividad_id = lm.id
-            AND prog.fecha >= CURRENT_DATE
-      )
+      AND prog_lav.id IS NULL
 ) sub;
 $$;
 
