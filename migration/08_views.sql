@@ -1421,6 +1421,7 @@ LEFT JOIN inventario.ubicacion ud ON ud.id = im.destino_ubicacion_id;
 -- ── public.vw_dashboard_kpis ──────────────────────────────────
 -- Single-row view for stat cards. Frontend calls .from('vw_dashboard_kpis').single().
 -- Month-over-month creation counts let the frontend compute the diff %.
+DROP VIEW IF EXISTS public.vw_dashboard_kpis;
 CREATE OR REPLACE VIEW public.vw_dashboard_kpis AS
 WITH
   ini_mes AS (SELECT date_trunc('month', now()) AS d),
@@ -1482,7 +1483,7 @@ SELECT
   o.creadas_mes_actual       AS ordenes_creadas_mes_actual,
   o.creadas_mes_anterior     AS ordenes_creadas_mes_anterior,
   ps.pendientes              AS pasos_pendientes,
-  ps.en_partida              AS pasos_en_partida,
+  ps.en_partida              AS pasos_en_proceso,
   r.rollos_en_planta,
   r.kg_en_planta,
   r.recibidos_mes_actual     AS rollos_recibidos_mes_actual,

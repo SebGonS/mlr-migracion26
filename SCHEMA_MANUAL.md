@@ -1818,7 +1818,7 @@ Also updates `inventario.lote.estado_calidad = resultado` and sends notification
 | `vw_items` | `item_id`, `item_codigo`, `item_nombre`, `item_tipo_id`, `item_tipo_codigo`, `unidad_id`, `unidad_codigo` | Foundation join table used by most other views |
 | `vw_colores` | `color_x_cliente_id`, `color_id`, `color`, `tono`, `cliente_id`, `tercero_id`, `hex` variants | Legacy backward-compat aliases kept |
 | `vw_enums` | `schema`, `enum_type`, `value`, `sort_order` | All PostgreSQL enum values; used by frontend at boot for dropdown population |
-| `vw_dashboard_kpis` | `partidas_activas`, `ordenes_activas`, `pasos_pendientes`, `pasos_en_partida`, `rollos_en_planta`, `kg_en_planta` + month-over-month counts | Single-row view; frontend calls `.single()` |
+| `vw_dashboard_kpis` | `partidas_activas`, `ordenes_activas`, `pasos_pendientes`, `pasos_en_proceso`, `rollos_en_planta`, `kg_en_planta` + month-over-month counts | Single-row view; frontend calls `.single()` |
 | `vw_dashboard_actividad_reciente` | `tipo`, `descripcion`, `fyh`, `referencia_id`, `referencia_codigo` | Last 20 events in 30-day window |
 | `vw_dashboard_tareas` | `tipo`, `descripcion`, `count`, `urgencia` | Actionable task counts; zero-count rows filtered out |
 

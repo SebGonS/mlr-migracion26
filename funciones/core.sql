@@ -597,8 +597,8 @@ BEGIN
         WHERE (c->>'lote_id') IS NOT NULL;
     END IF;
 
-    -- ── Auto-request recipe if no live recipe exists for this spec ────────────
-    PERFORM receta.solicitar_si_ausente(v_partida_id);
+    -- -- ── Auto-request recipe if no live recipe exists for this spec ────────────
+    -- PERFORM receta.solicitar_si_ausente(v_partida_id);
 
     -- ── Notify plant staff ────────────────────────────────────────────────────
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
