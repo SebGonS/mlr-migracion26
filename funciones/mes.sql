@@ -3,32 +3,34 @@
 -- ═══════════════════════════════════════════════════════════════
 -- SELECT mes.get_programacion_diaria('2026-05-28'::DATE);
 -- SELECT * FROM mes.programacion WHERE id=1732
+-- SELECT * FROm articulo WHERE nombre ILIKE '%gam%'
 
 CREATE OR REPLACE FUNCTION mes.get_programacion_diaria(p_fecha DATE)
 RETURNS jsonb
 LANGUAGE sql STABLE
 SET search_path TO 'public','doc','mes','inventario','receta'
 AS $$
--- One pass: collect guias for all partidas on today's board, then LEFT JOIN below.
--- Avoids a correlated subquery (per-row) — CTE executes once and is hash-joined.
-WITH guias_partida AS (
+WITH partidas_del_dia AS MATERIALIZED (
+    -- Single scan of programacion for the date; both guias_partida and rollos_partida reference this.
+    SELECT pp2.partida_id
+    FROM mes.programacion prog2
+    JOIN mes.partida_paso pp2 ON pp2.id = prog2.actividad_id
+    WHERE prog2.fecha = p_fecha AND prog2.actividad_tipo = 'partida_paso'
+),
+guias_partida AS (
     SELECT
         pc.partida_id,
         jsonb_agg(DISTINCT jsonb_build_object(
-            'id',     gr.id,
-            'codigo', gr.serie || '-' || gr.correlativo
+            'tipo',   CASE WHEN lrd.guia_remision_id IS NOT NULL THEN 'guia' ELSE 'os' END,
+            'id',     COALESCE(lrd.guia_remision_id, lrd.orden_servicio_id),
+            'codigo', COALESCE(gr.serie || '-' || gr.correlativo, os.serie || '-' || os.correlativo::text)
         )) AS guias
     FROM mes.partida_componente        pc
-    JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id     = pc.lote_id
-    JOIN doc.guia_remision             gr  ON gr.id           = lrd.guia_remision_id
-    WHERE pc.lote_id           IS NOT NULL
-      AND lrd.guia_remision_id IS NOT NULL
-      AND pc.partida_id IN (
-          SELECT pp2.partida_id
-          FROM mes.programacion prog2
-          JOIN mes.partida_paso  pp2 ON pp2.id = prog2.actividad_id
-          WHERE prog2.fecha = p_fecha AND prog2.actividad_tipo = 'partida_paso'
-      )
+    JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = pc.lote_id
+    LEFT JOIN doc.guia_remision        gr  ON gr.id = lrd.guia_remision_id
+    LEFT JOIN doc.orden_servicio       os  ON os.id = lrd.orden_servicio_id
+    WHERE pc.lote_id IS NOT NULL
+      AND pc.partida_id IN (SELECT partida_id FROM partidas_del_dia)
     GROUP BY pc.partida_id
 ),
 rollos_partida AS (
@@ -41,12 +43,7 @@ rollos_partida AS (
     JOIN inventario.lote l      ON l.id        = pc.lote_id
     JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
     WHERE pc.lote_id IS NOT NULL
-      AND pc.partida_id IN (
-          SELECT pp2.partida_id
-          FROM mes.programacion prog2
-          JOIN mes.partida_paso pp2 ON pp2.id = prog2.actividad_id
-          WHERE prog2.fecha = p_fecha AND prog2.actividad_tipo = 'partida_paso'
-      )
+      AND pc.partida_id IN (SELECT partida_id FROM partidas_del_dia)
     GROUP BY pc.partida_id
 )
 SELECT COALESCE(jsonb_agg(row_obj), '[]'::jsonb)
@@ -78,6 +75,9 @@ FROM (
         'rendimiento',               p.rendimiento,
         'articulo',                  at.nombre,
         'fibra',                     p.fibra,
+        'flg_antipilling',           p.flg_antipilling,
+        'flg_doble_bolsa',           p.flg_doble_bolsa,
+        'observacion',               p.observacion,
         'total_rollos',              rp.total_rollos,
         'cantidad_total',            rp.total_rollos,
         'cantidad_regular',          rp.cantidad_regular,
@@ -158,14 +158,15 @@ guias_partida AS (
     SELECT
         pc.partida_id,
         jsonb_agg(DISTINCT jsonb_build_object(
-            'id',     gr.id,
-            'codigo', gr.serie || '-' || gr.correlativo
+            'tipo',   CASE WHEN lrd.guia_remision_id IS NOT NULL THEN 'guia' ELSE 'os' END,
+            'id',     COALESCE(lrd.guia_remision_id, lrd.orden_servicio_id),
+            'codigo', COALESCE(gr.serie || '-' || gr.correlativo, os.serie || '-' || os.correlativo::text)
         )) AS guias
     FROM mes.partida_componente        pc
-    JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id     = pc.lote_id
-    JOIN doc.guia_remision             gr  ON gr.id           = lrd.guia_remision_id
-    WHERE pc.lote_id           IS NOT NULL
-      AND lrd.guia_remision_id IS NOT NULL
+    JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = pc.lote_id
+    LEFT JOIN doc.guia_remision        gr  ON gr.id = lrd.guia_remision_id
+    LEFT JOIN doc.orden_servicio       os  ON os.id = lrd.orden_servicio_id
+    WHERE pc.lote_id IS NOT NULL
       AND pc.partida_id IN (SELECT partida_id FROM pasos_pendientes)
     GROUP BY pc.partida_id
 ),
@@ -198,7 +199,7 @@ FROM (
             'operacion_codigo',   o.codigo,
             'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
             'articulo_tipo_id',   p.articulo_tipo_id,
-            'articulo',           at.nombre,
+            'articulo_tipo',           at.nombre,
             'cliente',            c.nombre,
             'color',              vc.color,
             'color_hex',          vc.color_hex,
@@ -438,6 +439,22 @@ BEGIN
     FROM mes.maquina m WHERE m.id = v_maquina_id;
 
     -- 3. Roll aggregation (weight + count) from all components of this order
+    --    Guard: all rolls must be weighed before recipe generation so that
+    --    lote.cantidad reflects real weight, not the guia-declared estimate.
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_componente pc
+        JOIN inventario.lote l ON l.id = pc.lote_id
+        WHERE pc.partida_id = v_partida_id
+          AND pc.lote_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM inventario.pesaje p WHERE p.lote_id = pc.lote_id
+          )
+    ) THEN
+        RAISE EXCEPTION 'Todos los rollos deben estar pesados antes de generar la receta.'
+            USING ERRCODE = 'P0001';
+    END IF;
+
     SELECT
         SUM(l.cantidad),
         SUM(CASE ird.flg_rib WHEN false THEN 1 ELSE 0 END),
@@ -468,6 +485,9 @@ BEGIN
         'partida_id',        p.id,
         'partida_origen_id', p.partida_origen_id,
         'tercero_id',        p.tercero_id,
+        'observacion',       p.observacion,
+        'flg_doble_bolsa',   p.flg_doble_bolsa,
+        'flg_antipilling',   p.flg_antipilling,
         'cliente',           cli.nombre,
         'tipo_receta',       tr.tipo_receta,
         'articulo_tipo_id',  r.articulo_tipo_id,
@@ -505,14 +525,17 @@ BEGIN
                                 'nombre',                i.nombre,
                                 'cantidad',              rtpi.cantidad,
                                 'medida',                iid.medida,
+                                -- g/L × volume(L) and % × peso(kg) × 10 both yield GRAMS;
+                                -- ÷1000 → kg (the item stock unit). 7 decimals keeps the
+                                -- recipe's 4 gram-decimals after the 3-place shift (frontend ×1000 to show g).
                                 'cantidad_requerida_kg', ROUND(CASE
-                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen
-                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10
-                                END, 4),
+                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen / 1000
+                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10 / 1000
+                                END, 7),
                                 'precio_kg',             pr.precio_kg,
                                 'costo_insumo',          ROUND(CASE
-                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen
-                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10
+                                    WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen / 1000
+                                    WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10 / 1000
                                     ELSE 0
                                 END * pr.precio_kg, 4)
                             ) ORDER BY rtpi.orden
@@ -554,10 +577,11 @@ BEGIN
     SELECT v_partida_id,
            rtpi.item_id,
            p_paso_id,
+           -- ÷1000: g/L×L and %×kg×10 yield GRAMS; reserved qty is stored in kg (stock unit). 7 dp = 4 gram-decimals.
            ROUND(CASE
-               WHEN iid.medida = 'g/L' THEN SUM(rtpi.cantidad) * v_volumen * iid.factor_stock
-               WHEN iid.medida = '%'   THEN SUM(rtpi.cantidad) * v_peso    * 10 * iid.factor_stock
-           END, 4),
+               WHEN iid.medida = 'g/L' THEN SUM(rtpi.cantidad) * v_volumen * iid.factor_stock / 1000
+               WHEN iid.medida = '%'   THEN SUM(rtpi.cantidad) * v_peso    * 10 * iid.factor_stock / 1000
+           END, 7),
            v_usr_id
     FROM receta.tenido_paso rtp
     JOIN receta.tenido_paso_insumo rtpi ON rtpi.paso_id  = rtp.id
@@ -1430,6 +1454,8 @@ DECLARE
     v_out_propietario   int;
     v_new_lote_id           int;
     v_guia_remision_id      bigint;
+    v_orden_servicio_id     bigint;
+    v_factura_hilo          TEXT;
     v_doc_movimiento_id     BIGINT;
     v_flg_rib               BOOLEAN;
     v_lote_cantidad         NUMERIC;
@@ -1574,8 +1600,8 @@ BEGIN
         v_input_lote_id := (v_elem->>'input_lote_id')::INT;
 
         -- Inherit item_id, propietario, billing anchor, rib flag, and original quantity from input lote
-        SELECT l.item_id, l.propietario_id, lrd.guia_remision_id, ird.flg_rib, l.cantidad
-        INTO v_out_item_id, v_out_propietario, v_guia_remision_id, v_flg_rib, v_lote_cantidad
+        SELECT l.item_id, l.propietario_id, lrd.guia_remision_id, lrd.orden_servicio_id, lrd.factura_hilo, ird.flg_rib, l.cantidad
+        INTO v_out_item_id, v_out_propietario, v_guia_remision_id, v_orden_servicio_id, v_factura_hilo, v_flg_rib, v_lote_cantidad
         FROM inventario.lote l
         JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
         JOIN item_rollo_detalle ird             ON ird.item_id = l.item_id
@@ -1615,16 +1641,16 @@ BEGIN
         VALUES (v_doc_movimiento_id, v_out_item_id, v_new_lote_id, v_ing_tipo_id,
                 v_ubicacion_id, v_peso_salida, 'partida_paso_ejecucion', p_ejecucion_id);
 
-        -- Batch classification: carry ingress guia + parent-batch link forward;
+        -- Batch classification: carry ingress doc anchor + factura_hilo + parent-batch link forward;
         -- populate dyeing identity from partida.
         INSERT INTO inventario.lote_rollo_detalle(
-            lote_id, guia_remision_id, origen_lote_id,
+            lote_id, guia_remision_id, orden_servicio_id, factura_hilo, origen_lote_id,
             ancho, malla, rendimiento,
             color_x_cliente_id, tenido_id,
             flg_tenido, flg_antipilling
         )
         VALUES (
-            v_new_lote_id, v_guia_remision_id, v_input_lote_id,
+            v_new_lote_id, v_guia_remision_id, v_orden_servicio_id, v_factura_hilo, v_input_lote_id,
             v_partida_ancho, v_partida_malla, v_partida_rendimiento,
             v_partida_color_x_cliente, v_partida_tenido_id,
             true, v_partida_flg_antipilling
@@ -1698,6 +1724,7 @@ DECLARE
     v_rollos_asignados  int;
     v_prod_result       text;
     v_variance_payload  jsonb;
+    v_peso_kg           numeric;
 BEGIN
     IF NOT jwt_has_permission('produccion.ejecutar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
@@ -1718,21 +1745,21 @@ BEGIN
 
     -- Cantidad guard: existing COMPLETADO runs + this submission must not exceed assigned rolls.
     -- Mirrors the same guard in the backfill function. Skipped when cantidad is not submitted.
-    IF (p_datos->>'cantidad') IS NOT NULL THEN
+    IF (p_datos->>'cantidad_rollos') IS NOT NULL THEN
         SELECT COUNT(*) INTO v_rollos_asignados
         FROM mes.partida_componente
         WHERE partida_id = v_partida_id AND lote_id IS NOT NULL;
 
-        IF (p_datos->>'cantidad')::NUMERIC +
+        IF (p_datos->>'cantidad_rollos')::NUMERIC +
            COALESCE((
-               SELECT SUM(pe2.cantidad)
+               SELECT SUM(pe2.cantidad_rollos)
                FROM mes.partida_paso_ejecucion pe2
                WHERE pe2.partida_paso_id = p_paso_id
                  AND pe2.estado = 'COMPLETADO'
            ), 0) > v_rollos_asignados
         THEN
             RAISE EXCEPTION 'La cantidad (%) excede los % rollos asignados a la partida.',
-                (p_datos->>'cantidad')::NUMERIC, v_rollos_asignados;
+                (p_datos->>'cantidad_rollos')::NUMERIC, v_rollos_asignados;
         END IF;
     END IF;
 
@@ -1798,6 +1825,29 @@ BEGIN
         v_prod_result := mes.registrar_produccion(v_ejecucion_id, p_datos->'produccion');
     END IF;
 
+    -- Snapshot peso_kg at close time: immune to future reproceso splits.
+    -- Final step (registrar_produccion called): use output lote weights.
+    -- Non-final step: prorate total input roll weight by this run's roll fraction.
+    SELECT COALESCE(
+        (SELECT SUM(l.cantidad) FROM inventario.lote l
+         WHERE l.documento_tipo = 'partida_paso_ejecucion'
+           AND l.documento_id   = v_ejecucion_id
+           AND l.fyh_elm IS NULL),
+        (SELECT ROUND(
+             SUM(l.cantidad)
+             * COALESCE((p_datos->>'cantidad_rollos')::numeric, MAX(totals.cnt))
+             / NULLIF(MAX(totals.cnt), 0),
+             4)
+         FROM mes.partida_componente pc
+         JOIN inventario.lote l ON l.id = pc.lote_id
+         CROSS JOIN (
+             SELECT COUNT(*)::numeric AS cnt
+             FROM mes.partida_componente
+             WHERE partida_id = v_partida_id AND lote_id IS NOT NULL
+         ) totals
+         WHERE pc.partida_id = v_partida_id AND pc.lote_id IS NOT NULL)
+    ) INTO v_peso_kg;
+
     -- Close the execution run with actual measured params.
     -- fyh_fin accepts a historical timestamp for backfill; live callers omit it → NOW().
     UPDATE mes.partida_paso_ejecucion
@@ -1806,7 +1856,7 @@ BEGIN
         ph_real            = COALESCE((p_datos->>'ph_real')::NUMERIC,            ph_real),
         temperatura_real   = COALESCE((p_datos->>'temperatura_real')::NUMERIC,   temperatura_real),
         relacion_bano_real = COALESCE((p_datos->>'relacion_bano_real')::NUMERIC, relacion_bano_real),
-        cantidad           = COALESCE((p_datos->>'cantidad')::NUMERIC,           cantidad),
+        cantidad_rollos    = COALESCE((p_datos->>'cantidad_rollos')::NUMERIC,           cantidad_rollos),
         cantidad_scrap     = COALESCE((p_datos->>'cantidad_scrap')::NUMERIC,     cantidad_scrap),
         notas              = COALESCE(p_datos->>'notas',                         notas),
         ancho_entrada      = COALESCE((p_datos->>'ancho_entrada')::NUMERIC,      ancho_entrada),
@@ -1817,6 +1867,7 @@ BEGIN
         rendimiento        = COALESCE((p_datos->>'rendimiento')::NUMERIC,        rendimiento),
         pases              = COALESCE((p_datos->>'pases')::SMALLINT,             pases),
         malla_alimentacion = COALESCE((p_datos->>'malla_alimentacion')::NUMERIC, malla_alimentacion),
+        peso_kg            = v_peso_kg,
         usr_mod            = v_usr_id,
         fyh_mod            = NOW()
     WHERE id = v_ejecucion_id;
@@ -1826,7 +1877,7 @@ BEGIN
     UPDATE mes.partida_paso
     SET estado = CASE
             WHEN (
-                SELECT COALESCE(SUM(pe.cantidad) FILTER (WHERE pe.estado = 'COMPLETADO'), 0)
+                SELECT COALESCE(SUM(pe.cantidad_rollos) FILTER (WHERE pe.estado = 'COMPLETADO'), 0)
                 FROM mes.partida_paso_ejecucion pe
                 WHERE pe.partida_paso_id = p_paso_id
             ) >= (
@@ -2077,12 +2128,12 @@ BEGIN
     FROM (
         SELECT
             sub.paso_id,
-            COALESCE(SUM(pe.cantidad), 0) + sub.cantidad_submitted AS total
+            COALESCE(SUM(pe.cantidad_rollos), 0) + sub.cantidad_submitted AS total
         FROM (
             SELECT (el->>'paso_id')::BIGINT          AS paso_id,
-                   SUM((el->>'cantidad')::NUMERIC)   AS cantidad_submitted
+                   SUM((el->>'cantidad_rollos')::NUMERIC)   AS cantidad_submitted
             FROM jsonb_array_elements(p_data->'pasos') el
-            WHERE (el->>'cantidad') IS NOT NULL
+            WHERE (el->>'cantidad_rollos') IS NOT NULL
             GROUP BY (el->>'paso_id')::BIGINT
         ) sub
         LEFT JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = sub.paso_id
@@ -2125,7 +2176,7 @@ BEGIN
             ph_real,
             temperatura_real,
             relacion_bano_real,
-            cantidad,
+            cantidad_rollos,
             cantidad_scrap,
             notas,
             ancho_entrada,
@@ -2149,7 +2200,7 @@ BEGIN
             (v_paso->>'ph_real')::NUMERIC,
             (v_paso->>'temperatura_real')::NUMERIC,
             (v_paso->>'relacion_bano_real')::NUMERIC,
-            (v_paso->>'cantidad')::NUMERIC,
+            (v_paso->>'cantidad_rollos')::NUMERIC,
             (v_paso->>'cantidad_scrap')::NUMERIC,
             v_paso->>'observacion',
             (v_paso->>'ancho_entrada')::NUMERIC,
@@ -2172,16 +2223,35 @@ BEGIN
             PERFORM mes.registrar_produccion(v_ejecucion_id, v_paso->'produccion');
         END IF;
 
-        -- Seal the ejecucion with the historical end timestamp.
+        -- Seal the ejecucion with the historical end timestamp + snapshotted weight.
         UPDATE mes.partida_paso_ejecucion
         SET estado  = 'COMPLETADO',
-            fyh_fin = (v_paso->>'fyh_fin')::TIMESTAMPTZ
+            fyh_fin = (v_paso->>'fyh_fin')::TIMESTAMPTZ,
+            peso_kg = COALESCE(
+                (SELECT SUM(l.cantidad) FROM inventario.lote l
+                 WHERE l.documento_tipo = 'partida_paso_ejecucion'
+                   AND l.documento_id   = v_ejecucion_id
+                   AND l.fyh_elm IS NULL),
+                (SELECT ROUND(
+                     SUM(l.cantidad)
+                     * COALESCE((v_paso->>'cantidad_rollos')::numeric, MAX(totals.cnt))
+                     / NULLIF(MAX(totals.cnt), 0),
+                     4)
+                 FROM mes.partida_componente pc
+                 JOIN inventario.lote l ON l.id = pc.lote_id
+                 CROSS JOIN (
+                     SELECT COUNT(*)::numeric AS cnt
+                     FROM mes.partida_componente
+                     WHERE partida_id = v_partida_id AND lote_id IS NOT NULL
+                 ) totals
+                 WHERE pc.partida_id = v_partida_id AND pc.lote_id IS NOT NULL)
+            )
         WHERE id = v_ejecucion_id;
 
         UPDATE mes.partida_paso
         SET estado = CASE
                 WHEN (
-                    SELECT COALESCE(SUM(pe.cantidad) FILTER (WHERE pe.estado = 'COMPLETADO'), 0)
+                    SELECT COALESCE(SUM(pe.cantidad_rollos) FILTER (WHERE pe.estado = 'COMPLETADO'), 0)
                     FROM mes.partida_paso_ejecucion pe
                     WHERE pe.partida_paso_id = v_paso_id
                 ) >= (
@@ -2830,15 +2900,13 @@ BEGIN
     -- Never touch terminal states
     IF v_estado_actual IN ('CERRADA', 'CANCELADA') THEN RETURN; END IF;
 
+    -- Use paso-level estado, not ejecucion-level: a paso that still has rolls to process
+    -- stays EN_PROCESO even when its last ejecucion is COMPLETADO (split-run model).
+    -- Reading pp.estado avoids the premature-TECO bug where the first partial run closes
+    -- its ejecucion but the paso itself is correctly still open.
     SELECT
-        BOOL_OR(EXISTS (
-            SELECT 1 FROM mes.partida_paso_ejecucion pe
-            WHERE pe.partida_paso_id = pp.id AND pe.estado = 'EN_PROCESO'
-        )),
-        BOOL_AND(EXISTS (
-            SELECT 1 FROM mes.partida_paso_ejecucion pe
-            WHERE pe.partida_paso_id = pp.id AND pe.estado IN ('COMPLETADO','OMITIDO')
-        )),
+        BOOL_OR(pp.estado = 'EN_PROCESO'),
+        BOOL_AND(pp.estado IN ('COMPLETADO','OMITIDO')),
         COUNT(*) > 0
     INTO v_hay_en_proceso, v_todos_terminados, v_hay_pasos
     FROM mes.partida_paso pp
@@ -3014,26 +3082,18 @@ BEGIN
             p_partida_id, v_estado_facturacion;
     END IF;
 
-    -- Soft warning: actual output (this partida + reprocesos) vs billing target
-    SELECT COALESCE(SUM(pd.cantidad), 0)
-    INTO v_target_qty
-    FROM mes.partida_detalle pd
-    WHERE pd.partida_id = p_partida_id;
-
-    SELECT COUNT(l.id)
-    INTO v_output_qty
-    FROM inventario.lote l
-    JOIN mes.partida_paso_ejecucion pe ON pe.id = l.documento_id
-                                      AND l.documento_tipo = 'partida_paso_ejecucion'
-    JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
-    WHERE pp.partida_id IN (
-        SELECT id FROM mes.partida
-        WHERE id = p_partida_id OR partida_origen_id = p_partida_id
-    )
-    AND l.fyh_elm IS NULL;
+    -- Soft warning: approved family output vs intended demand. Reads the same
+    -- definition the commercial views use (mes.vw_partida_familia) so the number
+    -- can't drift between here, get_partida_familia, and the board. p_partida_id
+    -- is guaranteed to be a root (children were rejected above), which is the
+    -- grain of vw_partida_familia.
+    SELECT demanda_rollos, producido_bueno
+    INTO   v_target_qty, v_output_qty
+    FROM   mes.vw_partida_familia
+    WHERE  partida_id = p_partida_id;
 
     IF v_output_qty < v_target_qty THEN
-        v_warning := format(' ATENCIÓN: producción total (%s rollos) es menor al objetivo (%s rollos). Verifique antes de cerrar.', v_output_qty, v_target_qty);
+        v_warning := format(' ATENCIÓN: producción aprobada (%s rollos) es menor al objetivo (%s rollos). Verifique antes de cerrar.', v_output_qty, v_target_qty);
     END IF;
 
     UPDATE mes.partida
@@ -3315,6 +3375,7 @@ BEGIN
         'fyh_inicio', p.fyh_inicio,
         'fyh_fin', p.fyh_fin,
         'fyh_cre', p.fyh_cre,
+        'flg_doble_bolsa', p.flg_doble_bolsa,
         'observacion', p.observacion,
 
         -- Planned output items
@@ -3417,7 +3478,7 @@ BEGIN
                         )
                     ),
                     'cantidad_procesada', (
-                        SELECT COALESCE(SUM(pe.cantidad) FILTER (WHERE pe.estado = 'COMPLETADO'), 0)
+                        SELECT COALESCE(SUM(pe.cantidad_rollos) FILTER (WHERE pe.estado = 'COMPLETADO'), 0)
                         FROM mes.partida_paso_ejecucion pe
                         WHERE pe.partida_paso_id = opp.id
                     ),
@@ -3474,7 +3535,7 @@ BEGIN
                                 'ph_real',             pe.ph_real,
                                 'temperatura_real',    pe.temperatura_real,
                                 'relacion_bano_real',  pe.relacion_bano_real,
-                                'cantidad',            pe.cantidad,
+                                'cantidad_rollos',     pe.cantidad_rollos,
                                 'notas',               pe.notas,
                                 'ancho_entrada',       pe.ancho_entrada,
                                 'ancho_salida',        pe.ancho_salida,
@@ -3548,6 +3609,10 @@ BEGIN
                 'guia_remision_id',   lrd_in.guia_remision_id,
                 'guia_serie',         gr_in.serie,
                 'guia_correlativo',   gr_in.correlativo,
+                'orden_servicio_id',  lrd_in.orden_servicio_id,
+                'os_serie',           os_in.serie,
+                'os_correlativo',     os_in.correlativo,
+                'factura_hilo',       lrd_in.factura_hilo,
                 'ancho',              lrd_in.ancho,
                 'malla',              lrd_in.malla,
                 'flg_tenido',         lrd_in.flg_tenido,
@@ -3562,6 +3627,7 @@ BEGIN
             LEFT JOIN vw_items vi_mat ON vi_mat.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_in ON lrd_in.lote_id = l.id
             LEFT JOIN doc.guia_remision gr_in ON gr_in.id = lrd_in.guia_remision_id
+            LEFT JOIN doc.orden_servicio os_in ON os_in.id = lrd_in.orden_servicio_id
             LEFT JOIN inventario.pesaje ps ON ps.lote_id = l.id
             WHERE opi.partida_id = p.id
               AND opi.lote_id IS NOT NULL
@@ -3582,6 +3648,10 @@ BEGIN
                 'guia_remision_id',   lrd_out.guia_remision_id,
                 'guia_serie',         gr_out.serie,
                 'guia_correlativo',   gr_out.correlativo,
+                'orden_servicio_id',  lrd_out.orden_servicio_id,
+                'os_serie',           os_out.serie,
+                'os_correlativo',     os_out.correlativo,
+                'factura_hilo',       lrd_out.factura_hilo,
                 'ancho',              lrd_out.ancho,
                 'malla',              lrd_out.malla,
                 'rendimiento',        lrd_out.rendimiento,
@@ -3609,6 +3679,7 @@ BEGIN
             LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_out ON lrd_out.lote_id = l.id
             LEFT JOIN doc.guia_remision gr_out ON gr_out.id = lrd_out.guia_remision_id
+            LEFT JOIN doc.orden_servicio os_out ON os_out.id = lrd_out.orden_servicio_id
             WHERE l.documento_tipo = 'partida_paso_ejecucion'
         ), '[]'::jsonb),
 
@@ -3678,6 +3749,176 @@ END;
 $function$;
 
 GRANT EXECUTE ON FUNCTION mes.get_partida(BIGINT) TO authenticated;
+
+-- ═══════════════════════════════════════════════════════════════
+-- GET PARTIDA FAMILIA  (commercial / merged rework view)
+-- ═══════════════════════════════════════════════════════════════
+-- Companion to get_partida (which is the single-order plant/operational
+-- view). This is the ADMIN/COMMERCIAL view: it folds a partida and all its
+-- reprocesos into one fulfillment picture so you can judge "did we deliver
+-- what the original order intended?" without navigating each rework.
+--
+-- Accepts ANY family member id and resolves to the root internally, so the
+-- frontend can pass a child id and still get the family rollup.
+--
+-- Fulfillment math is NOT a sum across the family — intent lives only on the
+-- root, and rolls move between members. All counting is delegated to
+-- mes.vw_partida_familia / mes.vw_partida_familia_output so the definition of
+-- a "produced" roll matches cerrar_partida exactly.
+--
+-- Returns:
+--   header (root)             id, codigo, cliente, articulo, color, estados…
+--   cumplimiento              family totals (demanda / bueno / faltante / %)
+--   cumplimiento_por_item     same totals split by output item_id
+--   miembros[]                root + each reproceso with its own tally
+CREATE OR REPLACE FUNCTION mes.get_partida_familia(p_partida_id BIGINT)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'inventario', 'mes'
+AS $function$
+DECLARE
+    v_root_id BIGINT;
+    v_result  JSONB;
+BEGIN
+    -- Resolve to the family root: any member resolves to the original.
+    SELECT COALESCE(p.partida_origen_id, p.id) INTO v_root_id
+    FROM mes.partida p
+    WHERE p.id = p_partida_id AND p.fyh_elm IS NULL;
+
+    IF v_root_id IS NULL THEN
+        RAISE EXCEPTION 'Partida % no encontrada.', p_partida_id;
+    END IF;
+
+    SELECT jsonb_build_object(
+        -- Header (root)
+        'root_id',             r.id,
+        'codigo',              EXTRACT(YEAR FROM r.fyh_cre)::TEXT
+                                   || '-' || LPAD(r.numero::TEXT, 4, '0'),
+        'tercero_id',          r.tercero_id,
+        'cliente',             c.nombre,
+        'articulo_tipo_id',    r.articulo_tipo_id,
+        'articulo_tipo',       at.nombre,
+        'color_x_cliente_id',  r.color_x_cliente_id,
+        'color',               vc.color,
+        'color_hex',           vc.color_hex,
+        'estado_produccion',   r.estado_produccion,
+        'estado_comercial',    r.estado_comercial,
+        'estado_facturacion',  r.estado_facturacion,
+        'prioridad_id',        r.prioridad_id,
+        'prioridad',           pri.prioridad,
+        'fecha_acordada',      r.fecha_acordada,
+        'fyh_cre',             r.fyh_cre,
+        'num_reprocesos',      (SELECT COUNT(*) FROM mes.partida rw
+                                 WHERE rw.partida_origen_id = r.id),
+        'tiene_rework_activo', EXISTS (SELECT 1 FROM mes.partida rw
+                                 WHERE rw.partida_origen_id = r.id
+                                   AND rw.estado_produccion NOT IN ('TECO','CERRADA','CANCELADA')),
+
+        -- Family-level fulfillment totals. Computed straight from the shared
+        -- terminal-deliverable base view filtered to THIS family — no whole-table
+        -- aggregation (the rollup view mes.vw_partida_familia is for the board,
+        -- not for single-row getters). The dedup rule stays DRY in the base view;
+        -- only the trivial arithmetic (faltante, %) is repeated here.
+        'cumplimiento', (
+            SELECT jsonb_build_object(
+                'demanda_rollos',          dem.demanda,
+                'producido_bueno',         sal.bueno,
+                'producido_pendiente',     sal.pendiente,
+                'producido_reproceso',     sal.reproceso,
+                'producido_terminal',      sal.terminal,
+                'faltante',                GREATEST(0, dem.demanda - sal.bueno),
+                'porcentaje_cumplimiento', CASE WHEN dem.demanda > 0
+                                                THEN ROUND(sal.bueno::numeric / dem.demanda * 100, 0)
+                                                ELSE NULL END,
+                'flg_cumplida',            (sal.bueno >= dem.demanda AND dem.demanda > 0)
+            )
+            FROM (
+                SELECT COALESCE(SUM(cantidad), 0) AS demanda
+                FROM mes.partida_detalle WHERE partida_id = v_root_id
+            ) dem
+            CROSS JOIN (
+                SELECT
+                    COUNT(*) FILTER (WHERE estado_calidad = 'APROBADO')  AS bueno,
+                    COUNT(*) FILTER (WHERE estado_calidad = 'PENDIENTE') AS pendiente,
+                    COUNT(*) FILTER (WHERE estado_calidad = 'REPROCESO') AS reproceso,
+                    COUNT(*)                                             AS terminal
+                FROM mes.vw_partida_familia_output WHERE root_id = v_root_id
+            ) sal
+        ),
+
+        -- Per-item breakdown: intent (root detalle) vs terminal output (family)
+        'cumplimiento_por_item', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'item_id',             it.item_id,
+                'item_codigo',         vi.item_codigo,
+                'item_nombre',         vi.item_nombre,
+                'demanda_rollos',      it.demanda,
+                'producido_bueno',     it.bueno,
+                'producido_pendiente', it.pendiente,
+                'producido_reproceso', it.reproceso,
+                'faltante',            GREATEST(0, it.demanda - it.bueno)
+            ) ORDER BY vi.item_nombre)
+            FROM (
+                SELECT
+                    COALESCE(dd.item_id, oo.item_id) AS item_id,
+                    COALESCE(dd.demanda, 0)          AS demanda,
+                    COALESCE(oo.bueno, 0)            AS bueno,
+                    COALESCE(oo.pendiente, 0)        AS pendiente,
+                    COALESCE(oo.reproceso, 0)        AS reproceso
+                FROM (
+                    SELECT item_id, SUM(cantidad) AS demanda
+                    FROM mes.partida_detalle
+                    WHERE partida_id = v_root_id
+                    GROUP BY item_id
+                ) dd
+                FULL JOIN (
+                    SELECT item_id,
+                        COUNT(*) FILTER (WHERE estado_calidad = 'APROBADO')  AS bueno,
+                        COUNT(*) FILTER (WHERE estado_calidad = 'PENDIENTE') AS pendiente,
+                        COUNT(*) FILTER (WHERE estado_calidad = 'REPROCESO') AS reproceso
+                    FROM mes.vw_partida_familia_output
+                    WHERE root_id = v_root_id
+                    GROUP BY item_id
+                ) oo ON oo.item_id = dd.item_id
+            ) it
+            LEFT JOIN vw_items vi ON vi.item_id = it.item_id
+        ), '[]'::jsonb),
+
+        -- Members: root + each reproceso, with its own terminal output tally
+        'miembros', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'id',                 m.id,
+                'codigo',             EXTRACT(YEAR FROM m.fyh_cre)::TEXT
+                                          || '-' || LPAD(m.numero::TEXT, 4, '0'),
+                'rol',                CASE WHEN m.partida_origen_id IS NULL
+                                           THEN 'ORIGEN' ELSE 'REPROCESO' END,
+                'estado_produccion',  m.estado_produccion,
+                'estado_comercial',   m.estado_comercial,
+                'fyh_cre',            m.fyh_cre,
+                'producido_bueno',    (SELECT COUNT(*) FROM mes.vw_partida_familia_output o
+                                        WHERE o.partida_id = m.id AND o.estado_calidad = 'APROBADO'),
+                'producido_terminal', (SELECT COUNT(*) FROM mes.vw_partida_familia_output o
+                                        WHERE o.partida_id = m.id)
+            ) ORDER BY m.partida_origen_id NULLS FIRST, m.fyh_cre)
+            FROM mes.partida m
+            WHERE (m.id = v_root_id OR m.partida_origen_id = v_root_id)
+              AND m.fyh_elm IS NULL
+        ), '[]'::jsonb)
+
+    ) INTO v_result
+    FROM mes.partida r
+    LEFT JOIN tercero c        ON c.id  = r.tercero_id
+    LEFT JOIN articulo_tipo at ON at.id = r.articulo_tipo_id
+    LEFT JOIN vw_colores vc    ON vc.color_x_cliente_id = r.color_x_cliente_id
+    LEFT JOIN prioridad pri    ON pri.id = r.prioridad_id
+    WHERE r.id = v_root_id;
+
+    RETURN v_result;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION mes.get_partida_familia(BIGINT) TO authenticated;
 
 -- ═══════════════════════════════════════════════════════════════
 -- GET COMPONENTES DISPONIBLES
@@ -4296,3 +4537,381 @@ GRANT EXECUTE ON FUNCTION mes.transferir_rollo_partida(INT, BIGINT, BIGINT, TEXT
 -- SELECT * FROm mes.partida_paso_ejecucion WHERE id=9378
 -- Error
 -- Pasos no programables (ya COMPLETADO/OMITIDO): [{"actividad_id": 9378}]
+
+-- ═══════════════════════════════════════════════════════════════
+-- REPORTE PRODUCCIÓN ACABADO — por DÍA DE PRODUCCIÓN (corte 07:00 Lima)
+-- El "día" del cliente va de las 07:00 a las 07:00 del día siguiente
+-- (NO medianoche). Una ejecución que cruza las 07:00 se parte en
+-- filas proporcionales atribuidas a cada día de producción.
+-- Reconcilia exactamente con get_reporte_produccion_acabado_turno:
+--   día D = turno DÍA(D) + turno NOCHE(D).
+-- Perú (America/Lima) no usa horario de verano → la aritmética en
+--   hora local de pared es exacta (sin saltos DST).
+-- Filters: p_operacion_id (NULL = todas), p_solo_reproceso
+--   TRUE  → solo reprocesos (partida_origen_id IS NOT NULL)
+--   FALSE → solo originales
+--   NULL  → todos
+-- Output: one row per (ejecucion × día de producción), prorated rollos + kg.
+-- SELECT mes.get_reporte_produccion_acabado('2026-06-01','2026-06-11');
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.get_reporte_produccion_acabado(
+    p_fecha_desde    DATE,
+    p_fecha_hasta    DATE,
+    p_operacion_id   INT     DEFAULT NULL,
+    p_solo_reproceso BOOLEAN DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'mes', 'inventario'
+AS $$
+WITH ejecuciones AS (
+    SELECT
+        ppe.id              AS ejecucion_id,
+        ppe.fyh_inicio,
+        ppe.fyh_fin,
+        ppe.fyh_inicio AT TIME ZONE 'America/Lima' AS inicio_local,
+        ppe.fyh_fin    AT TIME ZONE 'America/Lima' AS fin_local,
+        ppe.maquina_id,
+        pp.operacion_id,
+        p.id                AS partida_id,
+        p.numero            AS partida_numero,
+        p.fyh_cre           AS partida_fyh_cre,
+        p.tercero_id,
+        p.partida_origen_id,
+        ppe.cantidad_rollos AS rollos_total,
+        ppe.peso_kg         AS kg_total,
+        EXTRACT(EPOCH FROM (ppe.fyh_fin - ppe.fyh_inicio)) AS duracion_total_seg
+    FROM mes.partida_paso_ejecucion ppe
+    JOIN mes.partida_paso pp ON pp.id = ppe.partida_paso_id
+    JOIN mes.partida p       ON p.id  = pp.partida_id
+    WHERE ppe.estado    = 'COMPLETADO'
+      AND ppe.fyh_fin   IS NOT NULL
+      AND (p_operacion_id   IS NULL OR pp.operacion_id = p_operacion_id)
+      AND (p_solo_reproceso IS NULL
+           OR (p_solo_reproceso = TRUE  AND p.partida_origen_id IS NOT NULL)
+           OR (p_solo_reproceso = FALSE AND p.partida_origen_id IS     NULL))
+      -- Loose pre-filter (±1 día); la atribución exacta al día se hace por segmento.
+      AND DATE(ppe.fyh_inicio AT TIME ZONE 'America/Lima') <= p_fecha_hasta + 1
+      AND DATE(ppe.fyh_fin   AT TIME ZONE 'America/Lima') >= p_fecha_desde - 1
+),
+-- Expande cada ejecución en un segmento por día de producción (corte 07:00).
+-- Genera inicios de día desde las 07:00 del día previo al inicio, en pasos
+-- de 24 h → siempre en 07:00; el día = fecha del inicio del segmento.
+segmentos AS (
+    SELECT
+        e.*,
+        slot.dia_start::date                                 AS dia,
+        GREATEST(e.inicio_local, slot.dia_start)             AS seg_inicio,
+        LEAST(e.fin_local, slot.dia_start + interval '24 hours') AS seg_fin
+    FROM ejecuciones e
+    CROSS JOIN LATERAL generate_series(
+        date_trunc('day', e.inicio_local) - interval '17 hours',  -- 07:00 del día previo
+        e.fin_local,
+        interval '24 hours'
+    ) AS slot(dia_start)
+    -- fecha = día de producción (07:00→07:00); filtro exacto al rango pedido
+    WHERE slot.dia_start::date BETWEEN p_fecha_desde AND p_fecha_hasta
+      -- descarta segmentos sin solape real
+      AND LEAST(e.fin_local, slot.dia_start + interval '24 hours')
+        > GREATEST(e.inicio_local, slot.dia_start)
+),
+segmentos_fraccion AS (
+    SELECT
+        s.*,
+        CASE
+            WHEN s.duracion_total_seg > 0
+            THEN EXTRACT(EPOCH FROM (s.seg_fin - s.seg_inicio)) / s.duracion_total_seg
+            ELSE 1.0
+        END AS fraccion
+    FROM segmentos s
+),
+-- Reparto de rollos por RESTO MAYOR (Hamilton) dentro de cada ejecución:
+-- los enteros por segmento suman EXACTO al total en rango de la ejecución,
+-- sin inflar (redondear cada segmento por separado sí inflaba).
+--   rollos_target   = entero objetivo del tramo en rango
+--   rollos_base     = piso por segmento
+--   leftover R      = rollos_target - Σ pisos; va a los R restos mayores
+-- kg queda continuo (sin redondear aquí); se formatea al mostrar.
+segmentos_rollos AS (
+    SELECT
+        sf.*,
+        FLOOR(COALESCE(sf.rollos_total, 0) * sf.fraccion)::int AS rollos_base,
+        (ROUND(SUM(COALESCE(sf.rollos_total, 0) * sf.fraccion)
+               OVER (PARTITION BY sf.ejecucion_id)))::int      AS rollos_target,
+        (SUM(FLOOR(COALESCE(sf.rollos_total, 0) * sf.fraccion))
+               OVER (PARTITION BY sf.ejecucion_id))::int       AS rollos_base_sum,
+        ROW_NUMBER() OVER (
+            PARTITION BY sf.ejecucion_id
+            ORDER BY (COALESCE(sf.rollos_total, 0) * sf.fraccion)
+                     - FLOOR(COALESCE(sf.rollos_total, 0) * sf.fraccion) DESC,
+                     sf.seg_inicio
+        )                                                       AS rem_rank
+    FROM segmentos_fraccion sf
+)
+SELECT COALESCE(jsonb_agg(row_obj ORDER BY dia, operacion, ejecucion_id), '[]'::jsonb)
+FROM (
+    SELECT jsonb_build_object(
+        'fecha',              sr.dia,
+        'ejecucion_id',       sr.ejecucion_id,
+        'operacion_id',       sr.operacion_id,
+        'operacion',          o.nombre,
+        'operacion_codigo',   o.codigo,
+        'maquina_id',         sr.maquina_id,
+        'maquina',            m.nombre,
+        'partida_id',         sr.partida_id,
+        'partida_codigo',     EXTRACT(YEAR FROM sr.partida_fyh_cre)::TEXT || '-' || LPAD(sr.partida_numero::TEXT, 4, '0'),
+        'cliente',            c.nombre,
+        'es_reproceso',       sr.partida_origen_id IS NOT NULL,
+        'partida_origen_id',  sr.partida_origen_id,
+        -- base + 1 si el segmento está entre los R restos mayores de la ejecución
+        'rollos',             sr.rollos_base
+                              + CASE WHEN sr.rem_rank <= (sr.rollos_target - sr.rollos_base_sum)
+                                     THEN 1 ELSE 0 END,
+        'kg',                 ROUND((COALESCE(sr.kg_total, 0) * sr.fraccion)::numeric, 4),
+        'fyh_inicio',         sr.fyh_inicio,
+        'fyh_fin',            sr.fyh_fin,
+        'fraccion',           ROUND(sr.fraccion::numeric, 4)
+    )                    AS row_obj,
+    sr.dia               AS dia,
+    o.nombre             AS operacion,
+    sr.ejecucion_id      AS ejecucion_id
+    FROM segmentos_rollos sr
+    JOIN mes.operacion o  ON o.id  = sr.operacion_id
+    JOIN mes.partida p    ON p.id  = sr.partida_id
+    LEFT JOIN mes.maquina m  ON m.id  = sr.maquina_id
+    LEFT JOIN tercero c   ON c.id  = sr.tercero_id
+) sub;
+$$;
+
+GRANT EXECUTE ON FUNCTION mes.get_reporte_produccion_acabado(DATE, DATE, INT, BOOLEAN) TO authenticated;
+
+-- ═══════════════════════════════════════════════════════════════
+-- REPORTE PRODUCCIÓN ACABADO — por TURNO (corte 07:00 / 19:00 Lima)
+-- Variante de get_reporte_produccion_acabado: en vez de cortar a
+-- medianoche, corta en los límites de turno y prorratea.
+--   DIA   = 07:00 → 19:00
+--   NOCHE = 19:00 → 07:00 (del día siguiente)
+-- fecha = día en que INICIA el turno: un turno NOCHE que arranca el
+--   15 a las 19:00 se atribuye al 15, aunque termine el 16.
+-- Perú (America/Lima) no usa horario de verano → la aritmética en
+--   hora local de pared es exacta (sin saltos DST).
+-- SELECT mes.get_reporte_produccion_acabado_turno('2026-06-01','2026-06-11');
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.get_reporte_produccion_acabado_turno(
+    p_fecha_desde    DATE,
+    p_fecha_hasta    DATE,
+    p_operacion_id   INT     DEFAULT NULL,
+    p_solo_reproceso BOOLEAN DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'mes', 'inventario'
+AS $$
+WITH ejecuciones AS (
+    SELECT
+        ppe.id              AS ejecucion_id,
+        ppe.fyh_inicio,
+        ppe.fyh_fin,
+        ppe.fyh_inicio AT TIME ZONE 'America/Lima' AS inicio_local,
+        ppe.fyh_fin    AT TIME ZONE 'America/Lima' AS fin_local,
+        ppe.maquina_id,
+        pp.operacion_id,
+        p.id                AS partida_id,
+        p.numero            AS partida_numero,
+        p.fyh_cre           AS partida_fyh_cre,
+        p.tercero_id,
+        p.partida_origen_id,
+        ppe.cantidad_rollos AS rollos_total,
+        ppe.peso_kg         AS kg_total,
+        EXTRACT(EPOCH FROM (ppe.fyh_fin - ppe.fyh_inicio)) AS duracion_total_seg
+    FROM mes.partida_paso_ejecucion ppe
+    JOIN mes.partida_paso pp ON pp.id = ppe.partida_paso_id
+    JOIN mes.partida p       ON p.id  = pp.partida_id
+    WHERE ppe.estado    = 'COMPLETADO'
+      AND ppe.fyh_fin   IS NOT NULL
+      AND (p_operacion_id   IS NULL OR pp.operacion_id = p_operacion_id)
+      AND (p_solo_reproceso IS NULL
+           OR (p_solo_reproceso = TRUE  AND p.partida_origen_id IS NOT NULL)
+           OR (p_solo_reproceso = FALSE AND p.partida_origen_id IS     NULL))
+      -- Loose pre-filter (±1 día); la atribución exacta al turno se hace por segmento.
+      AND DATE(ppe.fyh_inicio AT TIME ZONE 'America/Lima') <= p_fecha_hasta + 1
+      AND DATE(ppe.fyh_fin   AT TIME ZONE 'America/Lima') >= p_fecha_desde - 1
+),
+-- Expande cada ejecución en un segmento por turno que atraviesa.
+-- Genera límites de turno desde las 19:00 del día previo al inicio,
+-- en pasos de 12 h → 19:00, 07:00, 19:00, ... (siempre en :00).
+segmentos AS (
+    SELECT
+        e.*,
+        slot.shift_start::date                                AS dia,
+        CASE WHEN EXTRACT(HOUR FROM slot.shift_start) = 7
+             THEN 'DIA' ELSE 'NOCHE' END                      AS turno,
+        GREATEST(e.inicio_local, slot.shift_start)            AS seg_inicio,
+        LEAST(e.fin_local, slot.shift_start + interval '12 hours') AS seg_fin
+    FROM ejecuciones e
+    CROSS JOIN LATERAL generate_series(
+        date_trunc('day', e.inicio_local) - interval '5 hours',  -- 19:00 del día previo
+        e.fin_local,
+        interval '12 hours'
+    ) AS slot(shift_start)
+    -- fecha = día de inicio del turno; filtro exacto al rango pedido
+    WHERE slot.shift_start::date BETWEEN p_fecha_desde AND p_fecha_hasta
+      -- descarta segmentos sin solape real
+      AND LEAST(e.fin_local, slot.shift_start + interval '12 hours')
+        > GREATEST(e.inicio_local, slot.shift_start)
+),
+segmentos_fraccion AS (
+    SELECT
+        s.*,
+        CASE
+            WHEN s.duracion_total_seg > 0
+            THEN EXTRACT(EPOCH FROM (s.seg_fin - s.seg_inicio)) / s.duracion_total_seg
+            ELSE 1.0
+        END AS fraccion
+    FROM segmentos s
+),
+-- Reparto de rollos por RESTO MAYOR (Hamilton) dentro de cada ejecución:
+-- los enteros por segmento suman EXACTO al total en rango de la ejecución,
+-- sin inflar (redondear cada segmento por separado sí inflaba).
+-- kg queda continuo (sin redondear aquí); se formatea al mostrar.
+segmentos_rollos AS (
+    SELECT
+        sf.*,
+        FLOOR(COALESCE(sf.rollos_total, 0) * sf.fraccion)::int AS rollos_base,
+        (ROUND(SUM(COALESCE(sf.rollos_total, 0) * sf.fraccion)
+               OVER (PARTITION BY sf.ejecucion_id)))::int      AS rollos_target,
+        (SUM(FLOOR(COALESCE(sf.rollos_total, 0) * sf.fraccion))
+               OVER (PARTITION BY sf.ejecucion_id))::int       AS rollos_base_sum,
+        ROW_NUMBER() OVER (
+            PARTITION BY sf.ejecucion_id
+            ORDER BY (COALESCE(sf.rollos_total, 0) * sf.fraccion)
+                     - FLOOR(COALESCE(sf.rollos_total, 0) * sf.fraccion) DESC,
+                     sf.seg_inicio
+        )                                                       AS rem_rank
+    FROM segmentos_fraccion sf
+)
+SELECT COALESCE(jsonb_agg(row_obj ORDER BY dia, turno, operacion, ejecucion_id), '[]'::jsonb)
+FROM (
+    SELECT jsonb_build_object(
+        'fecha',              sr.dia,
+        'turno',              sr.turno,
+        'ejecucion_id',       sr.ejecucion_id,
+        'operacion_id',       sr.operacion_id,
+        'operacion',          o.nombre,
+        'operacion_codigo',   o.codigo,
+        'maquina_id',         sr.maquina_id,
+        'maquina',            m.nombre,
+        'partida_id',         sr.partida_id,
+        'partida_codigo',     EXTRACT(YEAR FROM sr.partida_fyh_cre)::TEXT || '-' || LPAD(sr.partida_numero::TEXT, 4, '0'),
+        'cliente',            c.nombre,
+        'es_reproceso',       sr.partida_origen_id IS NOT NULL,
+        'partida_origen_id',  sr.partida_origen_id,
+        -- base + 1 si el segmento está entre los R restos mayores de la ejecución
+        'rollos',             sr.rollos_base
+                              + CASE WHEN sr.rem_rank <= (sr.rollos_target - sr.rollos_base_sum)
+                                     THEN 1 ELSE 0 END,
+        'kg',                 ROUND((COALESCE(sr.kg_total, 0) * sr.fraccion)::numeric, 4),
+        'fyh_inicio',         sr.fyh_inicio,
+        'fyh_fin',            sr.fyh_fin,
+        'fraccion',           ROUND(sr.fraccion::numeric, 4)
+    )                    AS row_obj,
+    sr.dia               AS dia,
+    sr.turno             AS turno,
+    o.nombre             AS operacion,
+    sr.ejecucion_id      AS ejecucion_id
+    FROM segmentos_rollos sr
+    JOIN mes.operacion o  ON o.id  = sr.operacion_id
+    JOIN mes.partida p    ON p.id  = sr.partida_id
+    LEFT JOIN mes.maquina m  ON m.id  = sr.maquina_id
+    LEFT JOIN tercero c   ON c.id  = sr.tercero_id
+) sub;
+$$;
+
+GRANT EXECUTE ON FUNCTION mes.get_reporte_produccion_acabado_turno(DATE, DATE, INT, BOOLEAN) TO authenticated;
+-- ═══════════════════════════════════════════════════════════════
+-- REPORTE MATIZADOS — corrección de color en máquina por insumo
+-- Un matizado es un consumo extra de insumo (motivo MATIZADO) sobre
+-- una ejecución de paso, para ajustar el tono de una partida.
+-- Equivalente nuevo del legacy get_componentes_matizado, pero como
+-- reporte por rango de fecha en vez de por partida.
+--
+-- Grano: una fila por MOVIMIENTO (evento de matizado).
+-- Fecha: fecha_hora del movimiento (hora Lima).
+--
+-- Reversiones: una ejecución corregida (corregir_matizado) genera
+--   consumo original (PROD_CONSUMO, factor -1) + reversión
+--   (PROD_CONSUMO_REV, factor +1) + nuevo consumo. Todos llevan el
+--   motivo MATIZADO. 'cantidad' se firma con (-factor) para que el
+--   consumo sume positivo y la reversión negativo → SUM(cantidad)
+--   = consumo neto. 'es_reversion' marca las filas de anulación.
+--   p_incluir_reversiones = FALSE las oculta (solo consumos, factor -1).
+--
+-- Filtros: p_cliente_id (NULL = todos), p_insumo_id (NULL = todos).
+-- SELECT mes.get_reporte_matizados('2026-06-01','2026-06-18');
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.get_reporte_matizados(
+    p_fecha_desde         DATE,
+    p_fecha_hasta         DATE,
+    p_cliente_id          INT     DEFAULT NULL,
+    p_insumo_id           INT     DEFAULT NULL,
+    p_incluir_reversiones BOOLEAN DEFAULT TRUE
+)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'mes', 'inventario'
+AS $$
+SELECT COALESCE(jsonb_agg(row_obj ORDER BY fecha, partida_numero, insumo, movimiento_id), '[]'::jsonb)
+FROM (
+    SELECT jsonb_build_object(
+        'movimiento_id',    m.id,
+        'fecha',            DATE(m.fecha_hora AT TIME ZONE 'America/Lima'),
+        'fyh_movimiento',   m.fecha_hora,
+        'turno',            CASE WHEN EXTRACT(HOUR FROM m.fecha_hora AT TIME ZONE 'America/Lima') BETWEEN 7 AND 18
+                                 THEN 'DIA' ELSE 'NOCHE' END,
+        'ejecucion_id',     ppe.id,
+        'partida_id',       p.id,
+        'partida_codigo',   EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
+        'cliente',          c.nombre,
+        'es_reproceso',     p.partida_origen_id IS NOT NULL,
+        'operacion_id',     pp.operacion_id,
+        'operacion',        o.nombre,
+        'operacion_codigo', o.codigo,
+        'maquina_id',       ppe.maquina_id,
+        'maquina',          mq.nombre,
+        'insumo_id',        i.id,
+        'insumo_codigo',    i.codigo,
+        'insumo',           i.nombre,
+        'unidad',           u.codigo,
+        'es_reversion',     t.factor = 1,
+        -- consumo positivo, reversión negativo (firma por -factor)
+        'cantidad',         ROUND((m.cantidad * (-t.factor))::numeric, 5),
+        'precio_unitario',  m.precio_unitario,
+        'monto',            ROUND((m.cantidad * (-t.factor) * COALESCE(m.precio_unitario, 0))::numeric, 4)
+    )                 AS row_obj,
+    DATE(m.fecha_hora AT TIME ZONE 'America/Lima') AS fecha,
+    p.numero          AS partida_numero,
+    i.nombre          AS insumo,
+    m.id              AS movimiento_id
+    FROM inventario.item_movimientos m
+    JOIN inventario.item_movimiento_tipo   t  ON t.id  = m.item_movimiento_tipo_id
+    JOIN inventario.item_movimiento_motivo mo ON mo.id = m.motivo_id AND mo.codigo = 'MATIZADO'
+    JOIN item    i ON i.id = m.item_id
+    JOIN unidad  u ON u.id = i.unidad_id
+    JOIN mes.partida_paso_ejecucion ppe ON ppe.id = m.documento_id
+                                       AND m.documento_tipo = 'partida_paso_ejecucion'
+    JOIN mes.partida_paso pp ON pp.id = ppe.partida_paso_id
+    JOIN mes.partida      p  ON p.id  = pp.partida_id
+    JOIN mes.operacion    o  ON o.id  = pp.operacion_id
+    LEFT JOIN mes.maquina mq ON mq.id = ppe.maquina_id
+    LEFT JOIN tercero     c  ON c.id  = p.tercero_id
+    WHERE DATE(m.fecha_hora AT TIME ZONE 'America/Lima') BETWEEN p_fecha_desde AND p_fecha_hasta
+      AND (p_cliente_id IS NULL OR p.tercero_id = p_cliente_id)
+      AND (p_insumo_id  IS NULL OR m.item_id    = p_insumo_id)
+      AND (p_incluir_reversiones OR t.factor = -1)   -- factor -1 = consumo; +1 = reversión
+) sub;
+$$;
+
+GRANT EXECUTE ON FUNCTION mes.get_reporte_matizados(DATE, DATE, INT, INT, BOOLEAN) TO authenticated;

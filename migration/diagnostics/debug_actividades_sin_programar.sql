@@ -10,7 +10,7 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 
 WITH v AS (
-    SELECT 5177 AS v_partida_id  -- ← EDIT THIS
+    SELECT 5175 AS v_partida_id  -- ← EDIT THIS
 )
 
 -- ── Gate 1: partida estado_produccion & soft-delete

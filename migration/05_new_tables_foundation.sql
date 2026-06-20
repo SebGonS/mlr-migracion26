@@ -135,15 +135,16 @@ EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 -- ── item_insumo_detalle ────────────────────────────────────────
 -- Requires medida_enum to exist (legacy type or defined in 02_enums.sql)
 CREATE TABLE item_insumo_detalle (
-    item_id INT PRIMARY KEY REFERENCES item(id),
-    medida medida_enum NOT NULL,
-    insumo_tipo_id smallint NOT NULL REFERENCES insumo_tipo(id),
-    colorante_tipo_id smallint REFERENCES colorante_tipo(id),
-    factor_stock NUMERIC(8,6) NOT NULL DEFAULT 1,
-    usr_cre int,
-    fyh_cre TIMESTAMPTZ DEFAULT NOW(),
-    usr_mod int,
-    fyh_mod TIMESTAMPTZ
+    item_id           INT          PRIMARY KEY REFERENCES item(id),
+    medida            medida_enum  NOT NULL,
+    insumo_tipo_id    SMALLINT     NOT NULL REFERENCES insumo_tipo(id),
+    colorante_tipo_id SMALLINT     REFERENCES colorante_tipo(id),
+    factor_stock      NUMERIC(8,6) NOT NULL DEFAULT 1,
+    flg_antipilling   BOOLEAN      NOT NULL DEFAULT false,
+    usr_cre           INT,
+    fyh_cre           TIMESTAMPTZ  DEFAULT NOW(),
+    usr_mod           INT,
+    fyh_mod           TIMESTAMPTZ
 );
 
 DROP TRIGGER IF EXISTS trg_ai_gen_codigo_item_insumo ON item_insumo_detalle;
@@ -227,6 +228,7 @@ VALUES
 ('DEV_CLI_EGR',      'Devolución Cliente',                        'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Se devuelve al cliente'),
 ('DEV_PROV_EGR',     'Devolución Proveedor',                      'DEVOLUCION',      -1, true,  true,  false, true,  true,  false, 'Salida por devolución a proveedor'),
 ('SERV_ING',         'Servicio – Recepción Material Cliente',     'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Recepción de material de cliente'),
+('SERV_ING_REV',     'Servicio – Anulación Recepción Material',   'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Anulación de recepción de material (reversal de SERV_ING)'),
 ('SERV_EGR',         'Servicio – Despacho Material Cliente',      'PROCESO_EXTERNO', -1, true,  false, false, true,  true,  false, 'Despacho de material procesado al cliente'),
 ('SERV_DEV_ING',     'Servicio – Devolución Material Cliente',    'PROCESO_EXTERNO', 1,  true,  false, false, true,  false, true,  'Cliente devuelve material procesado'),
 ('AJUSTE_POS',       'Ajuste Inventario (+)',                     'ajuste',          1,  true,  true,  true,  false, false, true,  'Corrección positiva de inventario'),
@@ -435,7 +437,7 @@ CREATE INDEX idx_lote_saldo_lote_ubicacion ON inventario.lote_saldo(lote_id, ubi
 CREATE TABLE inventario.item_saldo (
     item_id         INT  NOT NULL REFERENCES item(id),
     ubicacion_id    INT  REFERENCES inventario.ubicacion(id),
-    cantidad_actual NUMERIC(12,4) NOT NULL DEFAULT 0,
+    cantidad_actual NUMERIC(15,7) NOT NULL DEFAULT 0,  -- 7 dp: chemical kg = grams÷1000, preserves the recipe's 4 gram-decimals
     UNIQUE NULLS NOT DISTINCT (item_id, ubicacion_id)
 );
 CREATE INDEX idx_item_saldo_item_id ON inventario.item_saldo(item_id);
@@ -451,12 +453,13 @@ CREATE TABLE inventario.item_movimientos (
     item_movimiento_tipo_id smallint REFERENCES inventario.item_movimiento_tipo(id) NOT NULL,
     origen_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
     destino_ubicacion_id INT NULL REFERENCES inventario.ubicacion(id),
-    cantidad NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
+    cantidad NUMERIC(15,7) NOT NULL CHECK (cantidad > 0),  -- 7 dp: chemical kg = grams÷1000, preserves the recipe's 4 gram-decimals
     precio_unitario NUMERIC(12,4),                      -- NULL for non-valorizable movements (flg_valorizable=false)
     monto NUMERIC(16,4) GENERATED ALWAYS AS (cantidad * precio_unitario) STORED,
     fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
     documento_tipo TEXT,
     documento_id int,
+    documento_linea_id BIGINT,  -- line item within the source document (≈ SAP MSEG.EBELP); NULL for docs without line-level reference
     motivo_id smallint REFERENCES inventario.item_movimiento_motivo(id), -- ≈ SAP MSEG.GRUND
     observacion TEXT,
     usr_cre int,
@@ -467,7 +470,7 @@ CREATE TABLE inventario.item_movimientos (
 CREATE TABLE inventario.item_valoracion (
     item_id         INT            PRIMARY KEY REFERENCES item(id),
     precio_promedio NUMERIC(12,4)  NOT NULL DEFAULT 0,
-    stock_qty       NUMERIC(12,4)  NOT NULL DEFAULT 0,
+    stock_qty       NUMERIC(15,7)  NOT NULL DEFAULT 0,  -- 7 dp: matches item_saldo (chemical kg = grams÷1000, 4 gram-decimals)
     stock_valorado  NUMERIC(16,4)  NOT NULL DEFAULT 0,
     fyh_mod         TIMESTAMPTZ    DEFAULT now()
 );
@@ -479,7 +482,7 @@ DECLARE
     v_flg_valorizable boolean;
     v_flg_recalcula   boolean;
     v_map             numeric(12,4);
-    v_stock_qty       numeric(12,4);
+    v_stock_qty       numeric(15,7);  -- 7 dp: chemical kg precision (see item_valoracion.stock_qty)
     v_stock_valorado  numeric(16,4);
 BEGIN
     IF NEW.precio_unitario IS NULL THEN RETURN NEW; END IF;

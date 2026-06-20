@@ -69,6 +69,38 @@ AS $$
 $$;
 
 
+-- ── doc.fn_familia_precio ─────────────────────────────────────
+-- Maps an articulo_tipo to its commercial PRICING family (bucket).
+-- Replaces the legacy hardcoded CASE that normalized tipo_articulo_id before
+-- matching catalogo_precios. The mapping lives as data in
+-- doc.articulo_tipo_familia (created/seeded in
+-- migration/patches/25_articulo_tipo_familia.sql):
+--   - tercero_id IS NULL → default family for all clients
+--   - tercero_id = <id>  → per-client override (flat-rate clients → family 20)
+-- Client-specific row wins over the default; no mapping → prices as itself.
+--
+-- Used ONLY for the TENIDO price lookup. Recipes match on the LITERAL
+-- articulo_tipo and must NOT be normalized.
+CREATE OR REPLACE FUNCTION doc.fn_familia_precio(
+    p_articulo_tipo_id SMALLINT,
+    p_tercero_id       INT
+)
+RETURNS SMALLINT
+LANGUAGE sql STABLE
+SET search_path TO 'doc', 'public'
+AS $$
+    SELECT COALESCE(
+        (SELECT f.familia_id
+         FROM doc.articulo_tipo_familia f
+         WHERE f.articulo_tipo_id = p_articulo_tipo_id
+           AND (f.tercero_id = p_tercero_id OR f.tercero_id IS NULL)
+         ORDER BY f.tercero_id NULLS LAST   -- specific client beats default
+         LIMIT 1),
+        p_articulo_tipo_id                  -- no mapping → itself
+    );
+$$;
+
+
 -- ── doc.fn_get_costo_receta ───────────────────────────────────
 -- Returns the chemical cost per kg of fabric for a given dyeing recipe.
 -- Unit conversion via item_insumo_detalle.medida (canonical unit per item):
@@ -194,10 +226,18 @@ BEGIN
         v_costo_kg := doc.fn_get_costo_receta(v_receta_id);
     END IF;
 
-    -- Fetch current catalog price for this variant
+    -- Fetch current catalog price for this variant.
+    -- TENIDO: normalize article type to its pricing family so the preview shows
+    -- the price that will actually bill. Recipe lookup above stays on the literal type.
     v_precio_kg := doc.fn_get_precio(
         p_operacion_id, p_color_x_cliente_id, p_tercero_id,
-        p_articulo_tipo_id, p_tenido_id, p_fibra, p_flg_antipilling
+        CASE WHEN p_operacion_id = (SELECT id FROM mes.operacion WHERE codigo = 'TENIDO')
+             THEN doc.fn_familia_precio(
+                    p_articulo_tipo_id,
+                    COALESCE(p_tercero_id,
+                             (SELECT cxc.tercero_id FROM color_x_cliente cxc WHERE cxc.id = p_color_x_cliente_id)))
+             ELSE p_articulo_tipo_id END,
+        p_tenido_id, p_fibra, p_flg_antipilling
     );
 
     RETURN QUERY SELECT
@@ -284,6 +324,17 @@ BEGIN
         IF v_receta_id IS NOT NULL THEN
             v_costo_kg := doc.fn_get_costo_receta(v_receta_id);
         END IF;
+    END IF;
+
+    -- Normalize TENIDO article type to its pricing family AFTER the recipe/cost
+    -- lookup above (recipes match the literal type) so the catalog row is stored
+    -- under the same bucket the price lookup normalizes to.
+    IF p_operacion_id = (SELECT id FROM mes.operacion WHERE codigo = 'TENIDO') THEN
+        p_articulo_tipo_id := doc.fn_familia_precio(
+            p_articulo_tipo_id,
+            COALESCE(p_tercero_id,
+                     (SELECT cxc.tercero_id FROM color_x_cliente cxc WHERE cxc.id = p_color_x_cliente_id))
+        );
     END IF;
 
     UPDATE doc.catalogo_precios
@@ -374,7 +425,10 @@ AS $$
                 op.id::smallint,
                 pt.color_x_cliente_id,
                 pt.tercero_id,
-                pt.articulo_tipo_id,
+                -- TENIDO: normalize article type to its pricing family (client-aware)
+                CASE WHEN op.codigo = 'TENIDO'
+                     THEN doc.fn_familia_precio(pt.articulo_tipo_id, pt.tercero_id)
+                     ELSE pt.articulo_tipo_id END,
                 CASE WHEN op.codigo = 'TENIDO' THEN pt.tenido_id ELSE NULL END,
                 pt.fibra,
                 -- pass flg_antipilling for TENIDO so cost-matched row is used;
@@ -479,12 +533,26 @@ WHERE
         WHERE cp.operacion_id = op.id
           AND (cp.color_x_cliente_id IS NULL OR cp.color_x_cliente_id = p.color_x_cliente_id)
           AND (cp.tercero_id         IS NULL OR cp.tercero_id         = p.tercero_id)
-          AND (cp.articulo_tipo_id   IS NULL OR cp.articulo_tipo_id   = p.articulo_tipo_id)
+          -- TENIDO: compare against the pricing family (client-aware), not the literal type
+          AND (cp.articulo_tipo_id   IS NULL OR cp.articulo_tipo_id   =
+                CASE WHEN op.codigo = 'TENIDO'
+                     THEN doc.fn_familia_precio(p.articulo_tipo_id, p.tercero_id)
+                     ELSE p.articulo_tipo_id END)
           AND (cp.tenido_id          IS NULL OR cp.tenido_id          = p.tenido_id)
           AND (cp.fibra              IS NULL OR cp.fibra              = ar.fibra)
           AND (cp.flg_antipilling    IS NULL OR cp.flg_antipilling    = v.flg_antipilling)
           AND cp.fyh_elm IS NULL
-    );
+    )
+    -- TENIDO only: require an approved recipe — no recipe means no cost basis to price against
+    AND (op.codigo <> 'TENIDO' OR EXISTS (
+        SELECT 1 FROM receta.tenido rt
+        WHERE rt.flg_produccion = true
+          AND (rt.color_x_cliente_id IS NULL OR rt.color_x_cliente_id = p.color_x_cliente_id)
+          AND rt.articulo_tipo_id = p.articulo_tipo_id
+          AND rt.fibra = ar.fibra
+          AND (rt.tenido_id IS NULL OR rt.tenido_id = p.tenido_id)
+          AND rt.flg_antipilling = v.flg_antipilling
+    ));
 
 GRANT SELECT ON doc.vw_precios_pendientes TO authenticated;
 
@@ -827,7 +895,10 @@ LEFT JOIN LATERAL (
              -- Base operacion: pass flg_antipilling for TENIDO cost-matched row
              ELSE doc.fn_get_precio(
                      l.operacion_id, l.color_x_cliente_id, l.partida_tercero_id,
-                     l.articulo_tipo_id,
+                     -- TENIDO: normalize article type to its pricing family (client-aware)
+                     CASE WHEN l.op_codigo = 'TENIDO'
+                          THEN doc.fn_familia_precio(l.articulo_tipo_id, l.partida_tercero_id)
+                          ELSE l.articulo_tipo_id END,
                      CASE WHEN l.op_codigo = 'TENIDO' THEN l.tenido_id ELSE NULL END,
                      l.fibra,
                      CASE WHEN l.op_codigo = 'TENIDO' THEN l.flg_antipilling ELSE NULL END
@@ -997,7 +1068,10 @@ LEFT JOIN LATERAL (
                   )
              ELSE doc.fn_get_precio(
                      l.operacion_id, l.color_x_cliente_id, l.partida_tercero_id,
-                     l.articulo_tipo_id,
+                     -- TENIDO: normalize article type to its pricing family (client-aware)
+                     CASE WHEN l.op_codigo = 'TENIDO'
+                          THEN doc.fn_familia_precio(l.articulo_tipo_id, l.partida_tercero_id)
+                          ELSE l.articulo_tipo_id END,
                      CASE WHEN l.op_codigo = 'TENIDO' THEN l.tenido_id ELSE NULL END,
                      l.fibra,
                      CASE WHEN l.op_codigo = 'TENIDO' THEN l.flg_antipilling ELSE NULL END
@@ -1115,6 +1189,17 @@ BEGIN
         RAISE EXCEPTION 'Factura #% ya está anulada.', p_factura_id;
     END IF;
 
+    -- Block voiding an invoice that still has active customer payments.
+    IF EXISTS (
+        SELECT 1
+        FROM doc.cobro_factura cf
+        JOIN doc.cobro c ON c.id = cf.cobro_id
+        WHERE cf.factura_id = p_factura_id
+          AND c.estado = 'registrado'
+    ) THEN
+        RAISE EXCEPTION 'No se puede anular la factura #%: tiene cobros activos aplicados. Anule primero los cobros.', p_factura_id;
+    END IF;
+
     -- Collect partidas referenced by this invoice before cancelling
     SELECT ARRAY(
         SELECT DISTINCT partida_id
@@ -1123,7 +1208,7 @@ BEGIN
     ) INTO v_partidas;
 
     UPDATE doc.factura
-    SET estado = 'anulada', usr_mod = v_usr_id, fyh_mod = NOW()
+    SET estado = 'anulada', estado_pago = 'anulado', usr_mod = v_usr_id, fyh_mod = NOW()
     WHERE id = p_factura_id;
 
     -- Revert 'facturado' partidas that now have pending weight again.
@@ -1154,6 +1239,7 @@ $$;
 
 GRANT EXECUTE ON FUNCTION doc.anular_factura_cliente(bigint) TO authenticated;
 
+GRANT EXECUTE ON FUNCTION doc.fn_familia_precio(SMALLINT, INT)                                      TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.fn_precio_info(SMALLINT, INT, INT, SMALLINT, INT, SMALLINT, BOOLEAN) TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.fn_get_costo_receta(INT)                                             TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.upsert_catalogo_precio(SMALLINT, INT, INT, SMALLINT, INT, SMALLINT, BOOLEAN, NUMERIC) TO authenticated;

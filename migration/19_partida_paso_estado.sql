@@ -27,7 +27,7 @@ SET estado = CASE
         )
     ) THEN 'OMITIDO'::partida_paso_estado_enum
     WHEN (
-        SELECT COALESCE(SUM(pe.cantidad) FILTER (WHERE pe.estado = 'COMPLETADO'), 0)
+        SELECT COALESCE(SUM(pe.cantidad_rollos) FILTER (WHERE pe.estado = 'COMPLETADO'), 0)
         FROM mes.partida_paso_ejecucion pe
         WHERE pe.partida_paso_id = pp.id
     ) >= (

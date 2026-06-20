@@ -300,7 +300,9 @@ $$;
 
 -- p_data keys (all optional except receta_id):
 --   color_x_cliente_id, articulo_tipo_id, fibra, tenido_id,
---   flg_antipilling, tipo_receta_id, pasos (array — replaces all if present)
+--   tipo_receta_id, pasos (array — replaces all if present)
+-- NOTE: flg_antipilling is NOT accepted here — it is derived automatically from
+--       the presence of a paso with operacion.codigo = 'ANTIPILLING'.
 CREATE OR REPLACE FUNCTION receta.actualizar_tenido(p_receta_id INT, p_data JSONB)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -333,7 +335,6 @@ BEGIN
         articulo_tipo_id   = COALESCE((p_data->>'articulo_tipo_id')::SMALLINT,   articulo_tipo_id),
         fibra              = COALESCE((p_data->>'fibra')::SMALLINT,              fibra),
         tenido_id          = COALESCE((p_data->>'tenido_id')::INT,               tenido_id),
-        flg_antipilling    = COALESCE((p_data->>'flg_antipilling')::BOOLEAN,     flg_antipilling),
         tipo_receta_id     = COALESCE((p_data->>'tipo_receta_id')::SMALLINT,     tipo_receta_id),
         usr_mod            = v_usr_id,
         fyh_mod            = now()
@@ -364,6 +365,18 @@ BEGIN
         FROM paso_ins pi
         JOIN jsonb_array_elements(p_data->'pasos') p ON (p->>'orden')::SMALLINT = pi.orden
         CROSS JOIN jsonb_array_elements(COALESCE(p->'insumos', '[]')) i;
+
+        -- Recompute flg_antipilling from the saved insumo set.
+        -- Driven by item_insumo_detalle.flg_antipilling on the chemical item — no hardcoded IDs.
+        UPDATE receta.tenido
+        SET flg_antipilling = EXISTS (
+            SELECT 1
+            FROM receta.tenido_paso tp
+            JOIN receta.tenido_paso_insumo tpi ON tpi.paso_id = tp.id
+            JOIN item_insumo_detalle iid ON iid.item_id = tpi.item_id
+            WHERE tp.receta_id = p_receta_id AND iid.flg_antipilling = true
+        )
+        WHERE id = p_receta_id;
     END IF;
 END;$$;
 

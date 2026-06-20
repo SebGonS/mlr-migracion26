@@ -450,36 +450,42 @@ $function$;
 -- Marks a letra as paid. Cascades estado_pago to the factura:
 --   all paid → 'total' | some paid → 'parcial'
 -- ───────────────────────────────────────────────────────────────
+-- p_cuenta_financiera_id: account the letra is paid FROM. When supplied,
+--   posts a tesoreria EGRESO. Optional (NULL) for backward compatibility.
+-- estado_pago is now amount-based (paid letras + cash pagos), reconciled
+--   by doc.recalcular_estado_pago_factura_proveedor (funciones/pagos_proveedor.sql).
+-- Drop the pre-treasury 2-arg signature so the new overload is unambiguous.
+DROP FUNCTION IF EXISTS doc.pagar_letra(bigint, date);
 CREATE OR REPLACE FUNCTION doc.pagar_letra(
-    p_letra_id   bigint,
-    p_fecha_pago date DEFAULT CURRENT_DATE
+    p_letra_id             bigint,
+    p_fecha_pago           date   DEFAULT CURRENT_DATE,
+    p_cuenta_financiera_id int    DEFAULT NULL
 )
 RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'iam', 'public', 'doc'
+SET search_path TO 'iam', 'public', 'doc', 'tesoreria'
 AS $function$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id          int := get_user_id();
-    v_estado_actual   letra_estado_enum;
-    v_facturas_count  int;
+    v_letra           doc.letra%ROWTYPE;
+    v_facturas_count  int := 0;
+    v_factura_rec     record;
 BEGIN
     IF NOT jwt_has_permission('comercial.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    SELECT estado
-    INTO v_estado_actual
-    FROM doc.letra WHERE id = p_letra_id FOR UPDATE;
+    SELECT * INTO v_letra FROM doc.letra WHERE id = p_letra_id FOR UPDATE;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Letra #% no encontrada.', p_letra_id;
     END IF;
-    IF v_estado_actual NOT IN ('emitida', 'vencida') THEN
+    IF v_letra.estado NOT IN ('emitida', 'vencida') THEN
         RAISE EXCEPTION 'La letra #% ya está en estado %. Solo se pueden pagar letras emitidas o vencidas.',
-            p_letra_id, v_estado_actual;
+            p_letra_id, v_letra.estado;
     END IF;
 
     UPDATE doc.letra
@@ -489,26 +495,27 @@ BEGIN
         fyh_mod    = NOW()
     WHERE id = p_letra_id;
 
-    -- Cascade estado_pago to every factura cleared by this letra.
-    -- A factura is 'total' when none of its linked letras remain unpaid.
-    UPDATE doc.factura_proveedor fp
-    SET estado_pago = CASE
-            WHEN NOT EXISTS (
-                SELECT 1
-                FROM doc.letra_factura lf2
-                JOIN doc.letra l2 ON l2.id = lf2.letra_id
-                WHERE lf2.factura_proveedor_id = fp.id
-                  AND l2.estado NOT IN ('pagada', 'anulada')
-            ) THEN 'total'
-            ELSE 'parcial'
-        END,
-        usr_mod = v_usr_id,
-        fyh_mod = NOW()
-    WHERE fp.id IN (
-        SELECT factura_proveedor_id FROM doc.letra_factura WHERE letra_id = p_letra_id
+    -- Cash ledger (EGRESO). No-op when no paying account supplied.
+    PERFORM tesoreria.registrar_movimiento(
+        p_cuenta_financiera_id := p_cuenta_financiera_id,
+        p_tipo                 := 'EGRESO',
+        p_monto                := v_letra.monto,
+        p_moneda               := 'USD',
+        p_documento_tipo       := 'letra',
+        p_documento_id         := p_letra_id,
+        p_fecha                := p_fecha_pago,
+        p_medio_pago           := 'LETRA',
+        p_referencia           := v_letra.numero,
+        p_glosa                := format('Pago letra #%s proveedor %s', p_letra_id, v_letra.tercero_id)
     );
 
-    GET DIAGNOSTICS v_facturas_count = ROW_COUNT;
+    -- Recompute estado_pago (amount-based) on every factura this letra cleared.
+    FOR v_factura_rec IN
+        SELECT factura_proveedor_id FROM doc.letra_factura WHERE letra_id = p_letra_id
+    LOOP
+        PERFORM doc.recalcular_estado_pago_factura_proveedor(v_factura_rec.factura_proveedor_id);
+        v_facturas_count := v_facturas_count + 1;
+    END LOOP;
 
     RETURN format('Letra #%s pagada el %s. %s factura(s) actualizada(s).',
         p_letra_id, p_fecha_pago, v_facturas_count);
@@ -752,15 +759,65 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $function$;
 
+-- ───────────────────────────────────────────────────────────────
+-- marcar_compra_recibida
+-- Conciliation shortcut: closes all lines by setting cantidad_recibida = cantidad.
+-- Use when stock was already set via inventory count and no movements should be posted.
+-- Blocks ingresar_compra from double-posting afterward.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.marcar_compra_recibida(p_compra_id bigint)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'public', 'doc'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id  int := get_user_id();
+    v_rows    int;
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('marcar_compra_recibida', v_usr_id, jsonb_build_object('compra_id', p_compra_id));
+
+    IF NOT EXISTS (SELECT 1 FROM doc.compra WHERE id = p_compra_id AND fyh_elm IS NULL) THEN
+        RAISE EXCEPTION 'Compra #% no encontrada o anulada.', p_compra_id;
+    END IF;
+
+    UPDATE doc.compra_detalle
+    SET cantidad_recibida = cantidad
+    WHERE compra_id = p_compra_id
+      AND cantidad_recibida < cantidad;
+
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+
+    IF v_rows = 0 THEN
+        RAISE EXCEPTION 'Compra #% ya está completamente recibida.', p_compra_id;
+    END IF;
+
+    RETURN format('Compra #%s marcada como recibida (%s línea(s) cerrada(s)).', p_compra_id, v_rows);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in marcar_compra_recibida - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
+    RAISE;
+END;
+$function$;
+
 GRANT EXECUTE ON FUNCTION doc.crear_compra(jsonb)                           TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.actualizar_compra(bigint, jsonb)              TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.registrar_factura_proveedor(jsonb)            TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.registrar_letra(jsonb)                        TO authenticated;
-GRANT EXECUTE ON FUNCTION doc.pagar_letra(bigint, date)                     TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.pagar_letra(bigint, date, int)                TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.vincular_guias_compra(bigint, jsonb)          TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.desvincular_guias_compra(bigint, jsonb)       TO authenticated;
-GRANT EXECUTE ON FUNCTION doc.vincular_facturas_compra(bigint, jsonb)   TO authenticated;
-GRANT EXECUTE ON FUNCTION doc.desvincular_facturas_compra(bigint, jsonb) TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.vincular_facturas_compra(bigint, jsonb)       TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.desvincular_facturas_compra(bigint, jsonb)    TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.marcar_compra_recibida(bigint)                TO authenticated;
 
 
 -- ───────────────────────────────────────────────────────────────
@@ -1397,6 +1454,13 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM doc.compra WHERE id = v_compra_id AND fyh_elm IS NULL) THEN
         RAISE EXCEPTION 'Compra % no existe o fue eliminada', v_compra_id;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM doc.compra_detalle
+        WHERE compra_id = v_compra_id AND cantidad_recibida < cantidad
+    ) THEN
+        RAISE EXCEPTION 'Compra % ya está completamente recibida.', v_compra_id;
     END IF;
 
     SELECT id INTO STRICT v_mov_tipo_id

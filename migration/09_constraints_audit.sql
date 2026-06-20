@@ -376,6 +376,12 @@ CREATE INDEX IF NOT EXISTS idx_factura_detalle_dims
     ON doc.factura_detalle (operacion_id, articulo_tipo_id, color_x_cliente_id)
     WHERE operacion_id IS NOT NULL;
 
+-- get_programacion_diaria / get_actividades_sin_programar filter exclusively on fecha;
+-- the existing UNIQUE (maquina_id, fecha, secuencia) has fecha as second column so it
+-- cannot drive a date-only seek. This index makes those queries seek-based.
+CREATE INDEX IF NOT EXISTS idx_programacion_fecha
+    ON mes.programacion (fecha, actividad_tipo);
+
 -- ── inventario.pesaje integrity ───────────────────────────────────────────────
 -- One authoritative weight record per roll — regardless of when or why it was weighed.
 -- Both ingress (partida) and post-assignment (orden) weighing upsert on this key.

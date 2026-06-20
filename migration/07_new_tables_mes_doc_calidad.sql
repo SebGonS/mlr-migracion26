@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS mes.partida (
     rendimiento text,
     ancho text,
     flg_antipilling boolean NOT NULL DEFAULT false,
+    flg_doble_bolsa boolean NOT NULL DEFAULT false,
     fecha_acordada date,                           -- agreed delivery date with client (SAP: EDATU)
     observacion text,
     estado_produccion partida_estado_produccion_enum NOT NULL DEFAULT 'CREADA',
@@ -31,6 +32,11 @@ CREATE TABLE IF NOT EXISTS mes.partida (
     -- Updated when doc.factura lines are issued against this order.
     estado_comercial partida_estado_comercial_enum NOT NULL DEFAULT 'PENDIENTE',
     estado_facturacion partida_facturacion_enum NOT NULL DEFAULT 'pendiente',
+    -- Price snapshot — "the price given" for this partida (per-kg rate only; no amounts/IGV/totals).
+    -- NULL = derive from doc.catalogo_precios at dispatch date (default, the catalog is the source).
+    -- non-NULL = override: a negotiated price, OR a frozen value immutable to later catalog edits.
+    -- See migration/patches/26_partida_precio_kg.sql. Added 2026-06-17.
+    precio_kg           NUMERIC(10,4) CHECK (precio_kg IS NULL OR precio_kg >= 0),
     CONSTRAINT chk_rework_comercial_locked
         CHECK (partida_origen_id IS NULL OR estado_comercial = 'PENDIENTE'),
     fyh_programacion timestamptz,
@@ -168,10 +174,6 @@ CREATE TABLE IF NOT EXISTS doc.orden_servicio (
     ancho           TEXT,
     flg_antipilling BOOLEAN     NOT NULL DEFAULT false,
     flg_urgente     BOOLEAN     NOT NULL DEFAULT false,
-    estado          TEXT        NOT NULL DEFAULT 'BORRADOR'
-                    CHECK (estado IN ('BORRADOR','AUTORIZADA','EN_PROCESO','COMPLETADA','ANULADA')),
-    estado_entrega  TEXT        NOT NULL DEFAULT 'PENDIENTE'
-                    CHECK (estado_entrega IN ('PENDIENTE','PARCIAL','COMPLETO')),
     observacion     TEXT,
     factura         TEXT,
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
@@ -181,6 +183,16 @@ CREATE TABLE IF NOT EXISTS doc.orden_servicio (
     UNIQUE (tercero_id, serie, correlativo)
 );
 
+CREATE TRIGGER trg_biud_orden_servicio_audit
+    BEFORE INSERT OR UPDATE OR DELETE ON doc.orden_servicio
+    FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
+CREATE TRIGGER trg_bi_orden_servicio_audit
+    BEFORE INSERT ON doc.orden_servicio
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
+CREATE TRIGGER trg_bu_orden_servicio_audit
+    BEFORE UPDATE ON doc.orden_servicio
+    FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
+
 -- ── doc.orden_servicio_detalle ────────────────────────────────
 -- Intent lines: what was ordered. cantidad = roll count.
 -- color_x_cliente_id + tenido_id are known at order time (NOT NULL).
@@ -188,14 +200,20 @@ CREATE TABLE IF NOT EXISTS doc.orden_servicio_detalle (
     id                  BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     orden_servicio_id   BIGINT      NOT NULL REFERENCES doc.orden_servicio(id),
     linea               SMALLINT    NOT NULL,
-    articulo_id         INT         NOT NULL REFERENCES articulo(id),
+    item_id             INT         NOT NULL REFERENCES item(id),
+    -- articulo_id removed: derivable via item_rollo_detalle.articulo_id
     malla               TEXT,
-    cantidad            INT         NOT NULL CHECK (cantidad > 0),
+    cantidad            INT         NOT NULL CHECK (cantidad > 0),   -- ordered roll count (intent)
+    cantidad_recibida   INT         NOT NULL DEFAULT 0,              -- received so far; bumped by ingresar_orden_servicio
     color_x_cliente_id  INT         NOT NULL REFERENCES color_x_cliente(id),
     tenido_id           INT         NOT NULL REFERENCES tenido(id),
     flg_doble_bolsa     BOOLEAN     NOT NULL DEFAULT false,
     UNIQUE (orden_servicio_id, linea)
 );
+
+CREATE TRIGGER trg_biud_orden_servicio_detalle_audit
+    BEFORE INSERT OR UPDATE OR DELETE ON doc.orden_servicio_detalle
+    FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
 
 -- ── inventario.pesaje ─────────────────────────────────────────
 -- Placed here (after mes.partida) so the table ordering is clear,
@@ -402,7 +420,8 @@ CREATE TABLE mes.partida_paso_ejecucion (
     ph_real             numeric(4,2),
     temperatura_real    numeric(5,2),
     relacion_bano_real  numeric(5,2),
-    cantidad            numeric(12,4),
+    cantidad_rollos     numeric(12,4),  -- roll count confirmed in this run (snapshot; ≈ SAP AFRU yield in pieces)
+    peso_kg             numeric(12,4),  -- weight processed (snapshot): output lote sum (final step) or prorated input (non-final). Immune to reproceso splits.
     cantidad_scrap      numeric(12,4),  -- rolls condemned mid-execution (≈ SAP AFRU.AFRUASC)
     notas           text,
     programacion_id BIGINT REFERENCES mes.programacion(id),
@@ -426,7 +445,7 @@ CREATE TABLE mes.partida_componente (
     lote_id             int             REFERENCES inventario.lote(id),
     item_id             int             REFERENCES item(id),
     partida_paso_id     bigint          REFERENCES mes.partida_paso(id) ON DELETE CASCADE,
-    cantidad_reservada  numeric(12,4),
+    cantidad_reservada  numeric(15,7),  -- 7 dp: kg = grams÷1000, preserves 4 gram-decimals (see generar_receta)
     usr_cre int,
     fyh_cre timestamptz DEFAULT now(),
     usr_mod int,
@@ -491,6 +510,13 @@ CREATE TABLE inventario.lote_rollo_detalle (
     ancho               TEXT,
     malla               TEXT,
     rendimiento         TEXT,
+
+    -- Thread (hilo) supplier invoice this roll was spun from. Free-text bridge
+    -- field for orden_servicio (MLR-confectioned) rolls — the seam where the
+    -- unmapped confection process hands off to dyeing. Set at ingress from the
+    -- OS line's value, fanned to every roll on the line. Supersede with real
+    -- thread-lot genealogy if/when manufacturing is modeled. NOT an FK.
+    factura_hilo        TEXT,
 
     -- Dyeing identity — set when production (dyeing) step completes
     color_x_cliente_id  INT REFERENCES color_x_cliente(id),
@@ -734,6 +760,31 @@ CREATE TABLE IF NOT EXISTS doc.catalogo_precios (
 );
 
 GRANT SELECT, INSERT, UPDATE ON doc.catalogo_precios TO authenticated;
+
+
+-- ── doc.articulo_tipo_familia ─────────────────────────────────
+-- Commercial PRICING families: maps each articulo_tipo to the bucket whose
+-- catalogo_precios row applies (the legacy normalization, now as editable data).
+--   tercero_id IS NULL → default family for all clients
+--   tercero_id = <id>  → per-client override (flat-rate clients → family 20)
+-- Resolved by doc.fn_familia_precio (funciones/facturacion.sql), used for the
+-- TENIDO price lookup only — recipes match the LITERAL articulo_tipo.
+-- Seeded + existing catalog rows re-pointed in
+-- migration/patches/25_articulo_tipo_familia.sql.
+CREATE TABLE IF NOT EXISTS doc.articulo_tipo_familia (
+    articulo_tipo_id SMALLINT NOT NULL REFERENCES articulo_tipo(id),
+    tercero_id       INT               REFERENCES tercero(id),  -- NULL = default for all clients
+    familia_id       SMALLINT NOT NULL REFERENCES articulo_tipo(id),
+    usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW(),
+    usr_mod INT, fyh_mod TIMESTAMPTZ
+);
+-- One default per type (tercero_id NULL), one override per (type, client).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_tipo_familia_default
+    ON doc.articulo_tipo_familia(articulo_tipo_id) WHERE tercero_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_articulo_tipo_familia_cliente
+    ON doc.articulo_tipo_familia(articulo_tipo_id, tercero_id) WHERE tercero_id IS NOT NULL;
+
+GRANT SELECT ON doc.articulo_tipo_familia TO authenticated;
 
 
 

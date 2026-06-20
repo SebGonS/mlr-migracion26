@@ -1,4 +1,4 @@
-
+--4595 4588
 
 ----ROLLOS LA REAL
 BEGIN;
@@ -148,7 +148,7 @@ $$;
 -- ORDER BY ird.flg_rib, l.id;
 
 
-
+--4595,4588
 SELECT * FROm mes.partida_paso_ejecucion WHERE partida_paso_id IN
 (SELECT id FROM mes.partida_paso WHERe partida_id=4502);
 -- UPDATE mes.partida_paso_ejecucion set cantidad=18, fyh_inicio='2026-05-25 16:30:00.00+00', fyh_fin='2026-05-25 17:40:00.00+00' where id=1845
@@ -181,11 +181,7 @@ SELECT
 FROM mes.partida p
 JOIN inventario.lote l ON l.documento_id = p.id AND l.documento_tipo = 'PARTIDA'
 JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
-WHERE p.id IN (4502
-,4502
-,4452
-,4502
-,4502)
+WHERE p.id IN (4595,4588)
 GROUP BY 1,2,3,4,5,6,7
 ORDER BY ird.flg_rib, l.id;
 
@@ -215,7 +211,7 @@ SELECT
 FROM mes.partida p
 JOIN inventario.lote l ON l.documento_id = p.id AND l.documento_tipo = 'PARTIDA'
 JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
-WHERE p.id = 4502
+WHERE p.id = 4588
 ORDER BY ird.flg_rib, l.id;
 
 --reverse ghost egress
@@ -1106,3 +1102,225 @@ GROUP BY imt.codigo;
 -- ROLLBACK;
 COMMIT;
 
+
+
+
+
+SELECT * FROM doc.guia_remision
+WHERE correlativo ILIKE '%2646%'
+
+SELECT * FROM item WHERE nombre ILIKE '%rib%f poly%24%1%'
+--297
+SELECT * FROM item WHERE id=258
+
+
+
+
+UPDATE inventario.lote
+SET item_id=297
+WHERE item_id=258
+AND id IN (SELECT lote_id FROM inventario.lote_rollo_detalle WHERE guia_remision_id=739)
+
+SELECT * FROM doc.guia_remision_detalle
+
+UPDATE doc.guia_remision_detalle
+SET item_id=297
+WHERE guia_remision_id=739 AND item_id=258 
+
+
+SELECT tipo_articulo_id, COUNT(*) AS rows
+FROM public.catalogo_precios
+WHERE activo = 1
+GROUP BY 1 ORDER BY 1;
+
+
+WITH grupo_base(tipo, bucket) AS (
+    -- the legacy grouping, made visible (client-independent part)
+    VALUES (4,18),(9,18),(8,12),(10,14),(17,14),(22,16),(23,16)
+)
+SELECT
+    at.id                                   AS tipo_id,
+    at.nombre                               AS tipo_nombre,
+    COALESCE(g.bucket, at.id)               AS bucket_precio,
+    bt.nombre                               AS bucket_nombre,
+    (SELECT COUNT(*) FROM mes.partida p
+       WHERE p.articulo_tipo_id = at.id AND p.fyh_elm IS NULL)                         AS partidas_activas,
+    (SELECT COUNT(*) FROM doc.catalogo_precios cp
+       WHERE cp.articulo_tipo_id = at.id AND cp.fyh_elm IS NULL)                       AS precios_propios,
+    (SELECT COUNT(*) FROM doc.catalogo_precios cp
+       WHERE cp.articulo_tipo_id = COALESCE(g.bucket, at.id) AND cp.fyh_elm IS NULL)   AS precios_en_bucket
+FROM articulo_tipo at
+LEFT JOIN grupo_base    g  ON g.tipo = at.id
+LEFT JOIN articulo_tipo bt ON bt.id  = COALESCE(g.bucket, at.id)
+ORDER BY partidas_activas DESC;
+
+
+
+
+SELECT *From doc.orden_servicio WHere id=10
+
+SELECT *From doc.orden_servicio_detalle
+WHere orden_servicio_id=10
+
+UPDATE doc.orden_servicio_detalle
+SET malla='3.40-1.35'
+WHere orden_servicio_id=10
+
+
+
+SELECT * FROM item_rollo_detalle WHERE item_id=272
+
+SELECT * FROM articulo WHERE id=30
+
+SELECT * FROM articulo_tipo WHERE id=5
+
+-- A) Where is the 2,242 actually coming from? (by operation)
+SELECT op.codigo, COUNT(*) AS combos_sin_precio
+FROM doc.vw_precios_pendientes vpp
+JOIN mes.operacion op ON op.id = vpp.operacion_id
+GROUP BY op.codigo
+ORDER BY 2 DESC;
+
+-- B) Apples-to-apples vs the original ~2,000: TENIDO partidas still unpriced (with family logic)
+SELECT COUNT(*)
+FROM mes.partida p
+WHERE p.fyh_elm IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM doc.catalogo_precios cp
+    WHERE cp.operacion_id = (SELECT id FROM mes.operacion WHERE codigo='TENIDO')
+      AND cp.fyh_elm IS NULL
+      AND (cp.articulo_tipo_id   IS NULL OR cp.articulo_tipo_id   = doc.fn_familia_precio(p.articulo_tipo_id, p.tercero_id))
+      AND (cp.color_x_cliente_id IS NULL OR cp.color_x_cliente_id = p.color_x_cliente_id)
+      AND (cp.tenido_id          IS NULL OR cp.tenido_id          = p.tenido_id)
+  );
+
+
+SELECT * FROM doc.vw_rollos_estado;
+
+
+SELECT COUNT(*) AS rollos_huerfanos_en_stock,
+       ROUND(SUM(l.cantidad)::numeric, 2) AS kg
+FROM inventario.lote l
+JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+JOIN inventario.vw_stock_lotes sl      ON sl.lote_id = l.id
+WHERE l.fyh_elm IS NULL
+  AND lrd.guia_remision_id IS NULL
+  AND lrd.orden_servicio_id IS NULL;
+
+
+--6049
+SELECT * FROM mes.partida where id =6049;
+SELECT * FROM mes.partida_paso WHERE partida_id=6049;
+SELECT * FROM mes.partida_paso_ejecucion WHERE partida_paso_id IN (SELECT id FROM mes.partida_paso WHERE partida_id=6049)
+
+
+UPDATE mes.partida_paso
+SET estado = 'EN_PROCESO', fyh_mod = NOW()
+WHERE id = 18908;
+
+
+SELECT * FROM mes.partida_paso WHERE partida_id=6094
+SELECT * FROM mes.partida_paso_ejecucion WHERE
+SELEct * FROm mes.operacion
+
+ALTER TABLE mes.partida_paso_ejecucion DISABLE TRIGGER trg_bu_ejecucion_receta_immutable;
+
+UPDATE mes.partida_paso_ejecucion 
+SET receta_id = NULL
+WHERE partida_paso_id IN (
+    SELECT id FROM mes.partida_paso WHERE partida_id = 6094 AND operacion_id != 2
+);
+
+ALTER TABLE mes.partida_paso_ejecucion ENABLE TRIGGER trg_bu_ejecucion_receta_immutable;
+UPDATE mes.partida_paso 
+SET receta_id = NULL
+WHERE receta_id IS NOT NULL AND operacion_id != 2
+;
+SELECT * FROM mes.partida_paso WHERE receta_id IS NOT NULL AND operacion_id != 2
+
+
+--6063 cambiar 1010 a 1011
+
+
+SELECT
+    pe.id           AS ejecucion_id,
+    pe.estado,
+    pe.cantidad_rollos,
+    pe.peso_kg,
+    pe.fyh_inicio,
+    pe.fyh_fin
+FROM mes.partida_paso pp
+JOIN mes.operacion o ON o.id = pp.operacion_id
+JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+WHERE pp.partida_id = 6063
+  AND o.codigo ILIKE '%secado%'
+ORDER BY pe.fyh_inicio;
+
+
+SELECT COUNT(*) FROM inventario.lote
+WHERE documento_tipo = 'partida_paso_ejecucion'
+  AND documento_id IN (9650, 9598);
+
+BEGIN;
+
+UPDATE mes.partida_paso_ejecucion
+SET cantidad_rollos = 11,
+    usr_mod = get_user_id(),
+    fyh_mod = NOW()
+WHERE id = 9650;
+
+SELECT mes.actualizar_estado_partida(6063);
+
+COMMIT;
+
+
+BEGIN;
+
+-- 1. Correct the roll count
+UPDATE mes.partida_paso_ejecucion
+SET cantidad_rollos = 11,
+    usr_mod = get_user_id(),
+    fyh_mod = NOW()
+WHERE id = 9650;
+
+-- 2. Re-evaluate paso estado using same formula as finalizar_paso
+UPDATE mes.partida_paso pp
+SET estado = CASE
+        WHEN (
+            SELECT COALESCE(SUM(pe.cantidad_rollos) FILTER (WHERE pe.estado = 'COMPLETADO'), 0)
+            FROM mes.partida_paso_ejecucion pe
+            WHERE pe.partida_paso_id = pp.id
+        ) >= (
+            SELECT COUNT(*)
+            FROM mes.partida_componente pc
+            WHERE pc.partida_id = pp.partida_id
+              AND pc.lote_id IS NOT NULL
+        ) THEN 'COMPLETADO'::partida_paso_estado_enum
+        ELSE 'EN_PROCESO'::partida_paso_estado_enum
+    END,
+    fyh_mod = NOW()
+WHERE pp.id = (
+    SELECT partida_paso_id FROM mes.partida_paso_ejecucion WHERE id = 9650
+);
+
+-- 3. Now paso.estado is correct → partida state recalculation is accurate
+SELECT mes.actualizar_estado_partida(6063);
+
+COMMIT;
+--4595 4588
+
+
+
+
+
+
+-- 1) Does this tipo satisfy esDevolucion (codigo LIKE 'DEV_%') and !esEmitida (flg_emitida = false)?
+select id, codigo, nombre, flg_emitida, flg_cliente
+from doc.guia_remision_tipo
+where nombre ilike '%devoluci%cliente%servicio%';
+
+-- 2) Does the dispatched view actually return rows for the client you selected?
+--    Replace <CLIENTE_ID> with the tercero id you pick as emisor.
+select lote_id, item_nombre, propietario_id, partida_codigo, cantidad_disponible
+from inventario.vw_lotes_rollos_despachados
+where propietario_id = (SELECT id FROm tercero WHERE nombre ILIKE '%faride%');

@@ -371,6 +371,132 @@ END;
 $function$;
 
 
+-- ── doc.registrar_numero_guia ─────────────────────────────────────────────
+-- Backfills the legal serie/correlativo onto a headless guia after the
+-- EXTERNAL system (GRE) issues the number. The dispatch movement is posted at
+-- crear_guia time (serie NULL); this transcribes the number once it's known.
+--
+-- serie/correlativo are written together (the chk_guia_doc_fields both-or-neither
+-- CHECK enforces this). Only headless guias (serie IS NULL) are eligible — a
+-- guia that already carries a number must be corrected by anulando + reissuing,
+-- not silently overwritten. Collisions are caught by the UNIQUE
+-- (tercero_id, serie, correlativo, guia_remision_tipo_id) constraint.
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.registrar_numero_guia(
+    p_guia_id     BIGINT,
+    p_serie       TEXT,
+    p_correlativo TEXT
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'doc', 'public'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id       int := get_user_id();
+    v_serie_actual text;
+    v_fyh_elm      timestamptz;
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF p_serie IS NULL OR trim(p_serie) = ''
+       OR p_correlativo IS NULL OR trim(p_correlativo) = '' THEN
+        RAISE EXCEPTION 'Se requieren serie y correlativo para numerar la guía.';
+    END IF;
+
+    SELECT gr.serie, gr.fyh_elm
+    INTO   v_serie_actual, v_fyh_elm
+    FROM   doc.guia_remision gr
+    WHERE  gr.id = p_guia_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Guía #% no encontrada.', p_guia_id;
+    END IF;
+    IF v_fyh_elm IS NOT NULL THEN
+        RAISE EXCEPTION 'Guía #% está anulada y no puede numerarse.', p_guia_id;
+    END IF;
+    IF v_serie_actual IS NOT NULL THEN
+        RAISE EXCEPTION 'Guía #% ya tiene número (%-%). Para corregirlo, anule y reemita.',
+            p_guia_id, v_serie_actual, (SELECT correlativo FROM doc.guia_remision WHERE id = p_guia_id);
+    END IF;
+
+    BEGIN
+        UPDATE doc.guia_remision
+        SET serie       = trim(p_serie),
+            correlativo = trim(p_correlativo),
+            usr_mod     = v_usr_id,
+            fyh_mod     = now()
+        WHERE id = p_guia_id;
+    EXCEPTION WHEN unique_violation THEN
+        RAISE EXCEPTION 'El número %-% ya existe para este cliente y tipo de guía.',
+            trim(p_serie), trim(p_correlativo);
+    END;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_numero_guia', v_usr_id,
+            jsonb_build_object('guia_id', p_guia_id,
+                               'serie', trim(p_serie),
+                               'correlativo', trim(p_correlativo)));
+
+    RETURN format('Guía #%s numerada como %s-%s.', p_guia_id, trim(p_serie), trim(p_correlativo));
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in registrar_numero_guia - User: %, guia: %, Error: %',
+        v_usr_id, p_guia_id, v_message;
+    RAISE;
+END;
+$function$;
+
+
+-- ── doc.vw_guias_sin_numerar ──────────────────────────────────────────────
+-- Worklist of headless guias (serie IS NULL) awaiting their external GRE
+-- number. Drives the "guías pendientes de numerar" screen so a dispatched
+-- (or received) document never sits untracked. flg_emitida lets the frontend
+-- split outbound dispatch from inbound receipt; partidas shows which production
+-- orders the dispatched rolls belong to.
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE OR REPLACE VIEW doc.vw_guias_sin_numerar AS
+SELECT
+    gr.id                                   AS guia_remision_id,
+    gr.guia_remision_tipo_id,
+    grt.codigo                              AS tipo_codigo,
+    grt.nombre                              AS tipo_nombre,
+    grt.flg_emitida,
+    gr.tercero_id,
+    t.nombre                                AS tercero,
+    gr.fecha_emision,
+    gr.fyh_cre,
+    COUNT(grd.id)                           AS lineas,
+    COALESCE(SUM(grd.n_rollos), 0)          AS rollos,
+    ROUND(COALESCE(SUM(grd.cantidad), 0)::numeric, 2) AS kg_total,
+    ARRAY_AGG(DISTINCT EXTRACT(YEAR FROM p.fyh_cre)::TEXT
+                       || '-' || LPAD(p.numero::TEXT, 4, '0'))
+        FILTER (WHERE p.id IS NOT NULL)     AS partidas
+FROM doc.guia_remision gr
+JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
+JOIN tercero t                  ON t.id  = gr.tercero_id
+LEFT JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
+LEFT JOIN inventario.lote l ON l.id = grd.lote_id
+LEFT JOIN mes.partida_paso_ejecucion pe
+       ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
+LEFT JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+LEFT JOIN mes.partida p       ON p.id = pp.partida_id
+WHERE gr.serie   IS NULL
+  AND gr.fyh_elm IS NULL
+GROUP BY gr.id, gr.guia_remision_tipo_id, grt.codigo, grt.nombre, grt.flg_emitida,
+         gr.tercero_id, t.nombre, gr.fecha_emision, gr.fyh_cre;
+
+GRANT SELECT ON doc.vw_guias_sin_numerar TO authenticated;
+
+
 GRANT EXECUTE ON FUNCTION doc.get_despacho_partida(bigint)  TO authenticated;
 -- doc.get_guia_remision grant is in core.sql
 GRANT EXECUTE ON FUNCTION doc.anular_guia_remision(bigint)  TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.registrar_numero_guia(bigint, text, text) TO authenticated;

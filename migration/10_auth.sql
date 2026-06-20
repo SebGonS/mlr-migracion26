@@ -217,8 +217,13 @@ CREATE POLICY "catalogos_update" ON receta.operacion       FOR UPDATE TO authent
 GRANT INSERT, UPDATE ON receta.operacion TO authenticated;
 CREATE POLICY "catalogos_insert" ON mes.maquina_tipo       FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.operacional'));
 CREATE POLICY "catalogos_update" ON mes.maquina_tipo       FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.operacional'));
+GRANT INSERT, UPDATE ON mes.maquina_tipo TO authenticated;
 CREATE POLICY "catalogos_insert" ON mes.empleado_rol       FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.operacional'));
 CREATE POLICY "catalogos_update" ON mes.empleado_rol       FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.operacional'));
+GRANT INSERT, UPDATE ON mes.empleado_rol TO authenticated;
+CREATE POLICY "catalogos_insert" ON mes.maquina            FOR INSERT TO authenticated WITH CHECK (jwt_has_permission('configuracion.operacional'));
+CREATE POLICY "catalogos_update" ON mes.maquina            FOR UPDATE TO authenticated USING (jwt_has_permission('configuracion.operacional'));
+GRANT SELECT, INSERT, UPDATE ON mes.maquina TO authenticated;
 
 
 -- -----------------------------------------------------------------------------

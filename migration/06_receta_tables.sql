@@ -155,8 +155,9 @@ END;
 $$;
 
 -- Guard identity fields only; estado_id/audit cols remain writable.
+-- flg_antipilling is excluded: it is derived by trigger from tenido_paso operacion presence.
 CREATE TRIGGER trg_bu_tenido_immutable
-BEFORE UPDATE OF color_x_cliente_id, articulo_tipo_id, fibra, tenido_id, flg_antipilling, tipo_receta_id
+BEFORE UPDATE OF color_x_cliente_id, articulo_tipo_id, fibra, tenido_id, tipo_receta_id
 ON receta.tenido
 FOR EACH ROW EXECUTE FUNCTION receta.fn_trg_tenido_immutable();
 
@@ -219,6 +220,7 @@ FOR EACH ROW EXECUTE FUNCTION receta.fn_trg_tenido_paso_insumo_immutable();
 CREATE TRIGGER trg_bd_tenido_paso_insumo_immutable
 BEFORE DELETE ON receta.tenido_paso_insumo
 FOR EACH ROW EXECUTE FUNCTION receta.fn_trg_tenido_paso_insumo_immutable();
+
 
 -- ── receta.lavado_maquina ─────────────────────────────────────
 -- FIX (BUG 4): removed stray "SELECT * FROM paso" that was between these tables.
