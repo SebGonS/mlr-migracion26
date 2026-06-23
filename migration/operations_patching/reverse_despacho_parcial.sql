@@ -1,10 +1,10 @@
 -- ============================================================
 -- Partial dispatch reversal -- remove N rolls from an egress
--- guia without cancelling the whole document.
+-- entrega without cancelling the whole document.
 --
 -- Use case: dispatch registered for X rolls but only (X-N) were
 -- physically sent. Picks the last N lote IDs (by id DESC) from
--- the partida's egress guia -- arbitrary but deterministic.
+-- the partida's egress entrega -- arbitrary but deterministic.
 --
 -- Movement reversal mapping:
 --   DESPACHO_CLIENTE -> SERV_EGR  -> SERV_DEV_ING
@@ -54,19 +54,19 @@ select column_name from information_schema.columns
 where table_schema = 'inventario' and table_name = 'vw_lotes_rollos_stock'
 order by 1;
 
--- ── DRY RUN 2 -- if there is a guia, check its status
+-- ── DRY RUN 2 -- if there is a entrega, check its status
 /*
 SELECT
     gr.id, gr.serie, gr.correlativo, gr.fyh_elm AS anulada,
-    grt.codigo AS guia_tipo,
+    grt.codigo AS entrega_tipo,
     COUNT(grd.id) AS n_lineas
 FROM inventario.lote                 l
 JOIN inventario.item_movimientos     im  ON im.lote_id = l.id
 JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
                                        AND imt.codigo IN ('SERV_EGR', 'VENTA_EGR')
-JOIN doc.guia_remision               gr  ON gr.id = im.documento_id   -- no fyh_elm filter
-JOIN doc.guia_remision_tipo          grt ON grt.id = gr.guia_remision_tipo_id
-LEFT JOIN doc.guia_remision_detalle  grd ON grd.guia_remision_id = gr.id AND grd.fyh_elm IS NULL
+JOIN doc.entrega               gr  ON gr.id = im.documento_id   -- no fyh_elm filter
+JOIN doc.entrega_tipo          grt ON grt.id = gr.entrega_tipo_id
+LEFT JOIN doc.entrega_detalle  grd ON grd.entrega_id = gr.id AND grd.fyh_elm IS NULL
 WHERE l.documento_tipo = 'PARTIDA'
   AND l.documento_id   = 4595
 GROUP BY gr.id, gr.serie, gr.correlativo, gr.fyh_elm, grt.codigo;
@@ -74,7 +74,7 @@ GROUP BY gr.id, gr.serie, gr.correlativo, gr.fyh_elm, grt.codigo;
 
 -- ── EXECUTE ───────────────────────────────────────────────────────────────
 -- NOTE: SERV_EGR movements for these partidas were posted directly with
--- documento_tipo='PARTIDA' (not via a guia_remision). Reversal mirrors that.
+-- documento_tipo='PARTIDA' (not via a entrega). Reversal mirrors that.
 DO $$
 DECLARE
     v_partida_id  BIGINT := 4588;   -- <- partida

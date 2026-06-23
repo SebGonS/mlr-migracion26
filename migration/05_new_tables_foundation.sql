@@ -363,12 +363,12 @@ GRANT SELECT ON tercero TO authenticated;
 -- ── inventario.lote ───────────────────────────────────────────
 -- documento_tipo / documento_id: the business event that created this lote.
 -- Valid values:
---   'guia_remision'          → doc.guia_remision.id          (all external ingress: insumos via COMPRA_INGRESO, rolls via CLIENTE_ENVIO_PROCESO)
+--   'entrega'          → doc.entrega.id          (all external ingress: insumos via COMPRA_INGRESO, rolls via CLIENTE_ENVIO_PROCESO)
 --   'partida_paso_ejecucion' → mes.partida_paso_ejecucion.id (production output rolls — AFRU)
 --   'cuadre'                 → inventario.cuadre.id          (surplus lots from stock reconciliation)
 -- Movements (item_movimientos) carry the same pair to group all postings
 -- from a single business event (≈ SAP MBLNR / MKPF).
--- Note: guia_remision_tipo.item_movimiento_tipo_id drives which movement is posted
+-- Note: entrega_tipo.item_movimiento_tipo_id drives which movement is posted
 -- (COMPRA_ING for COMPRA_INGRESO, SERV_ING for CLIENTE_ENVIO_PROCESO, etc.).
 CREATE TABLE inventario.lote (
     id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

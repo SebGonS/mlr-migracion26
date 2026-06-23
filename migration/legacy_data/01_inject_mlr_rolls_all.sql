@@ -3,7 +3,7 @@
 -- from vw_partidas_resumen (includes MLR/Oswaldo, excludes
 -- pure-client senders).
 --
--- No guia involved: lotes are stamped documento_tipo='PARTIDA',
+-- No entrega involved: lotes are stamped documento_tipo='PARTIDA',
 -- propietario_id=NULL (MLR stock), movement type AJUSTE_POS.
 --
 -- Fixed params (edit before running):

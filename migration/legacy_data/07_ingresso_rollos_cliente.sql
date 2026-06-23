@@ -1,8 +1,8 @@
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- LEGACY MIGRATION: public.partida → client roll ingress
--- Sources  : public.partida  (guia, rollos, rib, peso_rollos, peso_rib)
--- Targets  : doc.guia_remision          (CLIENTE_ENVIO_PROCESO)
---            doc.guia_remision_detalle  (one line per lote)
+-- Sources  : public.partida  (entrega, rollos, rib, peso_rollos, peso_rib)
+-- Targets  : doc.entrega          (CLIENTE_ENVIO_PROCESO)
+--            doc.entrega_detalle  (one line per lote)
 --            inventario.lote            (one per physical roll, prorated weight)
 --            inventario.lote_rollo_detalle
 --            mes.partida_componente     (roll reservation)
@@ -10,7 +10,7 @@
 --            inventario.pesaje          (INGRESO, one per lote)
 --
 -- Scope    : Client-owned partidas (tercero.procedencia != 'MLR') where:
---              partida.guia IS NOT NULL  (has a real incoming transport document)
+--              partida.entrega IS NOT NULL  (has a real incoming transport document)
 --              partida.rollos > 0 AND partida.peso_rollos > 0
 --              mes.partida.estado_produccion != 'CANCELADA'
 --              no rolls yet in mes.partida_componente
@@ -18,20 +18,20 @@
 -- Weights  : peso_rollos / rollos  kg per regular roll  (prorated)
 --            peso_rib    / rib     kg per rib roll       (prorated)
 --
--- Guia parsing  : 'SERIE-CORRELATIVO' → split at first '-'
+-- entrega parsing  : 'SERIE-CORRELATIVO' → split at first '-'
 --                 no dash             → headless (NULL, NULL) per partida
---                 same client + guia  → reuse existing guia row (ON CONFLICT)
+--                 same client + entrega  → reuse existing entrega row (ON CONFLICT)
 --
 -- Idempotency   : skips partidas already present in mes.partida_componente
 --
 -- REVERSAL (undo this file):
---   DELETE FROM inventario.pesaje            WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='guia_remision' AND documento_id IN (SELECT id FROM doc.guia_remision WHERE guia_remision_tipo_id=(SELECT id FROM doc.guia_remision_tipo WHERE codigo='CLIENTE_ENVIO_PROCESO') AND fyh_cre >= '<migration_date>'));
---   DELETE FROM doc.guia_remision_detalle    WHERE guia_remision_id IN (...same filter...);
---   DELETE FROM inventario.item_movimientos  WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='guia_remision' AND documento_id IN (...));
---   DELETE FROM mes.partida_componente       WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='guia_remision' AND documento_id IN (...));
---   DELETE FROM inventario.lote_rollo_detalle WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='guia_remision' AND documento_id IN (...));
---   DELETE FROM inventario.lote              WHERE documento_tipo='guia_remision' AND documento_id IN (...);
---   DELETE FROM doc.guia_remision            WHERE guia_remision_tipo_id=... AND fyh_cre >= '<migration_date>';
+--   DELETE FROM inventario.pesaje            WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='entrega' AND documento_id IN (SELECT id FROM doc.entrega WHERE entrega_tipo_id=(SELECT id FROM doc.entrega_tipo WHERE codigo='CLIENTE_ENVIO_PROCESO') AND fyh_cre >= '<migration_date>'));
+--   DELETE FROM doc.entrega_detalle    WHERE entrega_id IN (...same filter...);
+--   DELETE FROM inventario.item_movimientos  WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='entrega' AND documento_id IN (...));
+--   DELETE FROM mes.partida_componente       WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='entrega' AND documento_id IN (...));
+--   DELETE FROM inventario.lote_rollo_detalle WHERE lote_id IN (SELECT id FROM inventario.lote WHERE documento_tipo='entrega' AND documento_id IN (...));
+--   DELETE FROM inventario.lote              WHERE documento_tipo='entrega' AND documento_id IN (...);
+--   DELETE FROM doc.entrega            WHERE entrega_tipo_id=... AND fyh_cre >= '<migration_date>';
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -42,10 +42,10 @@
 -- Eligible partidas overview
 SELECT
     COUNT(DISTINCT p.id)                                                        AS partidas_elegibles,
-    COUNT(DISTINCT p.id) FILTER (WHERE p.guia IS NULL)                          AS sin_guia,
-    COUNT(DISTINCT p.id) FILTER (WHERE POSITION('-' IN COALESCE(p.guia,''))=0
-                                   AND p.guia IS NOT NULL)                      AS guia_sin_guion,
-    COUNT(DISTINCT p.id) FILTER (WHERE POSITION('-' IN COALESCE(p.guia,''))>0)  AS guia_con_guion,
+    COUNT(DISTINCT p.id) FILTER (WHERE p.entrega IS NULL)                          AS sin_entrega,
+    COUNT(DISTINCT p.id) FILTER (WHERE POSITION('-' IN COALESCE(p.entrega,''))=0
+                                   AND p.entrega IS NOT NULL)                      AS entrega_sin_guion,
+    COUNT(DISTINCT p.id) FILTER (WHERE POSITION('-' IN COALESCE(p.entrega,''))>0)  AS entrega_con_guion,
     SUM(p.rollos)                                                                AS total_rollos_regular,
     SUM(COALESCE(p.rib,0))                                                       AS total_rollos_rib,
     ROUND(SUM(COALESCE(p.peso_rollos,0))::NUMERIC,1)                            AS kg_regular,
@@ -55,7 +55,7 @@ JOIN mes.partida mp ON mp.id = p.id
 JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
 WHERE p.rollos > 0
   AND p.peso_rollos > 0
-  AND p.guia IS NOT NULL
+  AND p.entrega IS NOT NULL
   AND mp.estado_produccion != 'CANCELADA'
   AND t.procedencia IS DISTINCT FROM 'MLR'
   AND NOT EXISTS (
@@ -65,7 +65,7 @@ WHERE p.rollos > 0
 -- Sample of what will be created (first 20)
 SELECT
     p.id                                                    AS partida_id,
-    p.guia,
+    p.entrega,
     t.nombre                                                AS cliente,
     t.procedencia,
     p.rollos,
@@ -80,7 +80,7 @@ JOIN mes.partida mp ON mp.id = p.id
 JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
 WHERE p.rollos > 0
   AND p.peso_rollos > 0
-  AND p.guia IS NOT NULL
+  AND p.entrega IS NOT NULL
   AND mp.estado_produccion != 'CANCELADA'
   AND t.procedencia IS DISTINCT FROM 'MLR'
   AND NOT EXISTS (
@@ -89,16 +89,16 @@ WHERE p.rollos > 0
 ORDER BY p.id
 LIMIT 20;
 
--- Guias that would be reused (same client + guia text across multiple partidas)
+-- entregas that would be reused (same client + entrega text across multiple partidas)
 SELECT
     t.id                                                    AS tercero_id,
     t.nombre                                                AS cliente,
-    p.guia,
-    COUNT(*)                                                AS partidas_con_esta_guia
+    p.entrega,
+    COUNT(*)                                                AS partidas_con_esta_entrega
 FROM public.partida p
 JOIN mes.partida mp ON mp.id = p.id
 JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
-WHERE p.guia IS NOT NULL
+WHERE p.entrega IS NOT NULL
   AND p.rollos > 0
   AND p.peso_rollos > 0
   AND mp.estado_produccion != 'CANCELADA'
@@ -106,7 +106,7 @@ WHERE p.guia IS NOT NULL
   AND NOT EXISTS (
       SELECT 1 FROM mes.partida_componente pc WHERE pc.partida_id = p.id AND pc.lote_id IS NOT NULL
   )
-GROUP BY t.id, t.nombre, p.guia
+GROUP BY t.id, t.nombre, p.entrega
 HAVING COUNT(*) > 1
 ORDER BY COUNT(*) DESC
 LIMIT 10;
@@ -119,11 +119,11 @@ LIMIT 10;
 DO $$
 DECLARE
     v_serv_ing_imt_id   SMALLINT;
-    v_guia_tipo_id      SMALLINT;
+    v_entrega_tipo_id      SMALLINT;
     v_alm_cru_ubi_id    INT;
 
     p                   RECORD;
-    v_guia_id           BIGINT;
+    v_entrega_id           BIGINT;
     v_serie             TEXT;
     v_corr              TEXT;
 
@@ -140,8 +140,8 @@ BEGIN
     SELECT id INTO STRICT v_serv_ing_imt_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_ING';
 
-    SELECT id INTO STRICT v_guia_tipo_id
-    FROM doc.guia_remision_tipo WHERE codigo = 'CLIENTE_ENVIO_PROCESO';
+    SELECT id INTO STRICT v_entrega_tipo_id
+    FROM doc.entrega_tipo WHERE codigo = 'CLIENTE_ENVIO_PROCESO';
 
     SELECT ub.id INTO STRICT v_alm_cru_ubi_id
     FROM inventario.ubicacion ub
@@ -152,7 +152,7 @@ BEGIN
     FOR p IN
         SELECT
             p.id            AS partida_id,
-            p.guia,
+            p.entrega,
             p.rollos,
             p.rib,
             p.peso_rollos,
@@ -168,7 +168,7 @@ BEGIN
         JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
         WHERE p.rollos > 0
           AND p.peso_rollos > 0
-          AND p.guia IS NOT NULL
+          AND p.entrega IS NOT NULL
           AND mp.estado_produccion != 'CANCELADA'
           AND t.procedencia IS DISTINCT FROM 'MLR'
           AND NOT EXISTS (
@@ -177,50 +177,50 @@ BEGIN
           )
         ORDER BY p.id
     LOOP
-        -- ── Parse guia serie/correlativo ─────────────────────────────────────
-        IF POSITION('-' IN p.guia) > 0 THEN
-            v_serie := SPLIT_PART(p.guia, '-', 1);
-            v_corr  := SUBSTRING(p.guia FROM POSITION('-' IN p.guia) + 1);
+        -- ── Parse entrega serie/correlativo ─────────────────────────────────────
+        IF POSITION('-' IN p.entrega) > 0 THEN
+            v_serie := SPLIT_PART(p.entrega, '-', 1);
+            v_corr  := SUBSTRING(p.entrega FROM POSITION('-' IN p.entrega) + 1);
         ELSE
             v_serie := NULL;
             v_corr  := NULL;
         END IF;
 
-        -- ── Create or find guia header ────────────────────────────────────────
-        v_guia_id := NULL;
+        -- ── Create or find entrega header ────────────────────────────────────────
+        v_entrega_id := NULL;
 
         IF v_serie IS NOT NULL THEN
-            INSERT INTO doc.guia_remision (
-                guia_remision_tipo_id, tercero_id, serie, correlativo,
+            INSERT INTO doc.entrega (
+                entrega_tipo_id, tercero_id, serie, correlativo,
                 fecha_emision, fyh_cre
             )
-            VALUES (v_guia_tipo_id, p.tercero_id, v_serie, v_corr, p.fyh_cre, p.fyh_cre)
-            ON CONFLICT (tercero_id, serie, correlativo, guia_remision_tipo_id) DO NOTHING
-            RETURNING id INTO v_guia_id;
+            VALUES (v_entrega_tipo_id, p.tercero_id, v_serie, v_corr, p.fyh_cre, p.fyh_cre)
+            ON CONFLICT (tercero_id, serie, correlativo, entrega_tipo_id) DO NOTHING
+            RETURNING id INTO v_entrega_id;
 
-            IF v_guia_id IS NULL THEN
-                SELECT id INTO v_guia_id
-                FROM doc.guia_remision
-                WHERE guia_remision_tipo_id = v_guia_tipo_id
+            IF v_entrega_id IS NULL THEN
+                SELECT id INTO v_entrega_id
+                FROM doc.entrega
+                WHERE entrega_tipo_id = v_entrega_tipo_id
                   AND tercero_id            = p.tercero_id
                   AND serie                 = v_serie
                   AND correlativo           = v_corr;
             END IF;
         ELSE
-            -- Headless: always a new guia (NULLs never match UNIQUE)
-            INSERT INTO doc.guia_remision (
-                guia_remision_tipo_id, tercero_id, serie, correlativo,
+            -- Headless: always a new entrega (NULLs never match UNIQUE)
+            INSERT INTO doc.entrega (
+                entrega_tipo_id, tercero_id, serie, correlativo,
                 fecha_emision, fyh_cre
             )
-            VALUES (v_guia_tipo_id, p.tercero_id, NULL, NULL, p.fyh_cre, p.fyh_cre)
-            RETURNING id INTO v_guia_id;
+            VALUES (v_entrega_tipo_id, p.tercero_id, NULL, NULL, p.fyh_cre, p.fyh_cre)
+            RETURNING id INTO v_entrega_id;
         END IF;
 
-        -- Get current max linea for this guia (for sequencing detalle lines)
+        -- Get current max linea for this entrega (for sequencing detalle lines)
         SELECT COALESCE(MAX(linea), 0)
         INTO v_linea
-        FROM doc.guia_remision_detalle
-        WHERE guia_remision_id = v_guia_id;
+        FROM doc.entrega_detalle
+        WHERE entrega_id = v_entrega_id;
 
         -- ── Create one lote per roll, per item type (regular + rib) ──────────
         FOR rec IN
@@ -256,8 +256,8 @@ BEGIN
                     rec.item_id,
                     ROUND(rec.peso_por_rollo::NUMERIC, 4),
                     p.tercero_id,
-                    'guia_remision',
-                    v_guia_id,
+                    'entrega',
+                    v_entrega_id,
                     NULL,
                     p.fyh_cre
                 )
@@ -265,12 +265,12 @@ BEGIN
 
                 -- 2. lote_rollo_detalle
                 INSERT INTO inventario.lote_rollo_detalle (
-                    lote_id, guia_remision_id, origen_lote_id,
+                    lote_id, entrega_id, origen_lote_id,
                     ancho, malla, rendimiento,
                     flg_tenido, flg_antipilling
                 )
                 VALUES (
-                    v_lote_id, v_guia_id, NULL,
+                    v_lote_id, v_entrega_id, NULL,
                     p.ancho, p.malla, p.rendimiento,
                     false, false
                 );
@@ -298,17 +298,17 @@ BEGIN
                     rec.item_id, v_lote_id, v_serv_ing_imt_id,
                     v_alm_cru_ubi_id,
                     ROUND(rec.peso_por_rollo::NUMERIC, 4),
-                    'guia_remision', v_guia_id,
+                    'entrega', v_entrega_id,
                     'Migración: ingreso rollo cliente partida ' || p.partida_id,
                     NULL, p.fyh_cre, p.fyh_cre
                 );
 
-                -- 5. guia_remision_detalle (one line per physical roll)
+                -- 5. entrega_detalle (one line per physical roll)
                 v_linea := v_linea + 1;
-                INSERT INTO doc.guia_remision_detalle (
-                    guia_remision_id, linea, item_id, lote_id, cantidad, n_rollos
+                INSERT INTO doc.entrega_detalle (
+                    entrega_id, linea, item_id, lote_id, cantidad, n_rollos
                 )
-                VALUES (v_guia_id, v_linea, rec.item_id, v_lote_id,
+                VALUES (v_entrega_id, v_linea, rec.item_id, v_lote_id,
                         ROUND(rec.peso_por_rollo::NUMERIC, 4), 1);
 
                 -- 6. pesaje INGRESO (weighing gate — each roll treated as weighed)
@@ -351,19 +351,19 @@ SELECT
     COUNT(*)              AS valor
 FROM inventario.lote l
 JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-JOIN doc.guia_remision gr ON gr.id = lrd.guia_remision_id
-WHERE gr.guia_remision_tipo_id = (SELECT id FROM doc.guia_remision_tipo WHERE codigo='CLIENTE_ENVIO_PROCESO')
+JOIN doc.entrega gr ON gr.id = lrd.entrega_id
+WHERE gr.entrega_tipo_id = (SELECT id FROM doc.entrega_tipo WHERE codigo='CLIENTE_ENVIO_PROCESO')
 UNION ALL
-SELECT 'guias_creadas', COUNT(DISTINCT gr.id)
-FROM doc.guia_remision gr
-WHERE gr.guia_remision_tipo_id = (SELECT id FROM doc.guia_remision_tipo WHERE codigo='CLIENTE_ENVIO_PROCESO')
-  AND NOT EXISTS (SELECT 1 FROM doc.guia_remision_detalle grd WHERE grd.guia_remision_id = gr.id AND grd.fyh_cre < '2026-01-01')
+SELECT 'entregas_creadas', COUNT(DISTINCT gr.id)
+FROM doc.entrega gr
+WHERE gr.entrega_tipo_id = (SELECT id FROM doc.entrega_tipo WHERE codigo='CLIENTE_ENVIO_PROCESO')
+  AND NOT EXISTS (SELECT 1 FROM doc.entrega_detalle grd WHERE grd.entrega_id = gr.id AND grd.fyh_cre < '2026-01-01')
 UNION ALL
 SELECT 'partidas_sin_componente', COUNT(DISTINCT p.id)
 FROM public.partida p
 JOIN mes.partida mp ON mp.id = p.id
 JOIN tercero t ON t.cliente_id = p.cliente_id OR t.cliente_id2 = p.cliente_id
-WHERE p.rollos > 0 AND p.peso_rollos > 0 AND p.guia IS NOT NULL
+WHERE p.rollos > 0 AND p.peso_rollos > 0 AND p.entrega IS NOT NULL
   AND mp.estado_produccion != 'CANCELADA'
   AND t.procedencia IS DISTINCT FROM 'MLR'
   AND NOT EXISTS (
@@ -374,22 +374,22 @@ WHERE p.rollos > 0 AND p.peso_rollos > 0 AND p.guia IS NOT NULL
 SELECT COUNT(*) AS lotes_sin_pesaje
 FROM inventario.lote l
 JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-WHERE l.documento_tipo = 'guia_remision'
+WHERE l.documento_tipo = 'entrega'
   AND NOT EXISTS (SELECT 1 FROM inventario.pesaje ps WHERE ps.lote_id = l.id);
 
--- Sample of created guias + roll counts
+-- Sample of created entregas + roll counts
 SELECT
-    gr.id   AS guia_id,
+    gr.id   AS entrega_id,
     t.nombre AS cliente,
     gr.serie,
     gr.correlativo,
     gr.fecha_emision::date,
     COUNT(DISTINCT grd.lote_id) AS rollos,
     ROUND(SUM(grd.cantidad),2)  AS kg_total
-FROM doc.guia_remision gr
+FROM doc.entrega gr
 JOIN tercero t ON t.id = gr.tercero_id
-JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
-WHERE gr.guia_remision_tipo_id = (SELECT id FROM doc.guia_remision_tipo WHERE codigo='CLIENTE_ENVIO_PROCESO')
+JOIN doc.entrega_detalle grd ON grd.entrega_id = gr.id
+WHERE gr.entrega_tipo_id = (SELECT id FROM doc.entrega_tipo WHERE codigo='CLIENTE_ENVIO_PROCESO')
 GROUP BY gr.id, t.nombre, gr.serie, gr.correlativo, gr.fecha_emision
 ORDER BY gr.id DESC
 LIMIT 20;

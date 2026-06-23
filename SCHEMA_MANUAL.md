@@ -39,7 +39,7 @@ MLR is a textile dyeing/finishing service company. The database models:
 - **Recipes** (`receta.tenido`, `receta.lavado_maquina`) define the chemical steps and ingredients for each operation.
 - **Quality inspections** (`calidad.inspeccion`) are recorded per roll after each production step.
 - **Inventory movements** (`inventario.item_movimientos`) record every stock change with full traceability. Stock balances are pre-computed in `lote_saldo` and `item_saldo` (trigger-maintained cache, see §3.7).
-- **Commercial documents** (guias, facturas, compras) record the paper trail for receiving, dispatching, and billing.
+- **Commercial documents** (entregas, facturas, compras) record the paper trail for receiving, dispatching, and billing.
 
 ### High-Level Flow
 
@@ -47,7 +47,7 @@ MLR is a textile dyeing/finishing service company. The database models:
 CLIENT SENDS ROLLS
       │
       ▼
-doc.guia_remision (CLIENTE_ENVIO_PROCESO)
+doc.entrega (CLIENTE_ENVIO_PROCESO)
       │  creates inventario.lote per roll
       ▼
 mes.partida  ←── mes.partida_detalle (what to process: item × qty)
@@ -65,7 +65,7 @@ mes.partida  ←── mes.partida_detalle (what to process: item × qty)
 ROLLS DISPATCHED
       │
       ▼
-doc.guia_remision (DESPACHO_CLIENTE) → doc.factura
+doc.entrega (DESPACHO_CLIENTE) → doc.factura
 ```
 
 ---
@@ -118,7 +118,7 @@ Tables with these columns support soft delete:
 | `usr_elm` | `INT` | `fn_trg_set_elm_fields()` BEFORE UPDATE |
 | `fyh_elm` | `TIMESTAMPTZ` | same |
 
-The trigger fires only when `flg_elm` transitions `false → true`, setting `usr_elm`/`fyh_elm` once. Hard deletes are blocked on `doc.guia_remision`, `inventario.lote`, `mes.partida`, and `doc.factura` (once emitted/annulled) by `fn_trg_prevent_hard_delete()`.
+The trigger fires only when `flg_elm` transitions `false → true`, setting `usr_elm`/`fyh_elm` once. Hard deletes are blocked on `doc.entrega`, `inventario.lote`, `mes.partida`, and `doc.factura` (once emitted/annulled) by `fn_trg_prevent_hard_delete()`.
 
 ### 3.4 `doc_movimiento_id` — Posting Events
 
@@ -431,7 +431,7 @@ One row per year. Incremented by the `BEFORE INSERT` trigger on `lote`.
 
 ```
 lote_id            INT PK FK→lote
-guia_remision_id   BIGINT FK→doc.guia_remision  -- billing anchor
+entrega_id   BIGINT FK→doc.entrega  -- billing anchor
 origen_lote_id     INT FK→lote                  -- for output lots from production
 ancho              TEXT
 malla              TEXT
@@ -443,7 +443,7 @@ flg_antipilling    BOOLEAN NOT NULL DEFAULT false
 usr_cre, fyh_cre, usr_mod, fyh_mod
 ```
 
-Created at ingress (for inbound raw rolls, set `guia_remision_id`). Updated by `registrar_produccion()` on production output lots (sets `flg_tenido`, `color_x_cliente_id`, `tenido_id`, `flg_antipilling`, `origen_lote_id`).
+Created at ingress (for inbound raw rolls, set `entrega_id`). Updated by `registrar_produccion()` on production output lots (sets `flg_tenido`, `color_x_cliente_id`, `tenido_id`, `flg_antipilling`, `origen_lote_id`).
 
 ### 6.5 `lote_saldo` and `item_saldo` — Balance Cache
 
@@ -598,7 +598,7 @@ Once `ejecutado`, `fn_trg_check_corte_cuadre()` blocks all movements with timest
 
 ## 7. Schema: `doc` — Commercial Documents
 
-### 7.1 `guia_remision_tipo` — Delivery Note Type Catalog
+### 7.1 `entrega_tipo` — Delivery Note Type Catalog
 
 ```
 id                      SMALLINT IDENTITY PK
@@ -622,34 +622,34 @@ usr_cre, fyh_cre, usr_mod, fyh_mod
 | `DEVOLUCION_CLIENTE_VENTA` | false | `DEV_CLI_ING` |
 | `DEVOLUCION_CLIENTE_SERVICIO` | false | `SERV_DEV_ING` |
 
-### 7.2 `guia_remision` and `guia_remision_detalle`
+### 7.2 `entrega` and `entrega_detalle`
 
-**`guia_remision`**:
+**`entrega`**:
 ```
 id                    BIGINT IDENTITY PK
-guia_remision_tipo_id SMALLINT NOT NULL FK→guia_remision_tipo
+entrega_tipo_id SMALLINT NOT NULL FK→entrega_tipo
 tercero_id            INT NOT NULL FK→tercero
 serie                 TEXT NOT NULL
 correlativo           TEXT NOT NULL
 fecha_emision         TIMESTAMPTZ NOT NULL
 fecha_recepcion       TIMESTAMPTZ DEFAULT now()
 usr_cre, fyh_cre, usr_mod, fyh_mod, usr_elm, fyh_elm
-UNIQUE (tercero_id, serie, correlativo, guia_remision_tipo_id)
+UNIQUE (tercero_id, serie, correlativo, entrega_tipo_id)
 ```
-Hard delete blocked. Soft delete is the only way to void a guia.
+Hard delete blocked. Soft delete is the only way to void a entrega.
 
-**`guia_remision_detalle`**:
+**`entrega_detalle`**:
 ```
 id               BIGINT IDENTITY PK
-guia_remision_id BIGINT NOT NULL FK→guia_remision
+entrega_id BIGINT NOT NULL FK→entrega
 item_id          INT NOT NULL FK→item
 lote_id          INT FK→lote
 ubicacion_id     INT FK→ubicacion
 cantidad         NUMERIC(12,4) NOT NULL CHECK (cantidad > 0)
-UNIQUE (guia_remision_id, item_id, lote_id, ubicacion_id)
+UNIQUE (entrega_id, item_id, lote_id, ubicacion_id)
 ```
 
-### 7.3 `compra`, `compra_detalle`, `compra_guia_remision`
+### 7.3 `compra`, `compra_detalle`, `compra_entrega`
 
 **`compra`**:
 ```
@@ -669,11 +669,11 @@ cantidad        NUMERIC(12,4) NOT NULL CHECK (cantidad > 0)
 precio_unitario NUMERIC(12,4) NOT NULL CHECK (precio_unitario >= 0)
 ```
 
-**`compra_guia_remision`** — junction (M:M between compra and guia):
+**`compra_entrega`** — junction (M:M between compra and entrega):
 ```
 compra_id        BIGINT NOT NULL FK→compra
-guia_remision_id BIGINT NOT NULL FK→guia_remision
-PRIMARY KEY (compra_id, guia_remision_id)
+entrega_id BIGINT NOT NULL FK→entrega
+PRIMARY KEY (compra_id, entrega_id)
 ```
 
 **`compra_factura_proveedor`** — junction (M:M between compra and factura_proveedor):
@@ -789,7 +789,7 @@ Hard delete is blocked once `estado != 'borrador'`.
 id                  BIGINT IDENTITY PK
 factura_id          BIGINT NOT NULL FK→factura
 partida_id          BIGINT FK→mes.partida
-guia_remision_id    BIGINT FK→doc.guia_remision
+entrega_id    BIGINT FK→doc.entrega
 operacion_id        SMALLINT FK→mes.operacion
 es_antipilling      BOOLEAN NOT NULL DEFAULT false
 articulo_tipo_id    SMALLINT FK→articulo_tipo
@@ -1254,7 +1254,7 @@ user_agent       TEXT
 
 Insert-only. Populated by `audit.fn_audit_row()` on every INSERT/UPDATE/DELETE on audited tables.
 
-**Audited tables:** `tercero`, `mes.partida`, `mes.partida_detalle`, `doc.guia_remision`, `doc.guia_remision_detalle`, `mes.ruta_plantilla`, `mes.ruta_plantilla_detalle`, `mes.partida_paso`, `doc.factura_proveedor`, `doc.compra`, `doc.letra`, `doc.factura`.
+**Audited tables:** `tercero`, `mes.partida`, `mes.partida_detalle`, `doc.entrega`, `doc.entrega_detalle`, `mes.ruta_plantilla`, `mes.ruta_plantilla_detalle`, `mes.partida_paso`, `doc.factura_proveedor`, `doc.compra`, `doc.letra`, `doc.factura`.
 
 ---
 
@@ -1271,7 +1271,7 @@ The notification system serves two distinct purposes sharing one table:
 
 Key columns added in migration 15:
 ```
-objeto_tipo   TEXT      -- 'partida', 'item', 'guia_remision', 'partida_paso'
+objeto_tipo   TEXT      -- 'partida', 'item', 'entrega', 'partida_paso'
 objeto_id     BIGINT    -- PK of the referenced entity
 fyh_resuelta  TIMESTAMPTZ  -- NULL = condition still active; NOT NULL = resolved
 categoria     TEXT      -- alert subtype (see below)
@@ -1284,7 +1284,7 @@ categoria     TEXT      -- alert subtype (see below)
 | `categoria` | Condition | Fired by | Notifies |
 |-------------|-----------|----------|---------|
 | `partida_vencida` | `partida.fecha_acordada < now()` AND not CERRADA/CANCELADA | `alertas.check_partidas_vencidas()` | `jefe_planta`, `compras` |
-| `rollo_sin_programar` | `CLIENTE_ENVIO_PROCESO` guia older than 5 days with unassigned in-stock rolls | `alertas.check_rollos_sin_programar()` | `jefe_planta`, `supervisor_produccion` |
+| `rollo_sin_programar` | `CLIENTE_ENVIO_PROCESO` entrega older than 5 days with unassigned in-stock rolls | `alertas.check_rollos_sin_programar()` | `jefe_planta`, `supervisor_produccion` |
 | `stock_bajo` | Item stock < `stock_minimo` (or < 7-day rolling average when no minimum set); items inactive for 90+ days and without `stock_minimo` are skipped | `alertas.check_stock_bajo()` | `inventario`, `compras` |
 | `stock_paso` | A planned paso with `requiere_receta=true` has insufficient insumo stock to cover recipe demand (`dose × batch_kg`) | `alertas.check_stock_pasos()` | `jefe_planta`, `supervisor_produccion`, `inventario`, `compras` |
 
@@ -1555,7 +1555,7 @@ Do not re-route catalog writes to a different domain's permission for convenienc
 
 | Trigger | Table | Function | Effect |
 |---------|-------|----------|--------|
-| `trg_bd_prevent_delete` | `doc.guia_remision`, `inventario.lote`, `mes.partida`, `doc.factura` (once emitted/annulled) | `fn_trg_prevent_hard_delete()` | Raises exception; use soft delete (`flg_elm`) instead |
+| `trg_bd_prevent_delete` | `doc.entrega`, `inventario.lote`, `mes.partida`, `doc.factura` (once emitted/annulled) | `fn_trg_prevent_hard_delete()` | Raises exception; use soft delete (`flg_elm`) instead |
 
 ### AFTER INSERT triggers
 
@@ -1772,7 +1772,7 @@ Also updates `inventario.lote.estado_calidad = resultado` and sends notification
 | `doc.get_factura_proveedor` | `(p_factura_id BIGINT)` | `JSONB` | `comercial.ver` |
 | `doc.registrar_letras` | `(p_factura_proveedor_id BIGINT, p_letras JSONB)` | `TEXT` | `comercial.editar` |
 | `doc.pagar_letra` | `(p_letra_id BIGINT, p_fecha_pago DATE)` | `TEXT` | `comercial.editar` |
-| `doc.vincular_guias_compra` | `(p_compra_id BIGINT, p_guia_ids JSONB)` | `TEXT` | `comercial.crear` |
+| `doc.vincular_entregas_compra` | `(p_compra_id BIGINT, p_entrega_ids JSONB)` | `TEXT` | `comercial.crear` |
 | `doc.vincular_factura_compra` | `(p_compra_id BIGINT, p_factura_id BIGINT)` | `TEXT` | `comercial.editar` |
 
 **`registrar_factura_proveedor()` validations:** `ABS(total - subtotal - igv) < 0.01`; `tipo_cambio` required for USD; optional `compra_id` linkage validated for matching `tercero_id`.
@@ -1785,9 +1785,9 @@ Also updates `inventario.lote.estado_calidad = resultado` and sends notification
 
 | Function | Signature | Returns | Permission |
 |----------|-----------|---------|------------|
-| `doc.crear_guia_remision_despacho` | `(p_datos JSONB)` | `BIGINT` | `comercial.crear` |
-| `doc.registrar_despacho` | `(p_guia_id BIGINT, p_detalles JSONB)` | `TEXT` | `produccion.ejecutar` |
-| `doc.anular_despacho` | `(p_guia_id BIGINT)` | `TEXT` | `comercial.editar` |
+| `doc.crear_entrega_despacho` | `(p_datos JSONB)` | `BIGINT` | `comercial.crear` |
+| `doc.registrar_despacho` | `(p_entrega_id BIGINT, p_detalles JSONB)` | `TEXT` | `produccion.ejecutar` |
+| `doc.anular_despacho` | `(p_entrega_id BIGINT)` | `TEXT` | `comercial.editar` |
 
 `registrar_despacho()` posts `SERV_EGR` inventory movements and updates `partida.estado_comercial`.
 
@@ -1831,19 +1831,19 @@ Also updates `inventario.lote.estado_calidad = resultado` and sends notification
 | `vw_stock_items` | Item totals from `item_saldo`. O(1). ≈ SAP MARD. Use for availability gates. |
 | `vw_stock_items_ubicacion` | Item stock per location — same but location-scoped. |
 | `vw_stock_items_valorado` | Item stock + `precio_promedio` + computed `stock_valorado`. Financial view (≈ SAP MB52). Note: `stock_valorado` is computed as `SUM(cantidad_actual) × precio_promedio`, not the stored `item_valoracion.stock_valorado`, to avoid MAP accounting drift. |
-| `vw_lotes_rollos_stock` | All rolls in stock with full attributes: color, width, mesh, weight, location, owner, ingress guia. Joins `lote_rollo_detalle` for dye attributes (NULL for undyed rolls). |
+| `vw_lotes_rollos_stock` | All rolls in stock with full attributes: color, width, mesh, weight, location, owner, ingress entrega. Joins `lote_rollo_detalle` for dye attributes (NULL for undyed rolls). |
 | `vw_lotes_rollos_disponibles` | Available rolls: `vw_lotes_rollos_stock` minus rolls reserved by non-CERRADA/CANCELADA partidas. ≈ SAP MD04. |
 | `vw_stock_rollos_crudos` | Undyed rolls in stock. Grouped by (item × propietario). |
 | `vw_stock_rollos_tenidos` | Dyed rolls in stock. Grouped by full spec identity (color + tenido + dimensions + quality). |
 | `vw_stock_insumos` | Insumo totals with tipo/colorante from `item_saldo`. |
 | `vw_precio_promedio_insumos` | Weighted avg cost per insumo. Source priority: `factura_proveedor_detalle` > `compra_detalle` (fallback for items with no invoice lines). |
 | `vw_lotes_disponibles` | All available lots (any type) with lote code, location, quantity. |
-| `vw_item_proveedor_guia` | Items × suppliers from inbound guias. Purchase history lookup. |
+| `vw_item_proveedor_entrega` | Items × suppliers from inbound entregas. Purchase history lookup. |
 | `vw_lotes_rollos_despachados` | Rolls with zero stock and a non-production egress. Linked back to originating partida. |
 | `vw_items_movimientos` | Full movement history: item code, lot code, location names, type name, `cantidad_neta` (signed). |
-| `vw_guias_rollos_pendientes` | `CLIENTE_ENVIO_PROCESO` guias with unassigned in-stock rolls. Shows `dias_espera`, pending/assigned counts and weights. |
-| `vw_rollos_por_guia` | Roll counts and weights per ingress guia (crudo + tenido breakdown). |
-| `vw_pesaje_pendiente` | *(in `mes` schema)* Partidas with a scheduled TENIDO paso and ≥1 unweighed assigned roll. Grouped by (partida, guia, item) for the print-friendly weighing form. |
+| `vw_entregas_rollos_pendientes` | `CLIENTE_ENVIO_PROCESO` entregas with unassigned in-stock rolls. Shows `dias_espera`, pending/assigned counts and weights. |
+| `vw_rollos_por_entrega` | Roll counts and weights per ingress entrega (crudo + tenido breakdown). |
+| `vw_pesaje_pendiente` | *(in `mes` schema)* Partidas with a scheduled TENIDO paso and ≥1 unweighed assigned roll. Grouped by (partida, entrega, item) for the print-friendly weighing form. |
 
 ### `doc` schema
 
@@ -1882,11 +1882,11 @@ Also updates `inventario.lote.estado_calidad = resultado` and sends notification
 
 ### Flow 1: Client Sends Rolls for Processing
 
-1. Client arrives with rolls. Create `doc.guia_remision` type `CLIENTE_ENVIO_PROCESO`.
-2. Add one `doc.guia_remision_detalle` row per roll, each with a new `inventario.lote`.
+1. Client arrives with rolls. Create `doc.entrega` type `CLIENTE_ENVIO_PROCESO`.
+2. Add one `doc.entrega_detalle` row per roll, each with a new `inventario.lote`.
 3. `item_movimientos` row (type `SERV_ING`) is posted per roll → `lote_saldo` and `item_saldo` updated by trigger.
-4. Create `inventario.lote_rollo_detalle` with `guia_remision_id` (billing anchor) and `flg_tenido = false`.
-5. Rolls appear in `inventario.vw_guias_rollos_pendientes` until assigned to a partida.
+4. Create `inventario.lote_rollo_detalle` with `entrega_id` (billing anchor) and `flg_tenido = false`.
+5. Rolls appear in `inventario.vw_entregas_rollos_pendientes` until assigned to a partida.
 
 ### Flow 2: Create and Plan a Production Order
 
@@ -1921,8 +1921,8 @@ Also updates `inventario.lote.estado_calidad = resultado` and sends notification
 
 ### Flow 4: Dispatch to Client and Bill
 
-1. Create `doc.guia_remision` type `DESPACHO_CLIENTE`.
-2. Call `doc.registrar_despacho(guia_id, detalles)` → `SERV_EGR` movements. Stock reaches zero for dispatched lots.
+1. Create `doc.entrega` type `DESPACHO_CLIENTE`.
+2. Call `doc.registrar_despacho(entrega_id, detalles)` → `SERV_EGR` movements. Stock reaches zero for dispatched lots.
 3. Update `partida.estado_comercial → 'ENTREGADA'`.
 4. Call `doc.crear_factura(partida_id)` → `borrador` invoice.
 5. Adjust line prices/quantities if needed (`actualizar_linea_factura()`).
@@ -1947,9 +1947,9 @@ Also updates `inventario.lote.estado_calidad = resultado` and sends notification
 
 ### Flow 7: Purchase Supplies
 
-1. Create `doc.guia_remision` type `COMPRA_INGRESO` → `COMPRA_ING` movements → MAP recalculated.
+1. Create `doc.entrega` type `COMPRA_INGRESO` → `COMPRA_ING` movements → MAP recalculated.
 2. `doc.crear_compra()` → PO with line items.
-3. `doc.vincular_guias_compra(compra_id, guia_ids)`.
+3. `doc.vincular_entregas_compra(compra_id, entrega_ids)`.
 4. `doc.registrar_factura_proveedor(data)` → supplier invoice.
 5. `doc.registrar_letras(factura_id, letras)` → payment schedule.
 6. As payments clear: `doc.pagar_letra(letra_id, fecha_pago)`.
@@ -1998,7 +1998,7 @@ Files must be applied in this exact order to a fresh database:
 | `funciones/mes.sql` | Full production execution flow, scheduling, wash management |
 | `funciones/receta.sql` | Recipe lifecycle (`crear_tenido`, `transicionar_tenido`, etc.) |
 | `funciones/calidad.sql` | QC inspections and defect catalog |
-| `funciones/compras.sql` | Procurement: compras, facturas, letras, guia linkage |
+| `funciones/compras.sql` | Procurement: compras, facturas, letras, entrega linkage |
 | `funciones/despacho.sql` | `registrar_despacho`, `anular_despacho` |
 | `funciones/facturacion.sql` | `crear_factura`, `emitir_factura`, billing state management |
 | `funciones/alertas.sql` | Alert infrastructure; `pg_cron` evaluators for overdue letras/facturas and unassigned rolls |

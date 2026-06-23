@@ -576,7 +576,7 @@ GRANT SELECT ON doc.vw_precios_pendientes TO authenticated;
 --   "observacion":       "...",           -- nullable
 --   "lineas": [
 --     {
---       "guia_remision_id":   456,        -- ingress guia CLIENTE_ENVIO_PROCESO (nullable for ad-hoc/MLR rolls)
+--       "entrega_id":   456,        -- ingress entrega CLIENTE_ENVIO_PROCESO (nullable for ad-hoc/MLR rolls)
 --       "partida_id":         123,        -- traceability (nullable)
 --       "operacion_id":       1,          -- service billed (nullable for ad-hoc)
 --       "es_antipilling":     false,
@@ -649,7 +649,7 @@ BEGIN
 
     INSERT INTO doc.factura_detalle (
         factura_id,
-        guia_remision_id,
+        entrega_id,
         partida_id,
         operacion_id,
         es_antipilling,
@@ -665,7 +665,7 @@ BEGIN
     )
     SELECT
         v_factura_id,
-        (l->>'guia_remision_id')::BIGINT,
+        (l->>'entrega_id')::BIGINT,
         (l->>'partida_id')::BIGINT,
         (l->>'operacion_id')::SMALLINT,
         COALESCE((l->>'es_antipilling')::BOOLEAN, false),
@@ -723,40 +723,40 @@ $$;
 
 -- ── doc.vw_pendientes_facturacion ─────────────────────────────
 -- Live view of billable lines with remaining unbilled weight.
--- One row per (ingress guia × partida × operacion × billing dimensions × antipilling).
+-- One row per (ingress entrega × partida × operacion × billing dimensions × antipilling).
 --
--- guia_remision_id = the CLIENTE_ENVIO_PROCESO guia (client's own reference,
+-- entrega_id = the CLIENTE_ENVIO_PROCESO entrega (client's own reference,
 -- appears on invoice description as "Ref. [serie]-[correlativo]").
 -- Weight is aggregated across ALL dispatch events that trace back to the same
--- ingress guia + partida combination.
+-- ingress entrega + partida combination.
 --
 -- Quantity-based tracking (SAP/Odoo approach):
---   peso_total     = total kg dispatched for this (guia × partida × service)
+--   peso_total     = total kg dispatched for this (entrega × partida × service)
 --   peso_facturado = kg already billed in factura_detalle for same key
 --   peso_pendiente = peso_total - peso_facturado  (> 0 → row visible)
 -- This supports partial billing: one partida can be billed across multiple
 -- invoices, and one invoice can cover multiple partidas.
--- The key for matching is (guia_remision_id, partida_id, operacion_id,
+-- The key for matching is (entrega_id, partida_id, operacion_id,
 -- articulo_tipo_id, color_x_cliente_id, tenido_id, es_antipilling).
 --
 -- Usage:
---   - Guia list screen:
---       SELECT DISTINCT guia_remision_id, serie, correlativo, cliente, ...
---       GROUP BY ingress guia to show pending kg per guia
+--   - entrega list screen:
+--       SELECT DISTINCT entrega_id, serie, correlativo, cliente, ...
+--       GROUP BY ingress entrega to show pending kg per entrega
 --   - Invoice creation preview:
---       WHERE guia_remision_id = ANY(selected_ids)
+--       WHERE entrega_id = ANY(selected_ids)
 --   - sin_precio = true: rate missing, operator must set before billing
 --
 -- Join path:
---   DESPACHO_CLIENTE guia → grd.lote_id (dyed output lote)
---   → lote_rollo_detalle.guia_remision_id (ingress guia, carried by registrar_produccion)
+--   DESPACHO_CLIENTE entrega → grd.lote_id (dyed output lote)
+--   → lote_rollo_detalle.entrega_id (ingress entrega, carried by registrar_produccion)
 --   → output lote.documento_id → partida_paso → partida → partida
 --   → completed partida_paso → operacion
 --   → item_rollo_detalle → articulo (fibra)
 CREATE OR REPLACE VIEW doc.vw_pendientes_facturacion AS
 WITH lineas AS (
     SELECT
-        lrd.guia_remision_id,              -- ingress guia (material origin, client-recognizable)
+        lrd.entrega_id,              -- ingress entrega (material origin, client-recognizable)
         gr_ing.serie,
         gr_ing.correlativo,
         gr_ing.fecha_emision::DATE         AS fecha_emision,
@@ -780,16 +780,16 @@ WITH lineas AS (
         -- Falls back to dispatch grd.cantidad for lotes predating origen_lote_id
         -- (historical data or MLR-confectioned rolls with no source lote).
         SUM(COALESCE(source_l.cantidad, grd.cantidad)) AS peso_kg
-    FROM doc.guia_remision gr              -- DESPACHO_CLIENTE: billing trigger
-    JOIN doc.guia_remision_tipo grt    ON grt.id = gr.guia_remision_tipo_id
+    FROM doc.entrega gr              -- DESPACHO_CLIENTE: billing trigger
+    JOIN doc.entrega_tipo grt    ON grt.id = gr.entrega_tipo_id
                                       AND grt.codigo = 'DESPACHO_CLIENTE'
-    JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
+    JOIN doc.entrega_detalle grd ON grd.entrega_id = gr.id
     -- Dispatched lote is always a dyed OUTPUT lote (documento_tipo = 'partida_paso_ejecucion')
     JOIN inventario.lote l             ON l.id = grd.lote_id
                                       AND l.documento_tipo = 'partida_paso_ejecucion'
-    -- Ingress guia + source lote carried forward in lote_rollo_detalle by registrar_produccion
+    -- Ingress entrega + source lote carried forward in lote_rollo_detalle by registrar_produccion
     LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-    LEFT JOIN doc.guia_remision gr_ing          ON gr_ing.id = lrd.guia_remision_id
+    LEFT JOIN doc.entrega gr_ing          ON gr_ing.id = lrd.entrega_id
     -- Source lote: input lote before dyeing — used for billing weight (input weight)
     LEFT JOIN inventario.lote source_l          ON source_l.id = lrd.origen_lote_id
     -- Trace: output lote → ejecucion → paso → partida
@@ -818,7 +818,7 @@ WITH lineas AS (
                                       AND o.codigo = 'TENIDO'
     WHERE gr.fyh_elm IS NULL
     GROUP BY
-        lrd.guia_remision_id,
+        lrd.entrega_id,
         gr_ing.serie, gr_ing.correlativo, gr_ing.fecha_emision,
         p.tercero_id, t.nombre,
         p.id, o.id, o.nombre, o.codigo,
@@ -831,7 +831,7 @@ WITH lineas AS (
 -- operacion_id is the ANTIPILLING ghost op — distinct from TENIDO for factura_detalle keying.
 antipilling AS (
     SELECT
-        l.guia_remision_id, l.serie, l.correlativo, l.fecha_emision,
+        l.entrega_id, l.serie, l.correlativo, l.fecha_emision,
         l.tercero_id, l.cliente, l.partida_id,
         (SELECT o.id FROM mes.operacion o WHERE o.codigo = 'ANTIPILLING')::SMALLINT AS operacion_id,
         'Antipilling'::TEXT AS operacion,
@@ -852,7 +852,7 @@ all_lineas AS (
     SELECT * FROM antipilling
 )
 SELECT
-    l.guia_remision_id,
+    l.entrega_id,
     l.serie,
     l.correlativo,
     l.fecha_emision,
@@ -906,12 +906,12 @@ LEFT JOIN LATERAL (
         END AS precio_kg
 ) px ON true
 -- Quantity-based: row stays visible until all dispatched kg are invoiced.
--- Key: (ingress_guia × partida × service dimensions) — supports partial billing.
+-- Key: (ingress_entrega × partida × service dimensions) — supports partial billing.
 LEFT JOIN LATERAL (
     SELECT COALESCE(SUM(fd.cantidad), 0) AS peso_facturado
     FROM doc.factura_detalle fd
     JOIN doc.factura f ON f.id = fd.factura_id AND f.estado <> 'anulada'
-    WHERE fd.guia_remision_id  IS NOT DISTINCT FROM l.guia_remision_id
+    WHERE fd.entrega_id  IS NOT DISTINCT FROM l.entrega_id
       AND fd.partida_id         = l.partida_id
       AND fd.operacion_id       = l.operacion_id
       AND fd.articulo_tipo_id   = l.articulo_tipo_id
@@ -927,10 +927,10 @@ GRANT SELECT ON doc.vw_pendientes_facturacion TO authenticated;
 -- ── doc.vw_aprobados_sin_despacho ─────────────────────────────
 -- Output lotes produced but not yet dispatched to the client.
 -- Non-overlapping with vw_pendientes_facturacion: once a lote gets a
--- DESPACHO_CLIENTE guia it disappears from here and appears there instead.
+-- DESPACHO_CLIENTE entrega it disappears from here and appears there instead.
 --
 -- Entry point: inventario.lote WHERE documento_tipo = 'partida_paso_ejecucion'
--- + NOT EXISTS a live DESPACHO_CLIENTE guia referencing that lote.
+-- + NOT EXISTS a live DESPACHO_CLIENTE entrega referencing that lote.
 --
 -- Weight: COALESCE(source_lote.cantidad, output_lote.cantidad)
 -- — same pre-production input weight logic; grd.cantidad fallback is
@@ -942,7 +942,7 @@ GRANT SELECT ON doc.vw_pendientes_facturacion TO authenticated;
 CREATE OR REPLACE VIEW doc.vw_aprobados_sin_despacho AS
 WITH lineas AS (
     SELECT
-        lrd.guia_remision_id,              -- ingress guia (material origin)
+        lrd.entrega_id,              -- ingress entrega (material origin)
         gr_ing.serie,
         gr_ing.correlativo,
         gr_ing.fecha_emision::DATE         AS fecha_emision,
@@ -969,7 +969,7 @@ WITH lineas AS (
     JOIN mes.partida p                     ON p.id = opp_out.partida_id AND p.fyh_elm IS NULL
     JOIN tercero t                         ON t.id = p.tercero_id
     LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-    LEFT JOIN doc.guia_remision gr_ing          ON gr_ing.id = lrd.guia_remision_id
+    LEFT JOIN doc.entrega gr_ing          ON gr_ing.id = lrd.entrega_id
     LEFT JOIN inventario.lote source_l          ON source_l.id = lrd.origen_lote_id
     JOIN mes.partida_paso opp ON opp.partida_id = p.id
         AND EXISTS (SELECT 1 FROM mes.partida_paso_ejecucion pe_c WHERE pe_c.partida_paso_id = opp.id AND pe_c.estado = 'COMPLETADO')
@@ -990,14 +990,14 @@ WITH lineas AS (
         AND l.fyh_elm IS NULL
         AND NOT EXISTS (
             SELECT 1
-            FROM doc.guia_remision_detalle grd2
-            JOIN doc.guia_remision gr2       ON gr2.id = grd2.guia_remision_id AND gr2.fyh_elm IS NULL
-            JOIN doc.guia_remision_tipo grt2 ON grt2.id = gr2.guia_remision_tipo_id
+            FROM doc.entrega_detalle grd2
+            JOIN doc.entrega gr2       ON gr2.id = grd2.entrega_id AND gr2.fyh_elm IS NULL
+            JOIN doc.entrega_tipo grt2 ON grt2.id = gr2.entrega_tipo_id
                                              AND grt2.codigo = 'DESPACHO_CLIENTE'
             WHERE grd2.lote_id = l.id
         )
     GROUP BY
-        lrd.guia_remision_id,
+        lrd.entrega_id,
         gr_ing.serie, gr_ing.correlativo, gr_ing.fecha_emision,
         p.tercero_id, t.nombre,
         p.id, o.id, o.nombre, o.codigo,
@@ -1008,7 +1008,7 @@ WITH lineas AS (
 ),
 antipilling AS (
     SELECT
-        l.guia_remision_id, l.serie, l.correlativo, l.fecha_emision,
+        l.entrega_id, l.serie, l.correlativo, l.fecha_emision,
         l.tercero_id, l.cliente, l.partida_id,
         (SELECT o.id FROM mes.operacion o WHERE o.codigo = 'ANTIPILLING')::SMALLINT AS operacion_id,
         'Antipilling'::TEXT AS operacion,
@@ -1029,7 +1029,7 @@ all_lineas AS (
     SELECT * FROM antipilling
 )
 SELECT
-    l.guia_remision_id,
+    l.entrega_id,
     l.serie,
     l.correlativo,
     l.fecha_emision,
@@ -1082,7 +1082,7 @@ LEFT JOIN LATERAL (
     SELECT COALESCE(SUM(fd.cantidad), 0) AS peso_facturado
     FROM doc.factura_detalle fd
     JOIN doc.factura f ON f.id = fd.factura_id AND f.estado <> 'anulada'
-    WHERE fd.guia_remision_id  IS NOT DISTINCT FROM l.guia_remision_id
+    WHERE fd.entrega_id  IS NOT DISTINCT FROM l.entrega_id
       AND fd.partida_id         = l.partida_id
       AND fd.operacion_id       = l.operacion_id
       AND fd.articulo_tipo_id   = l.articulo_tipo_id
@@ -1131,7 +1131,7 @@ SELECT jsonb_build_object(
                 'operacion',        o.nombre,
                 'es_antipilling',   fd.es_antipilling,
                 'partida_id',       fd.partida_id,
-                'guia_remision_id', fd.guia_remision_id,
+                'entrega_id', fd.entrega_id,
                 'cantidad',         fd.cantidad,
                 'unidad',           u.codigo,
                 'precio_unitario',  fd.precio_unitario,

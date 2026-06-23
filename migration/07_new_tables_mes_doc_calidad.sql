@@ -68,8 +68,8 @@ CREATE TABLE IF NOT EXISTS mes.partida_detalle (
     UNIQUE (partida_id, item_id)
 );
 
--- ── doc.guia_remision_tipo ────────────────────────────────────
-CREATE TABLE IF NOT EXISTS doc.guia_remision_tipo (
+-- ── doc.entrega_tipo ────────────────────────────────────
+CREATE TABLE IF NOT EXISTS doc.entrega_tipo (
     id  smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     codigo TEXT NOT NULL UNIQUE,
     codigo_canon TEXT NOT NULL,
@@ -83,12 +83,12 @@ CREATE TABLE IF NOT EXISTS doc.guia_remision_tipo (
     fyh_mod TIMESTAMPTZ,
     UNIQUE(codigo_canon)
 );
-CREATE TRIGGER trg_bi_guia_remision_tipo_codigo_canon
-BEFORE INSERT OR UPDATE ON doc.guia_remision_tipo
+CREATE TRIGGER trg_bi_entrega_tipo_codigo_canon
+BEFORE INSERT OR UPDATE ON doc.entrega_tipo
 FOR EACH ROW
 EXECUTE FUNCTION public.fn_trg_set_codigo_canon();
 
-INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente) VALUES
+INSERT INTO doc.entrega_tipo (codigo, nombre, flg_emitida, flg_cliente) VALUES
     ('COMPRA_INGRESO',            'Compra – Ingreso de insumos',                       false, false),
     ('VENTA_EGRESO',              'Venta – Egreso de producto terminado',               true,  true),
     ('CLIENTE_ENVIO_PROCESO',     'Servicio – Recepción de material cliente',           false, true),
@@ -96,7 +96,7 @@ INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente) VA
     ('DEVOLUCION_CLIENTE_CRUDO',  'Devolución a cliente (rollos sin procesar)',         true,  true),
     ('DEVOLUCION_PROVEEDOR',      'Devolución a proveedor',                            true,  false);
 
-UPDATE doc.guia_remision_tipo grt
+UPDATE doc.entrega_tipo grt
 SET item_movimiento_tipo_id = imt.id
 FROM inventario.item_movimiento_tipo imt
 WHERE
@@ -107,23 +107,23 @@ WHERE
  OR (grt.codigo = 'DEVOLUCION_CLIENTE_CRUDO' AND imt.codigo = 'DEV_CLI_EGR')
  OR (grt.codigo = 'DEVOLUCION_PROVEEDOR'     AND imt.codigo = 'DEV_PROV_EGR');
 
-INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente, item_movimiento_tipo_id)
+INSERT INTO doc.entrega_tipo (codigo, nombre, flg_emitida, flg_cliente, item_movimiento_tipo_id)
 SELECT 'DEVOLUCION_CLIENTE_VENTA', 'Devolución de cliente (producto vendido)', false, true, imt.id
 FROM inventario.item_movimiento_tipo imt WHERE imt.codigo = 'DEV_CLI_ING';
 
-INSERT INTO doc.guia_remision_tipo (codigo, nombre, flg_emitida, flg_cliente, item_movimiento_tipo_id)
+INSERT INTO doc.entrega_tipo (codigo, nombre, flg_emitida, flg_cliente, item_movimiento_tipo_id)
 SELECT 'DEVOLUCION_CLIENTE_SERVICIO', 'Devolución de cliente (material de servicio)', false, true, imt.id
 FROM inventario.item_movimiento_tipo imt WHERE imt.codigo = 'SERV_DEV_ING';
 
--- ── doc.guia_remision ─────────────────────────────────────────
+-- ── doc.entrega ─────────────────────────────────────────
 -- Acts as the delivery document for both inbound and outbound movements.
 -- serie/correlativo are nullable: headless records represent movement events
 -- where the legal document is handled externally (e.g. dispatch via separate system)
 -- or not yet registered. Both must be provided together or not at all.
-CREATE TABLE IF NOT EXISTS doc.guia_remision (
+CREATE TABLE IF NOT EXISTS doc.entrega (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    guia_remision_tipo_id smallint NOT NULL REFERENCES doc.guia_remision_tipo(id),
-    tercero_id  INT NOT NULL REFERENCES tercero(id),  -- the external party; direction derived from guia_remision_tipo.flg_emitida
+    entrega_tipo_id smallint NOT NULL REFERENCES doc.entrega_tipo(id),
+    tercero_id  INT NOT NULL REFERENCES tercero(id),  -- the external party; direction derived from entrega_tipo.flg_emitida
     serie TEXT,
     correlativo TEXT,
     fecha_emision TIMESTAMPTZ NOT NULL,
@@ -134,32 +134,32 @@ CREATE TABLE IF NOT EXISTS doc.guia_remision (
     fyh_mod timestamptz,
     usr_elm INT,
     fyh_elm TIMESTAMPTZ,
-    CONSTRAINT chk_guia_doc_fields CHECK ((serie IS NULL) = (correlativo IS NULL)),
-    UNIQUE (tercero_id, serie, correlativo, guia_remision_tipo_id)
+    CONSTRAINT chk_entrega_doc_fields CHECK ((serie IS NULL) = (correlativo IS NULL)),
+    UNIQUE (tercero_id, serie, correlativo, entrega_tipo_id)
 );
 
--- ── doc.guia_remision_detalle ─────────────────────────────────
--- One row per physical guia line (linea = line number on the paper/PDF).
--- n_rollos: roll count declared on the guia line (separate from cantidad which is weight).
--- lote_id: populated for dispatch guias (identifies exact rolls going out);
---          populated after ingress for inbound guias; NULL before lot creation.
+-- ── doc.entrega_detalle ─────────────────────────────────
+-- One row per physical entrega line (linea = line number on the paper/PDF).
+-- n_rollos: roll count declared on the entrega line (separate from cantidad which is weight).
+-- lote_id: populated for dispatch entregas (identifies exact rolls going out);
+--          populated after ingress for inbound entregas; NULL before lot creation.
 -- ubicacion_id: warehouse bin context when relevant.
-CREATE TABLE IF NOT EXISTS doc.guia_remision_detalle (
+CREATE TABLE IF NOT EXISTS doc.entrega_detalle (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    guia_remision_id BIGINT NOT NULL REFERENCES doc.guia_remision(id),
+    entrega_id BIGINT NOT NULL REFERENCES doc.entrega(id),
     linea SMALLINT NOT NULL DEFAULT 1,
     item_id INT NOT NULL REFERENCES item(id),
     lote_id int REFERENCES inventario.lote(id),
     ubicacion_id int REFERENCES inventario.ubicacion(id),
     cantidad NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
     n_rollos INT,
-    UNIQUE (guia_remision_id, linea)
+    UNIQUE (entrega_id, linea)
 );
 
 -- ── doc.orden_servicio ───────────────────────────────────────
 -- Commercial service order issued by admin for MLR's manufacturing arm
 -- to have rolls dyed at the plant. Serves as the ingress anchor for
--- internally-confectioned rolls (parallel to guia_remision for external clients).
+-- internally-confectioned rolls (parallel to entrega for external clients).
 -- Physical paper number stored in serie/correlativo; the PDF is just evidence.
 -- Lotes created against this order carry orden_servicio_id on lote_rollo_detalle.
 -- Added via migration/22_orden_servicio.sql.
@@ -486,7 +486,7 @@ CREATE TABLE inventario.pesaje (
 --   lote             → physical instance (this specific roll)
 --   lote_rollo_detalle → processing state (what has been done to it)
 --
--- Attributes set at ingress: guia_remision_id (billing anchor)
+-- Attributes set at ingress: entrega_id (billing anchor)
 -- Physical attributes (ancho, malla, rendimiento): set from partida at production time
 -- Dyeing attributes: color_x_cliente_id, tenido_id, flg_tenido, flg_antipilling
 --   set when dyeing step completes (registrar_produccion)
@@ -500,7 +500,7 @@ CREATE TABLE inventario.lote_rollo_detalle (
     lote_id             INT PRIMARY KEY REFERENCES inventario.lote(id),
 
     -- Billing anchor — set at ingress, carried forward through production
-    guia_remision_id    BIGINT REFERENCES doc.guia_remision(id),
+    entrega_id    BIGINT REFERENCES doc.entrega(id),
 
     -- Parent-batch link: output lote → input lote it was produced from.
     -- NULL for original input lotes. Set by registrar_produccion.
@@ -688,15 +688,15 @@ CREATE TABLE doc.compra_detalle (
     cantidad        NUMERIC(12,4) NOT NULL CHECK (cantidad > 0),
     precio_unitario NUMERIC(12,4) NOT NULL CHECK (precio_unitario >= 0),
     -- Denormalized from ledger (≈ SAP EKPO.WEMNG).
-    -- Maintained by compras.sql after every guia link or unlink.
+    -- Maintained by compras.sql after every entrega link or unlink.
     cantidad_recibida  NUMERIC(12,4) NOT NULL DEFAULT 0,
     usr_cre INT, fyh_cre TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE doc.compra_guia_remision (
+CREATE TABLE doc.compra_entrega (
     compra_id        BIGINT NOT NULL REFERENCES doc.compra(id),
-    guia_remision_id BIGINT NOT NULL REFERENCES doc.guia_remision(id),
-    PRIMARY KEY (compra_id, guia_remision_id)
+    entrega_id BIGINT NOT NULL REFERENCES doc.entrega(id),
+    PRIMARY KEY (compra_id, entrega_id)
 );
 
 -- ── doc.catalogo_precios ──────────────────────────────────────
@@ -865,14 +865,14 @@ CREATE TABLE doc.factura (
 );
 
 -- ── doc.factura_detalle ────────────────────────────────────────
--- One row per (ingress guia × operacion × billing dimensions).
+-- One row per (ingress entrega × operacion × billing dimensions).
 -- partida_id links back to the sales order for billing-to-order reconciliation.
 -- igv_porcentaje allows 0% for IGV-exempt items (e.g. exported goods).
 --
--- guia_remision_id: ingress guia (CLIENTE_ENVIO_PROCESO) — the material-origin
+-- entrega_id: ingress entrega (CLIENTE_ENVIO_PROCESO) — the material-origin
 --   anchor the client recognizes on their invoice. Carried forward from the input
---   lote via lote_rollo_detalle.guia_remision_id when registrar_produccion runs.
---   NULL for ad-hoc lines or MLR-confectioned rolls without an ingress guia.
+--   lote via lote_rollo_detalle.entrega_id when registrar_produccion runs.
+--   NULL for ad-hoc lines or MLR-confectioned rolls without an ingress entrega.
 -- operacion_id: which billable service (TENIDO, PLANCHADO...). NULL for ad-hoc.
 -- es_antipilling: true for the antipilling surcharge line on TENIDO.
 -- Billing dimensions denormalized at invoice time — financial document is
@@ -883,7 +883,7 @@ CREATE TABLE doc.factura_detalle (
     -- Sales order line this invoice line covers (nullable for ad-hoc lines)
     partida_id          BIGINT   REFERENCES mes.partida(id),
     -- Billing document links (denormalized at invoice time)
-    guia_remision_id    BIGINT   REFERENCES doc.guia_remision(id),
+    entrega_id    BIGINT   REFERENCES doc.entrega(id),
     operacion_id        SMALLINT REFERENCES mes.operacion(id),
     es_antipilling      BOOLEAN  NOT NULL DEFAULT false,
     articulo_tipo_id    SMALLINT REFERENCES articulo_tipo(id),
@@ -972,7 +972,7 @@ DROP TABLE IF EXISTS doc.letra_factura                CASCADE;
 DROP TABLE IF EXISTS doc.factura                      CASCADE;
 DROP TABLE IF EXISTS doc.letra                        CASCADE;
 DROP TABLE IF EXISTS doc.catalogo_precios             CASCADE;
-DROP TABLE IF EXISTS doc.compra_guia_remision         CASCADE;
+DROP TABLE IF EXISTS doc.compra_entrega         CASCADE;
 DROP TABLE IF EXISTS doc.compra_detalle               CASCADE;
 DROP TABLE IF EXISTS doc.compra_factura_proveedor     CASCADE;
 DROP TABLE IF EXISTS doc.compra                       CASCADE;
@@ -984,9 +984,9 @@ DROP TABLE IF EXISTS inventario.lote_rollo_detalle    CASCADE;
 DROP TABLE IF EXISTS inventario.pesaje                CASCADE;
 
 -- doc logistics
-DROP TABLE IF EXISTS doc.guia_remision_detalle        CASCADE;
-DROP TABLE IF EXISTS doc.guia_remision                CASCADE;
-DROP TABLE IF EXISTS doc.guia_remision_tipo           CASCADE;
+DROP TABLE IF EXISTS doc.entrega_detalle        CASCADE;
+DROP TABLE IF EXISTS doc.entrega                CASCADE;
+DROP TABLE IF EXISTS doc.entrega_tipo           CASCADE;
 
 -- mes execution layer
 DROP TABLE IF EXISTS mes.partida_componente           CASCADE;

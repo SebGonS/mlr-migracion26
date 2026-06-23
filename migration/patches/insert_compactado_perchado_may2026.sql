@@ -9,13 +9,29 @@
 --   25/05  5209  Serteks 1 10 rollos
 --   25/05  5179  Serteks 2 16 rollos
 --
--- PERCHADO (percha sheet, 28/05–05/06):
---   24 distinct partidas, 28 ejecuciones total.
+
+-- DROP TABLE IF EXISTS public.mersan;
+-- DROP TABLE IF EXISTS public.sertks1;
+-- DROP TABLE IF EXISTS public.sertks2;
+-- PERCHADO (percha sheet, 28/05–12/06):
+
+ALTER TABLE public.mersan RENAME COLUMN "hora inicio" TO hora_inicio;
+ALTER TABLE public.mersan RENAME COLUMN "hora final" TO hora_final;
+ALTER TABLE public.sertks1 RENAME COLUMN "hora inicio" TO hora_inicio;
+ALTER TABLE public.sertks1 RENAME COLUMN "hora final" TO hora_final;
+ALTER TABLE public.sertks2 RENAME COLUMN "hora inicio" TO hora_inicio;
+ALTER TABLE public.sertks2 RENAME COLUMN "hora final" TO hora_final;
+
+-- SELECT * FROM receta.tenido WHERE id=6925;
+-- SELECT * FROM vw_colores WHERE color_x_cliente_id=929;
+
+--   30 distinct partidas, 36 ejecuciones total.
 --   Midnight-crossing runs: fecha_fin advanced +1 day where hora_fin < hora_inicio.
 --   Null hora_fin: 5231 (machine failure mid-shift — fyh_fin stored as NULL).
 --   Typo corrected: 5940 16::30 → 16:30.
 --   Partida 4700: maquina column blank on sheet → resolved to Percha machine.
---   Multi-run partidas: 5229 ×2, 5235 ×3, 5242 ×2.
+--   Multi-run partidas: 5229 ×2, 5235 ×3, 5242 ×2, 4714 ×2, 4715 ×2.
+--   Row without partida on 12/06 (85cm, FRANELA, 09:00–12:00) — skipped.
 --
 -- Behavior:
 --   - Skips partidas that have rework children (partida_origen_id = partida.id)
@@ -41,7 +57,12 @@
 --             5163,5209,5179,
 --             5094,4700,5233,5231,5234,5232,5229,5243,6392,5230,
 --             5242,5238,5235,5239,5240,5241,5236,5941,5943,5940,5942,
---             5196,5175,5968
+--             5196,5175,5968,5991,5986,5988,4714,4715,5177,
+            5987,5993,5989,5992,5995,6107,5990,
+            6100,6102,6099,6101,5985,5174,5994,6095,6096,
+            6085,6084,6088,6083,6094,6087,6090,6108,6091,
+            6086,6145,6144,6146,6143,6147,6106,6089,
+            4969,6105,6093
 --         )
 --     );
 --   DELETE FROM inventario.lote
@@ -53,7 +74,12 @@
 --             5163,5209,5179,
 --             5094,4700,5233,5231,5234,5232,5229,5243,6392,5230,
 --             5242,5238,5235,5239,5240,5241,5236,5941,5943,5940,5942,
---             5196,5175,5968
+--             5196,5175,5968,5991,5986,5988,4714,4715,5177,
+            5987,5993,5989,5992,5995,6107,5990,
+            6100,6102,6099,6101,5985,5174,5994,6095,6096,
+            6085,6084,6088,6083,6094,6087,6090,6108,6091,
+            6086,6145,6144,6146,6143,6147,6106,6089,
+            4969,6105,6093
 --         )
 --     );
 --   DELETE FROM mes.partida_paso_ejecucion
@@ -65,7 +91,12 @@
 --             5163,5209,5179,
 --             5094,4700,5233,5231,5234,5232,5229,5243,6392,5230,
 --             5242,5238,5235,5239,5240,5241,5236,5941,5943,5940,5942,
---             5196,5175,5968
+--             5196,5175,5968,5991,5986,5988,4714,4715,5177,
+            5987,5993,5989,5992,5995,6107,5990,
+            6100,6102,6099,6101,5985,5174,5994,6095,6096,
+            6085,6084,6088,6083,6094,6087,6090,6108,6091,
+            6086,6145,6144,6146,6143,6147,6106,6089,
+            4969,6105,6093
 --         )
 --   );
 --   DELETE FROM mes.partida_paso
@@ -74,7 +105,12 @@
 --         5163,5209,5179,
 --         5094,4700,5233,5231,5234,5232,5229,5243,6392,5230,
 --         5242,5238,5235,5239,5240,5241,5236,5941,5943,5940,5942,
---         5196,5175,5968
+--         5196,5175,5968,5991,5986,5988,4714,4715,5177,
+            5987,5993,5989,5992,5995,6107,5990,
+            6100,6102,6099,6101,5985,5174,5994,6095,6096,
+            6085,6084,6088,6083,6094,6087,6090,6108,6091,
+            6086,6145,6144,6146,6143,6147,6106,6089,
+            4969,6105,6093
 --     );
 -- ═══════════════════════════════════════════════════════════════════════════════
 DO $$
@@ -111,17 +147,31 @@ BEGIN
     -- ═══════════════════════════════════════════════════════════════════════════
     FOR rec IN
         SELECT partida::bigint AS partida_id, v_mersan_id::int AS maquina_id,
-               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha, hora_inicio::time, hora_final::time AS hora_fin, rollos::numeric
-        FROM public.mersan WHERE partida::text ~ '^\d+$' AND hora_inicio IS NOT NULL AND hora_final IS NOT NULL
+               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha,
+               REPLACE(hora_inicio, '.', ':')::time AS hora_inicio,
+               REPLACE(hora_final,  '.', ':')::time AS hora_fin,
+               rollos::numeric
+        FROM public.mersan WHERE partida::text ~ '^\d+$' AND fecha IS NOT NULL AND TRIM(fecha) != ''
         UNION ALL
         SELECT partida::bigint, v_serteks1_id::int,
-               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha, hora_inicio::time, hora_final::time AS hora_fin, rollos::numeric
-        FROM public.sertks1 WHERE partida::text ~ '^\d+$' AND hora_inicio IS NOT NULL AND hora_final IS NOT NULL
+               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha,
+               REPLACE(hora_inicio, '.', ':')::time AS hora_inicio,
+               REPLACE(hora_final,  '.', ':')::time AS hora_fin,
+               rollos::numeric
+        FROM public.sertks1 WHERE partida::text ~ '^\d+$' AND fecha IS NOT NULL AND TRIM(fecha) != ''
         UNION ALL
         SELECT partida::bigint, v_serteks2_id::int,
-               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha, hora_inicio::time, hora_final::time AS hora_fin, rollos::numeric
-        FROM public.sertks2 WHERE partida::text ~ '^\d+$' AND hora_inicio IS NOT NULL AND hora_final IS NOT NULL
+               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha,
+               REPLACE(hora_inicio, '.', ':')::time AS hora_inicio,
+               REPLACE(hora_final,  '.', ':')::time AS hora_fin,
+               rollos::numeric
+        FROM public.sertks2 WHERE partida::text ~ '^\d+$' AND fecha IS NOT NULL AND TRIM(fecha) != ''
     LOOP
+        IF rec.hora_inicio IS NULL THEN
+            RAISE NOTICE 'COMPACTADO: partida % sin hora_inicio — revisar manualmente (hora_fin=%)', rec.partida_id, rec.hora_fin;
+            CONTINUE;
+        END IF;
+
         IF NOT EXISTS (SELECT 1 FROM mes.partida WHERE id = rec.partida_id) THEN
             RAISE NOTICE 'COMPACTADO: partida % no existe en mes.partida — saltado', rec.partida_id;
             CONTINUE;
@@ -133,7 +183,10 @@ BEGIN
         END IF;
 
         v_fyh_inicio := ((rec.fecha + rec.hora_inicio)::TIMESTAMP + INTERVAL '5 hours')::TIMESTAMPTZ;
-        v_fyh_fin    := ((rec.fecha + rec.hora_fin)::TIMESTAMP   + INTERVAL '5 hours')::TIMESTAMPTZ;
+        v_fyh_fin    := CASE WHEN rec.hora_fin IS NOT NULL
+                             THEN ((rec.fecha + rec.hora_fin)::TIMESTAMP + INTERVAL '5 hours')::TIMESTAMPTZ
+                             ELSE NULL
+                        END;
 
         SELECT id INTO v_paso_id FROM mes.partida_paso
         WHERE partida_id = rec.partida_id AND operacion_id = v_compact_op_id;
@@ -151,16 +204,28 @@ BEGIN
             ) RETURNING id INTO v_paso_id;
         END IF;
 
-        IF EXISTS (
-            SELECT 1 FROM mes.partida_paso_ejecucion
-            WHERE partida_paso_id = v_paso_id AND fyh_inicio = v_fyh_inicio
-        ) THEN
-            RAISE NOTICE 'COMPACTADO: ejecucion ya existe para paso %, partida % — saltado', v_paso_id, rec.partida_id;
+        SELECT id INTO v_ejecucion_id FROM mes.partida_paso_ejecucion
+        WHERE partida_paso_id = v_paso_id AND fyh_inicio = v_fyh_inicio;
+
+        IF FOUND THEN
+            IF v_fyh_fin IS NOT NULL THEN
+                UPDATE mes.partida_paso_ejecucion
+                SET estado = 'COMPLETADO', fyh_fin = v_fyh_fin, fyh_mod = NOW()
+                WHERE id = v_ejecucion_id AND fyh_fin IS NULL;
+                IF FOUND THEN
+                    UPDATE mes.partida_paso SET estado = 'COMPLETADO', fyh_mod = NOW() WHERE id = v_paso_id;
+                    RAISE NOTICE 'COMPACTADO: ejecucion % partida % — fyh_fin parcheado', v_ejecucion_id, rec.partida_id;
+                ELSE
+                    RAISE NOTICE 'COMPACTADO: ejecucion ya completa para paso %, partida % — saltado', v_paso_id, rec.partida_id;
+                END IF;
+            ELSE
+                RAISE NOTICE 'COMPACTADO: ejecucion ya existe para paso %, partida % — saltado', v_paso_id, rec.partida_id;
+            END IF;
             CONTINUE;
         END IF;
 
         INSERT INTO mes.partida_paso_ejecucion (
-            partida_paso_id, estado, maquina_id, fyh_inicio, cantidad, usr_cre, fyh_cre
+            partida_paso_id, estado, maquina_id, fyh_inicio, cantidad_rollos, usr_cre, fyh_cre
         ) VALUES (
             v_paso_id, 'EN_PROCESO', rec.maquina_id, v_fyh_inicio, rec.rollos, NULL, v_fyh_inicio
         ) RETURNING id INTO v_ejecucion_id;
@@ -201,7 +266,20 @@ BEGIN
         END IF;
 
         UPDATE mes.partida_paso_ejecucion
-        SET estado = 'COMPLETADO', fyh_fin = v_fyh_fin, fyh_mod = NOW()
+        SET estado   = 'COMPLETADO',
+            fyh_fin  = v_fyh_fin,
+            fyh_mod  = NOW(),
+            -- last step: registrar_produccion already set peso_kg; preserve it.
+            -- non-last step: prorate total input weight by this run's roll fraction.
+            peso_kg  = CASE WHEN v_is_last_step THEN peso_kg
+                            ELSE (SELECT ROUND(
+                                     SUM(l.cantidad) * rec.rollos
+                                     / NULLIF(COUNT(pc.lote_id)::numeric, 0), 4)
+                                  FROM mes.partida_componente pc
+                                  JOIN inventario.lote l ON l.id = pc.lote_id
+                                  WHERE pc.partida_id = rec.partida_id
+                                    AND pc.lote_id IS NOT NULL)
+                       END
         WHERE id = v_ejecucion_id;
 
         UPDATE mes.partida_paso SET estado = 'COMPLETADO', fyh_mod = NOW() WHERE id = v_paso_id;
@@ -210,7 +288,7 @@ BEGIN
     END LOOP;
 
     -- ═══════════════════════════════════════════════════════════════════════════
-    -- PERCHADO  (percha sheet — 28/05 to 05/06)
+    -- PERCHADO  (percha sheet — 28/05 to 19/06)
     --
     -- Step 1: ensure one paso per distinct partida (skip reworks)
     -- Step 2: bulk-insert all ejecuciones (re-run safe via fyh_inicio guard)
@@ -227,7 +305,14 @@ BEGIN
         FROM (VALUES
             (5094::bigint),(4700),(5233),(5231),(5234),(5232),(5229),
             (5243),(6392),(5230),(5242),(5238),(5235),(5239),(5240),
-            (5241),(5236),(5941),(5943),(5940),(5942),(5196),(5175),(5968)
+            (5241),(5236),(5941),(5943),(5940),(5942),(5196),(5175),(5968),
+            (5991),(5986),(5988),(4714),(4715),(5177),
+            (5987),(5993),(5989),(5992),
+            (5995),(6107),(5990),
+            (6100),(6102),(6099),(6101),(5985),(5174),(5994),(6095),(6096),
+            (6085),(6084),(6088),(6083),(6094),(6087),(6090),(6108),(6091),
+            (6086),(6145),(6144),(6146),(6143),(6147),(6106),(6089),
+            (4969),(6105),(6093)
         ) v(partida_id)
         WHERE EXISTS     (SELECT 1 FROM mes.partida WHERE id = v.partida_id)
           AND NOT EXISTS (SELECT 1 FROM mes.partida WHERE partida_origen_id = v.partida_id)
@@ -259,7 +344,7 @@ BEGIN
     INSERT INTO mes.partida_paso_ejecucion (
         partida_paso_id, estado, maquina_id,
         fyh_inicio, fyh_fin,
-        cantidad, pases,
+        cantidad_rollos, pases, peso_kg,
         usr_cre, fyh_cre
     )
     SELECT
@@ -273,6 +358,10 @@ BEGIN
         END,
         r.rollos,
         r.pases,
+        (SELECT ROUND(SUM(l.cantidad) * r.rollos / NULLIF(COUNT(pc.lote_id)::numeric, 0), 4)
+         FROM mes.partida_componente pc
+         JOIN inventario.lote l ON l.id = pc.lote_id
+         WHERE pc.partida_id = r.partida_id AND pc.lote_id IS NOT NULL),
         NULL,
         (r.fecha_inicio + r.hora_inicio + INTERVAL '5 hours')::TIMESTAMPTZ
     FROM (VALUES
@@ -310,7 +399,62 @@ BEGIN
         -- ── 05/06 ──────────────────────────────────────────────────────────
         (5196::bigint, DATE '2026-06-05', TIME '09:30', DATE '2026-06-05', TIME '11:00', 16::numeric, 2::smallint),
         (5175::bigint, DATE '2026-06-05', TIME '11:00', DATE '2026-06-05', TIME '15:00', 19::numeric, 3::smallint),
-        (5968::bigint, DATE '2026-06-05', TIME '15:00', DATE '2026-06-05', TIME '17:00', 16::numeric, 2::smallint)
+        (5968::bigint, DATE '2026-06-05', TIME '15:00', DATE '2026-06-05', TIME '17:00', 16::numeric, 2::smallint),
+        -- ── 11/06 ──────────────────────────────────────────────────────────
+        (5991::bigint, DATE '2026-06-11', TIME '10:00', DATE '2026-06-11', TIME '12:00', 20::numeric, 2::smallint),
+        (5986::bigint, DATE '2026-06-11', TIME '13:00', DATE '2026-06-11', TIME '14:50', 20::numeric, 2::smallint),
+        (5988::bigint, DATE '2026-06-11', TIME '15:00', DATE '2026-06-11', TIME '16:50', 20::numeric, 2::smallint),
+        -- ── 12/06 ── (row without partida 09:00–12:00 skipped) ─────────────
+        (4714::bigint, DATE '2026-06-12', TIME '13:00', DATE '2026-06-12', TIME '14:30', 10::numeric, 2::smallint),
+        (4714::bigint, DATE '2026-06-12', TIME '14:30', DATE '2026-06-12', TIME '16:00', 10::numeric, 2::smallint),
+        (4715::bigint, DATE '2026-06-12', TIME '16:00', DATE '2026-06-12', TIME '17:30', 10::numeric, 2::smallint),
+        (4715::bigint, DATE '2026-06-12', TIME '17:30', DATE '2026-06-12', TIME '18:30', 10::numeric, 2::smallint),
+        (5177::bigint, DATE '2026-06-12', TIME '18:30', DATE '2026-06-12', TIME '20:00', 20::numeric, 2::smallint),
+        -- ── 13/06 ──────────────────────────────────────────────────────────
+        (5987::bigint, DATE '2026-06-13', TIME '07:30', DATE '2026-06-13', TIME '10:00', 20::numeric, 2::smallint),
+        (5993::bigint, DATE '2026-06-13', TIME '10:00', DATE '2026-06-13', TIME '12:30', 20::numeric, 2::smallint),
+        (5989::bigint, DATE '2026-06-13', TIME '13:30', DATE '2026-06-13', TIME '15:30', 20::numeric, 2::smallint),
+        (5992::bigint, DATE '2026-06-13', TIME '15:30', DATE '2026-06-13', TIME '18:50', 20::numeric, 2::smallint),
+        -- ── 15/06 ── (6103 has no times — skipped) ─────────────────────────
+        (5995::bigint, DATE '2026-06-15', TIME '13:00', DATE '2026-06-15', TIME '15:00', 20::numeric, 2::smallint),
+        (6107::bigint, DATE '2026-06-15', TIME '15:00', DATE '2026-06-15', TIME '17:00', 20::numeric, 2::smallint),
+        (5990::bigint, DATE '2026-06-15', TIME '17:00', DATE '2026-06-15', TIME '19:00', 20::numeric, 2::smallint),
+        -- ── 16/06 block A ───────────────────────────────────────────────────
+        (6100::bigint, DATE '2026-06-16', TIME '08:55', DATE '2026-06-16', TIME '10:47', 20::numeric, 2::smallint),
+        (6102::bigint, DATE '2026-06-16', TIME '10:47', DATE '2026-06-16', TIME '13:16', 20::numeric, 2::smallint),
+        (6099::bigint, DATE '2026-06-16', TIME '13:16', DATE '2026-06-16', TIME '15:12', 20::numeric, 2::smallint),
+        (6101::bigint, DATE '2026-06-16', TIME '15:12', DATE '2026-06-16', TIME '17:30', 20::numeric, 2::smallint),
+        (5985::bigint, DATE '2026-06-16', TIME '17:30', DATE '2026-06-16', TIME '19:00', 20::numeric, 2::smallint),
+        -- ── 16/06 block B (overlaps block A — same machine id, different client runs) ──
+        (5174::bigint, DATE '2026-06-16', TIME '08:00', DATE '2026-06-16', TIME '10:00', 20::numeric, 2::smallint),
+        (5994::bigint, DATE '2026-06-16', TIME '10:00', DATE '2026-06-16', TIME '13:00', 20::numeric, 2::smallint),
+        (6095::bigint, DATE '2026-06-16', TIME '13:00', DATE '2026-06-16', TIME '15:00', 20::numeric, 2::smallint),
+        (6096::bigint, DATE '2026-06-16', TIME '15:00', DATE '2026-06-16', TIME '17:00', 20::numeric, 2::smallint),
+        -- ── 17/06 block A ───────────────────────────────────────────────────
+        (6085::bigint, DATE '2026-06-17', TIME '08:30', DATE '2026-06-17', TIME '10:41', 20::numeric, 2::smallint),
+        (6084::bigint, DATE '2026-06-17', TIME '10:41', DATE '2026-06-18', TIME '02:30', 20::numeric, 2::smallint), -- midnight cross
+        (6088::bigint, DATE '2026-06-18', TIME '02:30', DATE '2026-06-18', TIME '04:29', 20::numeric, 2::smallint),
+        (6083::bigint, DATE '2026-06-18', TIME '04:29', DATE '2026-06-18', TIME '06:32', 20::numeric, 2::smallint),
+        -- ── 17/06 block B ───────────────────────────────────────────────────
+        (6094::bigint, DATE '2026-06-17', TIME '19:10', DATE '2026-06-17', TIME '21:30', 20::numeric, 2::smallint),
+        (6087::bigint, DATE '2026-06-17', TIME '21:30', DATE '2026-06-18', TIME '00:30', 20::numeric, 2::smallint), -- midnight cross
+        (6090::bigint, DATE '2026-06-18', TIME '00:30', DATE '2026-06-18', TIME '02:30', 20::numeric, 2::smallint),
+        (6108::bigint, DATE '2026-06-18', TIME '02:30', DATE '2026-06-18', TIME '04:30', 20::numeric, 2::smallint),
+        (6091::bigint, DATE '2026-06-18', TIME '04:30', DATE '2026-06-18', TIME '06:35', 20::numeric, 2::smallint),
+        -- ── 18/06 block A ───────────────────────────────────────────────────
+        (6086::bigint, DATE '2026-06-18', TIME '07:20', DATE '2026-06-18', TIME '10:00', 20::numeric, 2::smallint),
+        (6145::bigint, DATE '2026-06-18', TIME '10:00', DATE '2026-06-18', TIME '13:08', 20::numeric, 2::smallint),
+        (6144::bigint, DATE '2026-06-18', TIME '13:08', DATE '2026-06-18', TIME '15:00', 20::numeric, 2::smallint),
+        (6146::bigint, DATE '2026-06-18', TIME '15:00', DATE '2026-06-18', TIME '17:10', 20::numeric, 2::smallint),
+        -- ── 18/06 block B ───────────────────────────────────────────────────
+        (6143::bigint, DATE '2026-06-18', TIME '19:10', DATE '2026-06-18', TIME '22:10', 20::numeric, 2::smallint),
+        (6147::bigint, DATE '2026-06-18', TIME '22:10', DATE '2026-06-19', TIME '01:00', 20::numeric, 2::smallint), -- midnight cross
+        (6106::bigint, DATE '2026-06-19', TIME '01:00', DATE '2026-06-19', TIME '03:30', 20::numeric, 2::smallint),
+        (6089::bigint, DATE '2026-06-19', TIME '03:30', DATE '2026-06-19', TIME '05:50', 20::numeric, 2::smallint),
+        -- ── 19/06 ───────────────────────────────────────────────────────────
+        (4969::bigint, DATE '2026-06-19', TIME '07:50', DATE '2026-06-19', TIME '11:14', 20::numeric, 3::smallint),
+        (6105::bigint, DATE '2026-06-19', TIME '10:00', DATE '2026-06-20', TIME '01:00', 20::numeric, 3::smallint), -- midnight cross
+        (6093::bigint, DATE '2026-06-20', TIME '01:00', DATE '2026-06-20', TIME '16:30', 20::numeric, 3::smallint)
     ) r(partida_id, fecha_inicio, hora_inicio, fecha_fin, hora_fin, rollos, pases)
     JOIN mes.partida_paso pp
         ON pp.partida_id = r.partida_id AND pp.operacion_id = v_perch_op_id
@@ -333,7 +477,14 @@ BEGIN
     FROM (VALUES
         (5094::bigint),(4700),(5233),(5231),(5234),(5232),(5229),
         (5243),(6392),(5230),(5242),(5238),(5235),(5239),(5240),
-        (5241),(5236),(5941),(5943),(5940),(5942),(5196),(5175),(5968)
+        (5241),(5236),(5941),(5943),(5940),(5942),(5196),(5175),(5968),
+        (5991),(5986),(5988),(4714),(4715),(5177),
+        (5987),(5993),(5989),(5992),
+        (5995),(6107),(5990),
+        (6100),(6102),(6099),(6101),(5985),(5174),(5994),(6095),(6096),
+        (6085),(6084),(6088),(6083),(6094),(6087),(6090),(6108),(6091),
+        (6086),(6145),(6144),(6146),(6143),(6147),(6106),(6089),
+        (4969),(6105),(6093)
     ) v(partida_id)
     WHERE pp.partida_id = v.partida_id
       AND pp.operacion_id = v_perch_op_id
@@ -348,7 +499,14 @@ BEGIN
             (5163::bigint),(5209),(5179),
             (5094),(4700),(5233),(5231),(5234),(5232),(5229),
             (5243),(6392),(5230),(5242),(5238),(5235),(5239),(5240),
-            (5241),(5236),(5941),(5943),(5940),(5942),(5196),(5175),(5968)
+            (5241),(5236),(5941),(5943),(5940),(5942),(5196),(5175),(5968),
+            (5991),(5986),(5988),(4714),(4715),(5177),
+            (5987),(5993),(5989),(5992),
+            (5995),(6107),(5990),
+            (6100),(6102),(6099),(6101),(5985),(5174),(5994),(6095),(6096),
+            (6085),(6084),(6088),(6083),(6094),(6087),(6090),(6108),(6091),
+            (6086),(6145),(6144),(6146),(6143),(6147),(6106),(6089),
+            (4969),(6105),(6093)
         ) v(partida_id)
         WHERE EXISTS     (SELECT 1 FROM mes.partida WHERE id = v.partida_id)
           AND NOT EXISTS (SELECT 1 FROM mes.partida WHERE partida_origen_id = v.partida_id)
@@ -368,7 +526,7 @@ SELECT
     m.nombre                                  AS maquina,
     pe.fyh_inicio AT TIME ZONE 'America/Lima' AS inicio_local,
     pe.fyh_fin    AT TIME ZONE 'America/Lima' AS fin_local,
-    pe.cantidad                               AS rollos,
+    pe.cantidad_rollos                        AS rollos,
     pe.pases,
     p.estado_produccion
 FROM mes.partida_paso pp
@@ -380,7 +538,12 @@ WHERE pp.partida_id IN (
     5163,5209,5179,
     5094,4700,5233,5231,5234,5232,5229,5243,6392,5230,
     5242,5238,5235,5239,5240,5241,5236,5941,5943,5940,5942,
-    5196,5175,5968
+    5196,5175,5968,5991,5986,5988,4714,4715,5177,
+            5987,5993,5989,5992,5995,6107,5990,
+            6100,6102,6099,6101,5985,5174,5994,6095,6096,
+            6085,6084,6088,6083,6094,6087,6090,6108,6091,
+            6086,6145,6144,6146,6143,6147,6106,6089,
+            4969,6105,6093
 )
 ORDER BY pp.partida_id, o.codigo, pe.fyh_inicio;
 

@@ -21,20 +21,29 @@
 --   chemicals. We therefore only count PROD_CONSUMO whose item is an INSUMO
 --   (EXISTS item_insumo_detalle). Roll consumption is ignored.
 --
--- EGRESS AMOUNT (mirrors mes.generar_receta exactly):
+-- EGRESS AMOUNT (mirrors mes.generar_receta AFTER the patch-28 kg fix):
 --   peso          = SUM(lote.cantidad) of the partida's rolls (real weighed kg)
 --   rb            = COALESCE(partida_paso.relacion_bano_objetivo, maquina.relacion_bano)
 --   peso_volumen  = GREATEST(peso, maquina.capacidad_min_kg)        -- floor to drum min
 --   volumen       = peso_volumen * rb
---   per insumo:
---     medida 'g/L' →  receta_cantidad * volumen        [* factor_stock]
---     medida '%'   →  receta_cantidad * peso * 10       [* factor_stock]
---   The version WITH factor_stock equals partida_componente.cantidad_reservada
---   (what the system reserved). The version WITHOUT is generar_receta's display
---   value. The backfill posts the WITH-factor_stock value — verify below.
+--   per insumo, in KG (÷1000 — see UNIT NOTE):
+--     medida 'g/L' →  receta_cantidad * volumen   * factor_stock / 1000
+--     medida '%'   →  receta_cantidad * peso * 10  * factor_stock / 1000
+--
+--   UNIT NOTE (grams → kg): the recipe formula yields GRAMS. Before patch 28
+--   (28_kg_consumo_precision.sql) generar_receta returned that grams value mislabeled
+--   as kg, and the frontend round-tripped it into the consumption payload AS kg with
+--   no ÷1000 — so runs registered in that era hold egress 1000× too large. The fix
+--   makes generar_receta return true kg; the ledger is now NUMERIC(15,7). This report
+--   and the backfill BOTH compute true kg (÷1000) so the numbers you review match what
+--   gets posted. factor_stock is kept (diluted-insumo concern deferred — see backfill).
+--
+--   cantidad_reservada is shown only as a cross-check: it is MIXED-UNIT (grams for
+--   rows written pre-patch-28, kg after), so the backfill does NOT read it.
 --
 -- LAVADO_MAQUINA amount (mirrors finalizar_lavado_maquina):
---   Fixed: SUM(lavado_maquina_paso_insumo.cantidad) per item. No scaling, no factor.
+--   Fixed: SUM(lavado_maquina_paso_insumo.cantidad) per item. Computed server-side,
+--   never round-tripped through the frontend → unaffected by the grams/kg bug.
 --
 -- ─────────────────────────────────────────────────────────────────────────────
 -- EDIT THE WINDOW HERE (the "first weeks live"). Used by every section below.
@@ -134,11 +143,11 @@ JOIN mes.partida p       ON p.id = s.partida_id
 ORDER BY s.fyh_inicio, s.ejecucion_id;
 
 
--- A2. Per-insumo computed egress (the numbers the backfill will post)
---     egreso_con_factor  → posted by backfill (stock units)
---     egreso_sin_factor  → generar_receta display value (recipe units)
---     reservada          → partida_componente.cantidad_reservada cross-check
---     flag_mismatch      → reservada present but differs from computed
+-- A2. Per-insumo computed egress in KG (the numbers the backfill will post)
+--     egreso_kg          → posted by backfill (= recipe grams * factor_stock ÷ 1000)
+--     egreso_sin_factor_kg → same without factor_stock (diluted-insumo divergence)
+--     reservada_raw      → partida_componente.cantidad_reservada (MIXED-UNIT cross-
+--                          check: grams pre-patch-28, kg after — not used by backfill)
 WITH params AS (
     SELECT '2026-01-01'::timestamptz AS win_ini,
            '2026-04-01'::timestamptz AS win_fin
@@ -186,13 +195,13 @@ insumos AS (
            c.peso, c.volumen,
            SUM(rtpi.cantidad) AS receta_cantidad,
            ROUND(CASE iid.medida
-                     WHEN 'g/L' THEN SUM(rtpi.cantidad) * c.volumen
-                     WHEN '%'   THEN SUM(rtpi.cantidad) * c.peso * 10
-                 END, 4)                                   AS egreso_sin_factor,
+                     WHEN 'g/L' THEN SUM(rtpi.cantidad) * c.volumen / 1000
+                     WHEN '%'   THEN SUM(rtpi.cantidad) * c.peso * 10 / 1000
+                 END, 7)                                   AS egreso_sin_factor_kg,
            ROUND(CASE iid.medida
-                     WHEN 'g/L' THEN SUM(rtpi.cantidad) * c.volumen * iid.factor_stock
-                     WHEN '%'   THEN SUM(rtpi.cantidad) * c.peso * 10 * iid.factor_stock
-                 END, 4)                                   AS egreso_con_factor
+                     WHEN 'g/L' THEN SUM(rtpi.cantidad) * c.volumen * iid.factor_stock / 1000
+                     WHEN '%'   THEN SUM(rtpi.cantidad) * c.peso * 10 * iid.factor_stock / 1000
+                 END, 7)                                   AS egreso_kg
     FROM ctx c
     JOIN receta.tenido_paso        rtp  ON rtp.receta_id = c.receta_id
     JOIN receta.tenido_paso_insumo rtpi ON rtpi.paso_id  = rtp.id
@@ -211,14 +220,16 @@ SELECT
     i.medida,
     i.factor_stock,
     i.receta_cantidad,
-    i.egreso_sin_factor,
-    i.egreso_con_factor,
-    pc.cantidad_reservada              AS reservada,
-    CASE WHEN pc.cantidad_reservada IS NOT NULL
-          AND ROUND(pc.cantidad_reservada,4) <> i.egreso_con_factor
-         THEN '⚠' END                  AS flag_mismatch,
+    i.egreso_sin_factor_kg,
+    i.egreso_kg,
+    pc.cantidad_reservada              AS reservada_raw,
+    -- reservada_raw is mixed-unit: ≈ egreso_kg*1000 if it was written in grams
+    -- (pre-patch-28), or ≈ egreso_kg if already in kg. Use only as a sanity glance.
+    CASE WHEN pc.cantidad_reservada IS NOT NULL THEN
+        ROUND(pc.cantidad_reservada / NULLIF(i.egreso_kg,0), 1)
+    END                                AS reservada_sobre_egreso,
     iv.precio_promedio,
-    ROUND(i.egreso_con_factor * COALESCE(iv.precio_promedio,0), 2) AS costo_estimado
+    ROUND(i.egreso_kg * COALESCE(iv.precio_promedio,0), 2) AS costo_estimado
 FROM insumos i
 JOIN item it ON it.id = i.item_id
 LEFT JOIN mes.partida_componente pc
@@ -344,19 +355,17 @@ ctx AS (
         GROUP BY s2.ejecucion_id) pz ON pz.ejecucion_id = s.ejecucion_id
 ),
 tenido_lines AS (
+    -- KG, identical to the backfill (recipe grams * factor_stock ÷ 1000; no reservada)
     SELECT c.fyh_evento, rtpi.item_id,
-           COALESCE(
-             pc.cantidad_reservada,
-             ROUND(CASE iid.medida
-                       WHEN 'g/L' THEN SUM(rtpi.cantidad) * c.volumen * iid.factor_stock
-                       WHEN '%'   THEN SUM(rtpi.cantidad) * c.peso * 10 * iid.factor_stock
-                   END, 4)) AS cantidad
+           ROUND(CASE iid.medida
+                     WHEN 'g/L' THEN SUM(rtpi.cantidad) * c.volumen * iid.factor_stock / 1000
+                     WHEN '%'   THEN SUM(rtpi.cantidad) * c.peso * 10 * iid.factor_stock / 1000
+                 END, 7) AS cantidad
     FROM ctx c
     JOIN receta.tenido_paso        rtp  ON rtp.receta_id = c.receta_id
     JOIN receta.tenido_paso_insumo rtpi ON rtpi.paso_id  = rtp.id
     JOIN item_insumo_detalle       iid  ON iid.item_id   = rtpi.item_id
-    LEFT JOIN mes.partida_componente pc ON pc.partida_paso_id = c.paso_id AND pc.item_id = rtpi.item_id
-    GROUP BY c.fyh_evento, rtpi.item_id, iid.medida, iid.factor_stock, c.volumen, c.peso, pc.cantidad_reservada
+    GROUP BY c.fyh_evento, rtpi.item_id, iid.medida, iid.factor_stock, c.volumen, c.peso
 ),
 lavado_lines AS (
     SELECT COALESCE(lm.fyh_inicio, lm.fyh_fin) AS fyh_evento, lmpi.item_id,

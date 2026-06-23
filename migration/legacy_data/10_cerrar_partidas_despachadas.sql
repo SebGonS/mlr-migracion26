@@ -11,7 +11,7 @@
 --   output is the partida being CERRADA/CANCELADA (see 08_views.sql line ~1326):
 --       AND COALESCE(p.estado_produccion,'CREADA') NOT IN ('CERRADA','CANCELADA')
 --   These partidas are stuck at TECO (production complete) because the despacho
---   migration posted guias/movements directly and never advanced estado_comercial
+--   migration posted entregas/movements directly and never advanced estado_comercial
 --   / estado_facturacion — so mes.cerrar_partida's three-axis gate can't close them.
 --
 -- FIX (legacy backfill — same precedent as 11_data_migration closing 'Despachado'

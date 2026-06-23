@@ -6,7 +6,7 @@
 --   1. Reopen partida (CERRADA → EN_PRODUCCION)
 --   2. Create output lotes linked to ejecucion 7766 (enables Path A QC)
 --   3. Post PROD_ING movements + insert lote_saldo directly (trigger skips NULL ubicacion)
---   4. lote_rollo_detalle inherits guia/os anchor + origin link from input lotes
+--   4. lote_rollo_detalle inherits entrega/os anchor + origin link from input lotes
 
 DO $$
 DECLARE
@@ -67,7 +67,7 @@ BEGIN
             l.item_id,
             l.propietario_id,
             l.cantidad,
-            lrd.guia_remision_id,
+            lrd.entrega_id,
             lrd.orden_servicio_id,
             lrd.flg_tenido
         FROM mes.partida_componente           pc
@@ -95,12 +95,12 @@ BEGIN
             SET cantidad_actual = inventario.lote_saldo.cantidad_actual + EXCLUDED.cantidad_actual;
 
         INSERT INTO inventario.lote_rollo_detalle(
-            lote_id, guia_remision_id, orden_servicio_id, origen_lote_id,
+            lote_id, entrega_id, orden_servicio_id, origen_lote_id,
             ancho, malla, rendimiento, color_x_cliente_id, tenido_id,
             flg_tenido, flg_antipilling
         )
         VALUES (
-            v_new_lote_id, r.guia_remision_id, r.orden_servicio_id, r.input_lote_id,
+            v_new_lote_id, r.entrega_id, r.orden_servicio_id, r.input_lote_id,
             v_ancho, v_malla, v_rendimiento, v_cxc_id, v_tenido_id,
             r.flg_tenido, v_antipilling
         );

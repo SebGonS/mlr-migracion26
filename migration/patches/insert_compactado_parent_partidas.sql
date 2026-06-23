@@ -78,31 +78,48 @@ BEGIN
     -- ═══════════════════════════════════════════════════════════════════════════
     FOR rec IN
         SELECT partida::bigint AS partida_id, v_mersan_id::int AS maquina_id,
-               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha, hora_inicio::time, hora_final::time AS hora_fin, rollos::numeric
+               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha,
+               REPLACE(hora_inicio, '.', ':')::time AS hora_inicio,
+               REPLACE(hora_final,  '.', ':')::time AS hora_fin,
+               rollos::numeric
         FROM public.mersan
         WHERE partida::text ~ '^\d+$'
           AND partida::bigint IN (3888, 5062)
-          AND hora_inicio IS NOT NULL AND hora_final IS NOT NULL
+          AND fecha IS NOT NULL AND TRIM(fecha) != ''
         UNION ALL
         SELECT partida::bigint, v_serteks1_id::int,
-               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha, hora_inicio::time, hora_final::time AS hora_fin, rollos::numeric
+               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha,
+               REPLACE(hora_inicio, '.', ':')::time AS hora_inicio,
+               REPLACE(hora_final,  '.', ':')::time AS hora_fin,
+               rollos::numeric
         FROM public.sertks1
         WHERE partida::text ~ '^\d+$'
           AND partida::bigint IN (3888, 4410)
-          AND hora_inicio IS NOT NULL AND hora_final IS NOT NULL
+          AND fecha IS NOT NULL AND TRIM(fecha) != ''
         UNION ALL
         SELECT partida::bigint, v_serteks2_id::int,
-               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha, hora_inicio::time, hora_final::time AS hora_fin, rollos::numeric
+               TO_DATE(fecha, 'DD/MM/YYYY') AS fecha,
+               REPLACE(hora_inicio, '.', ':')::time AS hora_inicio,
+               REPLACE(hora_final,  '.', ':')::time AS hora_fin,
+               rollos::numeric
         FROM public.sertks2
         WHERE partida::text ~ '^\d+$'
           AND partida::bigint IN (4390, 4566, 4955, 5234, 5906, 5907)
-          AND hora_inicio IS NOT NULL AND hora_final IS NOT NULL
+          AND fecha IS NOT NULL AND TRIM(fecha) != ''
           -- exclude runs already registered inside reworks (confirmed alineado=true)
           AND NOT (partida::bigint = 5906 AND TO_DATE(fecha, 'DD/MM/YYYY') = DATE '2026-06-02')
           AND NOT (partida::bigint = 5907 AND TO_DATE(fecha, 'DD/MM/YYYY') = DATE '2026-06-03')
     LOOP
+        IF rec.hora_inicio IS NULL THEN
+            RAISE NOTICE 'COMPACTADO (parent): partida % sin hora_inicio — revisar manualmente (hora_fin=%)', rec.partida_id, rec.hora_fin;
+            CONTINUE;
+        END IF;
+
         v_fyh_inicio := ((rec.fecha + rec.hora_inicio)::TIMESTAMP + INTERVAL '5 hours')::TIMESTAMPTZ;
-        v_fyh_fin    := ((rec.fecha + rec.hora_fin)::TIMESTAMP   + INTERVAL '5 hours')::TIMESTAMPTZ;
+        v_fyh_fin    := CASE WHEN rec.hora_fin IS NOT NULL
+                             THEN ((rec.fecha + rec.hora_fin)::TIMESTAMP + INTERVAL '5 hours')::TIMESTAMPTZ
+                             ELSE NULL
+                        END;
 
         IF NOT EXISTS (SELECT 1 FROM mes.partida WHERE id = rec.partida_id) THEN
             RAISE NOTICE 'COMPACTADO (parent): partida % no existe en mes.partida — saltado', rec.partida_id;
@@ -127,16 +144,28 @@ BEGIN
         END IF;
 
         -- re-run guard
-        IF EXISTS (
-            SELECT 1 FROM mes.partida_paso_ejecucion
-            WHERE partida_paso_id = v_paso_id AND fyh_inicio = v_fyh_inicio
-        ) THEN
-            RAISE NOTICE 'COMPACTADO (parent): ejecucion ya existe para paso %, partida % — saltado', v_paso_id, rec.partida_id;
+        SELECT id INTO v_ejecucion_id FROM mes.partida_paso_ejecucion
+        WHERE partida_paso_id = v_paso_id AND fyh_inicio = v_fyh_inicio;
+
+        IF FOUND THEN
+            IF v_fyh_fin IS NOT NULL THEN
+                UPDATE mes.partida_paso_ejecucion
+                SET estado = 'COMPLETADO', fyh_fin = v_fyh_fin, fyh_mod = NOW()
+                WHERE id = v_ejecucion_id AND fyh_fin IS NULL;
+                IF FOUND THEN
+                    UPDATE mes.partida_paso SET estado = 'COMPLETADO', fyh_mod = NOW() WHERE id = v_paso_id;
+                    RAISE NOTICE 'COMPACTADO (parent): ejecucion % partida % — fyh_fin parcheado', v_ejecucion_id, rec.partida_id;
+                ELSE
+                    RAISE NOTICE 'COMPACTADO (parent): ejecucion ya completa para paso %, partida % — saltado', v_paso_id, rec.partida_id;
+                END IF;
+            ELSE
+                RAISE NOTICE 'COMPACTADO (parent): ejecucion ya existe para paso %, partida % — saltado', v_paso_id, rec.partida_id;
+            END IF;
             CONTINUE;
         END IF;
 
         INSERT INTO mes.partida_paso_ejecucion (
-            partida_paso_id, estado, maquina_id, fyh_inicio, cantidad, usr_cre, fyh_cre
+            partida_paso_id, estado, maquina_id, fyh_inicio, cantidad_rollos, usr_cre, fyh_cre
         ) VALUES (
             v_paso_id, 'EN_PROCESO', rec.maquina_id, v_fyh_inicio, rec.rollos, NULL, v_fyh_inicio
         ) RETURNING id INTO v_ejecucion_id;
@@ -176,7 +205,18 @@ BEGIN
         END IF;
 
         UPDATE mes.partida_paso_ejecucion
-        SET estado = 'COMPLETADO', fyh_fin = v_fyh_fin, fyh_mod = NOW()
+        SET estado   = 'COMPLETADO',
+            fyh_fin  = v_fyh_fin,
+            fyh_mod  = NOW(),
+            peso_kg  = CASE WHEN v_is_last_step THEN peso_kg
+                            ELSE (SELECT ROUND(
+                                     SUM(l.cantidad) * rec.rollos
+                                     / NULLIF(COUNT(pc.lote_id)::numeric, 0), 4)
+                                  FROM mes.partida_componente pc
+                                  JOIN inventario.lote l ON l.id = pc.lote_id
+                                  WHERE pc.partida_id = rec.partida_id
+                                    AND pc.lote_id IS NOT NULL)
+                       END
         WHERE id = v_ejecucion_id;
 
         UPDATE mes.partida_paso SET estado = 'COMPLETADO', fyh_mod = NOW() WHERE id = v_paso_id;
@@ -221,16 +261,28 @@ BEGIN
             ) RETURNING id INTO v_paso_id;
         END IF;
 
-        IF EXISTS (
-            SELECT 1 FROM mes.partida_paso_ejecucion
-            WHERE partida_paso_id = v_paso_id AND fyh_inicio = v_fyh_inicio
-        ) THEN
-            RAISE NOTICE 'COMPACTADO (5944): ejecucion ya existe — saltado';
+        SELECT id INTO v_ejecucion_id FROM mes.partida_paso_ejecucion
+        WHERE partida_paso_id = v_paso_id AND fyh_inicio = v_fyh_inicio;
+
+        IF FOUND THEN
+            IF v_fyh_fin IS NOT NULL THEN
+                UPDATE mes.partida_paso_ejecucion
+                SET estado = 'COMPLETADO', fyh_fin = v_fyh_fin, fyh_mod = NOW()
+                WHERE id = v_ejecucion_id AND fyh_fin IS NULL;
+                IF FOUND THEN
+                    UPDATE mes.partida_paso SET estado = 'COMPLETADO', fyh_mod = NOW() WHERE id = v_paso_id;
+                    RAISE NOTICE 'COMPACTADO (5944): ejecucion % — fyh_fin parcheado', v_ejecucion_id;
+                ELSE
+                    RAISE NOTICE 'COMPACTADO (5944): ejecucion ya completa — saltado';
+                END IF;
+            ELSE
+                RAISE NOTICE 'COMPACTADO (5944): ejecucion ya existe — saltado';
+            END IF;
             CONTINUE;
         END IF;
 
         INSERT INTO mes.partida_paso_ejecucion (
-            partida_paso_id, estado, maquina_id, fyh_inicio, cantidad, usr_cre, fyh_cre
+            partida_paso_id, estado, maquina_id, fyh_inicio, cantidad_rollos, usr_cre, fyh_cre
         ) VALUES (
             v_paso_id, 'EN_PROCESO', rec.maquina_id, v_fyh_inicio, rec.rollos, NULL, v_fyh_inicio
         ) RETURNING id INTO v_ejecucion_id;
@@ -270,7 +322,18 @@ BEGIN
         END IF;
 
         UPDATE mes.partida_paso_ejecucion
-        SET estado = 'COMPLETADO', fyh_fin = v_fyh_fin, fyh_mod = NOW()
+        SET estado   = 'COMPLETADO',
+            fyh_fin  = v_fyh_fin,
+            fyh_mod  = NOW(),
+            peso_kg  = CASE WHEN v_is_last_step THEN peso_kg
+                            ELSE (SELECT ROUND(
+                                     SUM(l.cantidad) * rec.rollos
+                                     / NULLIF(COUNT(pc.lote_id)::numeric, 0), 4)
+                                  FROM mes.partida_componente pc
+                                  JOIN inventario.lote l ON l.id = pc.lote_id
+                                  WHERE pc.partida_id = 5944
+                                    AND pc.lote_id IS NOT NULL)
+                       END
         WHERE id = v_ejecucion_id;
 
         UPDATE mes.partida_paso SET estado = 'COMPLETADO', fyh_mod = NOW() WHERE id = v_paso_id;
@@ -303,7 +366,7 @@ SELECT
     m.nombre                                  AS maquina,
     pe.fyh_inicio AT TIME ZONE 'America/Lima' AS inicio_local,
     pe.fyh_fin    AT TIME ZONE 'America/Lima' AS fin_local,
-    pe.cantidad                               AS rollos,
+    pe.cantidad_rollos                        AS rollos,
     p.estado_produccion
 FROM mes.partida_paso pp
 JOIN mes.operacion o               ON o.id  = pp.operacion_id

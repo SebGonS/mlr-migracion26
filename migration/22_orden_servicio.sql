@@ -39,29 +39,29 @@ CREATE TABLE doc.orden_servicio_detalle (
     UNIQUE (orden_servicio_id, linea)
 );
 
--- ── doc.guia_remision_detalle — add linea (backfill from migration 07) ───
-ALTER TABLE doc.guia_remision_detalle
+-- ── doc.entrega_detalle — add linea (backfill from migration 07) ───
+ALTER TABLE doc.entrega_detalle
     ADD COLUMN IF NOT EXISTS linea SMALLINT NOT NULL DEFAULT 1;
-ALTER TABLE doc.guia_remision_detalle
+ALTER TABLE doc.entrega_detalle
     ADD COLUMN IF NOT EXISTS n_rollos SMALLINT;
 
-UPDATE doc.guia_remision_detalle grd
+UPDATE doc.entrega_detalle grd
 SET linea = sub.rn
 FROM (
-    SELECT id, ROW_NUMBER() OVER (PARTITION BY guia_remision_id ORDER BY id) AS rn
-    FROM doc.guia_remision_detalle
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY entrega_id ORDER BY id) AS rn
+    FROM doc.entrega_detalle
 ) sub
 WHERE grd.id = sub.id;
 
 DO $$ BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'uq_guia_remision_detalle_linea'
+        SELECT 1 FROM pg_constraint WHERE conname = 'uq_entrega_detalle_linea'
     ) THEN
-        ALTER TABLE doc.guia_remision_detalle
-            ADD CONSTRAINT uq_guia_remision_detalle_linea UNIQUE (guia_remision_id, linea);
+        ALTER TABLE doc.entrega_detalle
+            ADD CONSTRAINT uq_entrega_detalle_linea UNIQUE (entrega_id, linea);
     END IF;
 END $$;
--- SELECT * FROM doc.guia_remision_detalle
+-- SELECT * FROM doc.entrega_detalle
 -- ── inventario.lote_rollo_detalle — add orden_servicio_id ─────
 ALTER TABLE inventario.lote_rollo_detalle
     ADD COLUMN orden_servicio_id BIGINT REFERENCES doc.orden_servicio(id);
@@ -81,15 +81,15 @@ ALTER TABLE inventario.lote_rollo_detalle
 --     SELECT id FROM doc.orden_servicio
 --     WHERE serie = 'LEGADO' AND correlativo = 0
 -- )
--- WHERE guia_remision_id IS NULL
+-- WHERE entrega_id IS NULL
 --   AND orden_servicio_id IS NULL;
 
 -- ── Enforce at least one origin doc per roll ──────────────────
 ALTER TABLE inventario.lote_rollo_detalle
     ADD CONSTRAINT chk_lrd_doc_origen
-    CHECK (guia_remision_id IS NOT NULL OR orden_servicio_id IS NOT NULL);
+    CHECK (entrega_id IS NOT NULL OR orden_servicio_id IS NOT NULL);
 
--- ── Index (mirrors existing guia_remision_id index) ───────────
+-- ── Index (mirrors existing entrega_id index) ───────────
 CREATE INDEX idx_lrd_orden_servicio_id
     ON inventario.lote_rollo_detalle (orden_servicio_id)
     WHERE orden_servicio_id IS NOT NULL;

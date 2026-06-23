@@ -1,10 +1,10 @@
 -- ═══════════════════════════════════════════════════════════════════════════════
--- LEGACY DISPATCH: create headless delivery guias + egress shipped output lotes
+-- LEGACY DISPATCH: create headless delivery entregas + egress shipped output lotes
 --
 -- PURPOSE
 --   For every legacy dispatch EVENT (public.despacho row), egress the number of
 --   dyed production-output rolls it declares (rollos_total) from new-system stock,
---   creating a delivery document (doc.guia_remision) and posting the egress
+--   creating a delivery document (doc.entrega) and posting the egress
 --   movements so those lotes LEAVE inventory (lote_saldo → 0).
 --
 -- COUNTS-DRIVEN (not stock-sweeping)
@@ -40,13 +40,13 @@
 -- OWNERSHIP SPLIT (per lote, same rule as get_despacho_partida):
 --   propietario_id = 1  → VENTA_EGRESO    (MLR-owned roll sold)        → VENTA_EGR
 --   propietario_id ≠ 1  → DESPACHO_CLIENTE (client-owned, serviced)    → SERV_EGR
---   guia.tercero_id = partida.tercero_id. If an event's picked rolls are mixed
---   ownership it produces one headless guia per tipo (rare; normally uniform).
+--   entrega.tercero_id = partida.tercero_id. If an event's picked rolls are mixed
+--   ownership it produces one headless entrega per tipo (rare; normally uniform).
 --
--- HEADLESS GUIAS (serie/correlativo NULL)
+-- HEADLESS entregaS (serie/correlativo NULL)
 --   The real guía de remisión number lived only in the legacy paper/external
---   system; we don't have it. doc.guia_remision allows serie/correlativo NULL
---   (chk_guia_doc_fields: both-or-neither) precisely for these movement events.
+--   system; we don't have it. doc.entrega allows serie/correlativo NULL
+--   (chk_entrega_doc_fields: both-or-neither) precisely for these movement events.
 --   Because NULLs don't participate in UNIQUE(tercero,serie,correlativo,tipo),
 --   that key can no longer dedup — so IDEMPOTENCY is re-anchored on the legacy
 --   despacho.id, stamped into each egress movement's observacion as
@@ -105,7 +105,7 @@ SELECT
          ELSE 'ok' END                      AS nota,
     EXISTS (
         SELECT 1 FROM inventario.item_movimientos im
-        WHERE im.documento_tipo = 'guia_remision'
+        WHERE im.documento_tipo = 'entrega'
           AND im.observacion LIKE 'MIG-DESP despacho=' || d.id || ' partida=%'
     )                                       AS ya_migrado
 FROM public.despacho d
@@ -142,10 +142,10 @@ LIMIT 100;
 -- ═══════════════════════════════════════════════════════════════════════════════
 DO $$
 DECLARE
-    v_guia_id      BIGINT;
+    v_entrega_id      BIGINT;
     v_doc_mov_id   BIGINT;
     v_fecha_mov    TIMESTAMPTZ;
-    v_n_guias      INT := 0;
+    v_n_entregas      INT := 0;
     v_n_lotes      INT := 0;
     v_n_events     INT := 0;
     v_n_short      INT := 0;
@@ -169,7 +169,7 @@ BEGIN
         l.item_id,
         sa.ubicacion_id,
         sa.cantidad_disponible                 AS cantidad,
-        grt.id                                 AS guia_tipo_id,
+        grt.id                                 AS entrega_tipo_id,
         grt.item_movimiento_tipo_id            AS mov_tipo_id
     FROM mes.partida mp
     JOIN mes.partida_paso pp            ON pp.partida_id = mp.id
@@ -178,7 +178,7 @@ BEGIN
                                         AND l.documento_id   = pe.id
     JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id AND lrd.flg_tenido = true
     JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
-    JOIN doc.guia_remision_tipo grt
+    JOIN doc.entrega_tipo grt
         ON grt.codigo = CASE WHEN l.propietario_id = 1 THEN 'VENTA_EGRESO' ELSE 'DESPACHO_CLIENTE' END
     WHERE mp.estado_produccion != 'CANCELADA';
 
@@ -202,7 +202,7 @@ BEGIN
           AND EXISTS (SELECT 1 FROM tmp_pool p WHERE p.legacy_partida_id = d.partida_id)
           AND NOT EXISTS (
               SELECT 1 FROM inventario.item_movimientos im
-              WHERE im.documento_tipo = 'guia_remision'
+              WHERE im.documento_tipo = 'entrega'
                 AND im.observacion LIKE 'MIG-DESP despacho=' || d.id || ' partida=%'
           )
         ORDER BY d.partida_id, d.fecha_despacho, d.id
@@ -230,35 +230,35 @@ BEGIN
         v_fecha_mov := ev.fecha_despacho_ts;   -- true legacy despacho date (cutoff trigger overridden)
         v_obs := 'MIG-DESP despacho=' || ev.despacho_id || ' partida=' || ev.legacy_partida_id;
 
-        -- one headless guia per ownership tipo present in the picked set (normally one)
+        -- one headless entrega per ownership tipo present in the picked set (normally one)
         FOR grp IN
-            SELECT tercero_id, guia_tipo_id, mov_tipo_id
+            SELECT tercero_id, entrega_tipo_id, mov_tipo_id
             FROM tmp_pick
-            GROUP BY tercero_id, guia_tipo_id, mov_tipo_id
+            GROUP BY tercero_id, entrega_tipo_id, mov_tipo_id
         LOOP
-            INSERT INTO doc.guia_remision (
-                guia_remision_tipo_id, tercero_id, serie, correlativo,
+            INSERT INTO doc.entrega (
+                entrega_tipo_id, tercero_id, serie, correlativo,
                 fecha_emision, fecha_recepcion, usr_cre, fyh_cre
             ) VALUES (
-                grp.guia_tipo_id, grp.tercero_id, NULL, NULL,
+                grp.entrega_tipo_id, grp.tercero_id, NULL, NULL,
                 ev.fecha_despacho_ts, NULL, NULL, ev.fecha_despacho_ts
             )
-            RETURNING id INTO v_guia_id;
-            v_n_guias := v_n_guias + 1;
+            RETURNING id INTO v_entrega_id;
+            v_n_entregas := v_n_entregas + 1;
 
-            -- shared posting document id for this guia's egress movements
+            -- shared posting document id for this entrega's egress movements
             SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
 
-            -- guia detalle (one line per roll)
-            INSERT INTO doc.guia_remision_detalle (
-                guia_remision_id, linea, item_id, lote_id, ubicacion_id, cantidad, n_rollos
+            -- entrega detalle (one line per roll)
+            INSERT INTO doc.entrega_detalle (
+                entrega_id, linea, item_id, lote_id, ubicacion_id, cantidad, n_rollos
             )
             SELECT
-                v_guia_id,
+                v_entrega_id,
                 ROW_NUMBER() OVER (ORDER BY c.lote_id)::smallint,
                 c.item_id, c.lote_id, c.ubicacion_id, c.cantidad, 1
             FROM tmp_pick c
-            WHERE c.guia_tipo_id = grp.guia_tipo_id;
+            WHERE c.entrega_tipo_id = grp.entrega_tipo_id;
 
             -- egress movements (origen set, destino NULL → debit; saldo trigger zeroes stock)
             INSERT INTO inventario.item_movimientos (
@@ -269,11 +269,11 @@ BEGIN
             SELECT
                 v_doc_mov_id, c.item_id, c.lote_id, grp.mov_tipo_id,
                 c.ubicacion_id, NULL,
-                c.cantidad, v_fecha_mov, 'guia_remision', v_guia_id, v_obs
+                c.cantidad, v_fecha_mov, 'entrega', v_entrega_id, v_obs
             FROM tmp_pick c
-            WHERE c.guia_tipo_id = grp.guia_tipo_id;
+            WHERE c.entrega_tipo_id = grp.entrega_tipo_id;
 
-            v_n_lotes := v_n_lotes + (SELECT COUNT(*) FROM tmp_pick WHERE guia_tipo_id = grp.guia_tipo_id);
+            v_n_lotes := v_n_lotes + (SELECT COUNT(*) FROM tmp_pick WHERE entrega_tipo_id = grp.entrega_tipo_id);
         END LOOP;
 
         -- consume picked rolls so later events don't reuse them
@@ -286,7 +286,7 @@ BEGIN
     RAISE NOTICE '═══════════ DESPACHO EGRESO LEGACY ═══════════';
     RAISE NOTICE '  eventos procesados   : %', v_n_events;
     RAISE NOTICE '  eventos con faltante : %', v_n_short;
-    RAISE NOTICE '  guias creadas        : %', v_n_guias;
+    RAISE NOTICE '  entregas creadas        : %', v_n_entregas;
     RAISE NOTICE '  lotes egresados      : %', v_n_lotes;
     RAISE NOTICE '  fecha egreso         : real (legacy despacho date)';
     RAISE NOTICE '═══════════════════════════════════════════════';
@@ -298,20 +298,20 @@ $$;
 -- SECTION 2 — VALIDATION
 -- ═══════════════════════════════════════════════════════════════════════════════
 
--- 2a. Migration guias created (headless: serie IS NULL), identified via the
+-- 2a. Migration entregas created (headless: serie IS NULL), identified via the
 --     despacho-id token on their egress movements.
 SELECT
     grt.codigo                              AS tipo,
-    COUNT(DISTINCT gr.id)                   AS guias,
+    COUNT(DISTINCT gr.id)                   AS entregas,
     COUNT(grd.id)                           AS lineas,
     ROUND(SUM(grd.cantidad)::numeric, 2)    AS kg_total
-FROM doc.guia_remision gr
-JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
-LEFT JOIN doc.guia_remision_detalle grd ON grd.guia_remision_id = gr.id
+FROM doc.entrega gr
+JOIN doc.entrega_tipo grt ON grt.id = gr.entrega_tipo_id
+LEFT JOIN doc.entrega_detalle grd ON grd.entrega_id = gr.id
 WHERE gr.id IN (
     SELECT DISTINCT documento_id
     FROM inventario.item_movimientos
-    WHERE documento_tipo = 'guia_remision'
+    WHERE documento_tipo = 'entrega'
       AND observacion LIKE 'MIG-DESP despacho=%'
 )
 GROUP BY grt.codigo
@@ -328,7 +328,7 @@ egresado AS (
         substring(im.observacion FROM 'partida=([0-9]+)')::int AS legacy_partida_id,
         COUNT(*) AS rolls_egresados
     FROM inventario.item_movimientos im
-    WHERE im.documento_tipo = 'guia_remision'
+    WHERE im.documento_tipo = 'entrega'
       AND im.observacion LIKE 'MIG-DESP despacho=%'
     GROUP BY 1
 )
@@ -347,7 +347,7 @@ LIMIT 100;
 SELECT imt.codigo AS mov_tipo, COUNT(*) AS movimientos, ROUND(SUM(im.cantidad)::numeric,2) AS kg
 FROM inventario.item_movimientos im
 JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-WHERE im.documento_tipo = 'guia_remision'
+WHERE im.documento_tipo = 'entrega'
   AND im.observacion LIKE 'MIG-DESP despacho=%'
 GROUP BY imt.codigo
 ORDER BY imt.codigo;

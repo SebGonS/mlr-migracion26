@@ -314,7 +314,7 @@ BEGIN
         ),
         ins_lrd AS (
             -- Stub lote_rollo_detalle for surplus ROLLO lotes found during cuadre.
-            -- No guia_remision_id — these rolls have no ingress document.
+            -- No entrega_id — these rolls have no ingress document.
             INSERT INTO inventario.lote_rollo_detalle (lote_id, flg_tenido)
             SELECT ins_lote.id, false
             FROM ins_lote
@@ -543,10 +543,10 @@ $$;
 -- inventario.registrar_pesaje_produccion
 --
 -- Primary ingress weighing flow. Called after rolls are assigned to a
--- partida (via partida_guia_remision) but BEFORE any production order exists.
+-- partida (via partida_entrega) but BEFORE any production order exists.
 --
 -- Scoped to the full partida — all rolls linked to the partida through its
--- ingress guias are weighed in one call. The client tracks weighing at
+-- ingress entregas are weighed in one call. The client tracks weighing at
 -- partida level ("is partida X already weighed?").
 --
 -- Distributes total weight evenly by roll type:
@@ -715,13 +715,13 @@ $$;
 GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_produccion(BIGINT, NUMERIC, NUMERIC) TO authenticated;
 
 -- ═══════════════════════════════════════════════════════════════
--- inventario.registrar_pesaje_guia  (prorated)
+-- inventario.registrar_pesaje_entrega  (prorated)
 --
 -- Ideal ingress weighing flow. Called when a CLIENTE_ENVIO_PROCESO
--- guia arrives, before any partida assignment or orden creation.
+-- entrega arrives, before any partida assignment or orden creation.
 --
 -- Distributes total weight evenly by roll type across all rolls
--- that arrived on the guia:
+-- that arrived on the entrega:
 --   p_peso_regular → split across non-rib rolls
 --   p_peso_rib     → split across rib rolls
 --   Pass NULL to skip that type.
@@ -730,10 +730,10 @@ GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_produccion(BIGINT, NUMERIC
 -- Idempotent — safe to call again for corrections before any
 -- PROD_CONSUMO movement exists on any roll.
 -- ═══════════════════════════════════════════════════════════════
-DROP FUNCTION IF EXISTS inventario.registrar_pesaje_guia(BIGINT, NUMERIC, NUMERIC);
+DROP FUNCTION IF EXISTS inventario.registrar_pesaje_entrega(BIGINT, NUMERIC, NUMERIC);
 
-CREATE OR REPLACE FUNCTION inventario.registrar_pesaje_guia(
-    p_guia_id       BIGINT,
+CREATE OR REPLACE FUNCTION inventario.registrar_pesaje_entrega(
+    p_entrega_id       BIGINT,
     p_peso_regular  NUMERIC,
     p_peso_rib      NUMERIC
 )
@@ -759,25 +759,25 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM doc.guia_remision WHERE id = p_guia_id) THEN
-        RAISE EXCEPTION 'Guía #% no encontrada.', p_guia_id;
+    IF NOT EXISTS (SELECT 1 FROM doc.entrega WHERE id = p_entrega_id) THEN
+        RAISE EXCEPTION 'Guía #% no encontrada.', p_entrega_id;
     END IF;
 
-    -- Guard: no roll from this guia may already be in production
+    -- Guard: no roll from this entrega may already be in production
     IF EXISTS (
         SELECT 1
         FROM inventario.lote_rollo_detalle lrd
         JOIN inventario.item_movimientos im  ON im.lote_id = lrd.lote_id
         JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-        WHERE lrd.guia_remision_id = p_guia_id
+        WHERE lrd.entrega_id = p_entrega_id
           AND imt.codigo = 'PROD_CONSUMO'
     ) THEN
         RAISE EXCEPTION
             'No se puede modificar pesos de la guía #%: uno o más rollos ya tienen movimientos de producción.',
-            p_guia_id;
+            p_entrega_id;
     END IF;
 
-    -- Count rolls by type that arrived on this guia
+    -- Count rolls by type that arrived on this entrega
     SELECT
         COUNT(*) FILTER (WHERE ird.flg_rib = false),
         COUNT(*) FILTER (WHERE ird.flg_rib = true)
@@ -785,16 +785,16 @@ BEGIN
     FROM inventario.lote_rollo_detalle lrd
     JOIN inventario.lote l      ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
     JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
-    WHERE lrd.guia_remision_id = p_guia_id;
+    WHERE lrd.entrega_id = p_entrega_id;
 
     IF v_cantidad_regular = 0 AND v_cantidad_rib = 0 THEN
-        RAISE EXCEPTION 'La guía #% no tiene rollos asociados.', p_guia_id;
+        RAISE EXCEPTION 'La guía #% no tiene rollos asociados.', p_entrega_id;
     END IF;
     IF p_peso_regular IS NOT NULL AND v_cantidad_regular = 0 THEN
-        RAISE EXCEPTION 'Se proporcionó peso_regular pero la guía #% no tiene rollos regulares.', p_guia_id;
+        RAISE EXCEPTION 'Se proporcionó peso_regular pero la guía #% no tiene rollos regulares.', p_entrega_id;
     END IF;
     IF p_peso_rib IS NOT NULL AND v_cantidad_rib = 0 THEN
-        RAISE EXCEPTION 'Se proporcionó peso_rib pero la guía #% no tiene rollos rib.', p_guia_id;
+        RAISE EXCEPTION 'Se proporcionó peso_rib pero la guía #% no tiene rollos rib.', p_entrega_id;
     END IF;
 
     v_peso_por_regular := CASE WHEN v_cantidad_regular > 0 AND p_peso_regular IS NOT NULL
@@ -818,7 +818,7 @@ BEGIN
         JOIN inventario.lote l             ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
         JOIN item_rollo_detalle ird        ON ird.item_id = l.item_id
         JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
-        WHERE lrd.guia_remision_id = p_guia_id
+        WHERE lrd.entrega_id = p_entrega_id
           AND CASE WHEN ird.flg_rib THEN v_peso_por_rib     IS NOT NULL
                    ELSE                  v_peso_por_regular IS NOT NULL END
     ),
@@ -845,7 +845,7 @@ BEGIN
             CASE WHEN r.peso_nuevo < r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
             CASE WHEN r.peso_nuevo > r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
             ABS(r.peso_nuevo - r.peso_anterior),
-            'guia_remision', p_guia_id
+            'entrega', p_entrega_id
         FROM rolls r
         JOIN pesajes p ON p.lote_id = r.lote_id
         WHERE r.peso_nuevo <> r.peso_anterior
@@ -858,15 +858,15 @@ BEGIN
     GET DIAGNOSTICS v_updated = ROW_COUNT;
 
     INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('registrar_pesaje_guia', v_usr_id, jsonb_build_object(
-        'guia_id', p_guia_id,
+    VALUES ('registrar_pesaje_entrega', v_usr_id, jsonb_build_object(
+        'entrega_id', p_entrega_id,
         'peso_regular', p_peso_regular,
         'peso_rib', p_peso_rib
     ));
 
     RETURN format(
         'Pesaje registrado para guía #%s: %s rollos actualizados (%s regulares × %s kg, %s rib × %s kg).',
-        p_guia_id, v_updated,
+        p_entrega_id, v_updated,
         COALESCE(v_cantidad_regular, 0), COALESCE(v_peso_por_regular::text, 'sin cambio'),
         COALESCE(v_cantidad_rib, 0),     COALESCE(v_peso_por_rib::text,     'sin cambio')
     );
@@ -874,25 +874,25 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in registrar_pesaje_guia - User: %, guia: %, Error: %, Detail: %',
-              v_usr_id, p_guia_id, v_message, v_detail;
+    RAISE LOG 'Error in registrar_pesaje_entrega - User: %, entrega: %, Error: %, Detail: %',
+              v_usr_id, p_entrega_id, v_message, v_detail;
     RAISE;
 END;
 $$;
 
 -- ═══════════════════════════════════════════════════════════════
--- inventario.registrar_pesaje_guia_individual  (per-roll)
+-- inventario.registrar_pesaje_entrega_individual  (per-roll)
 --
 -- Ideal ingress weighing — individual roll weights.
 -- Called when each roll is weighed separately at ingress.
 --
 -- p_pesos: [{lote_id, peso_kg}, ...]
--- All lotes must belong to the same guia (validated).
+-- All lotes must belong to the same entrega (validated).
 -- ═══════════════════════════════════════════════════════════════
-DROP FUNCTION IF EXISTS inventario.registrar_pesaje_guia_individual(BIGINT, JSONB);
+DROP FUNCTION IF EXISTS inventario.registrar_pesaje_entrega_individual(BIGINT, JSONB);
 
-CREATE OR REPLACE FUNCTION inventario.registrar_pesaje_guia_individual(
-    p_guia_id   BIGINT,
+CREATE OR REPLACE FUNCTION inventario.registrar_pesaje_entrega_individual(
+    p_entrega_id   BIGINT,
     p_pesos     JSONB   -- [{lote_id: int, peso_kg: numeric}, ...]
 )
 RETURNS text
@@ -913,21 +913,21 @@ BEGIN
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM doc.guia_remision WHERE id = p_guia_id) THEN
-        RAISE EXCEPTION 'Guía #% no encontrada.', p_guia_id;
+    IF NOT EXISTS (SELECT 1 FROM doc.entrega WHERE id = p_entrega_id) THEN
+        RAISE EXCEPTION 'Guía #% no encontrada.', p_entrega_id;
     END IF;
 
-    -- Guard: all submitted lotes must belong to this guia
+    -- Guard: all submitted lotes must belong to this entrega
     IF EXISTS (
         SELECT 1
         FROM jsonb_array_elements(p_pesos) e
         LEFT JOIN inventario.lote_rollo_detalle lrd
                ON lrd.lote_id = (e->>'lote_id')::INT
-              AND lrd.guia_remision_id = p_guia_id
+              AND lrd.entrega_id = p_entrega_id
         WHERE lrd.lote_id IS NULL
     ) THEN
         RAISE EXCEPTION
-            'Uno o más lotes no pertenecen a la guía #%.', p_guia_id;
+            'Uno o más lotes no pertenecen a la guía #%.', p_entrega_id;
     END IF;
 
     -- Guard: no roll may already be in production
@@ -986,7 +986,7 @@ BEGIN
             CASE WHEN r.peso_nuevo < r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
             CASE WHEN r.peso_nuevo > r.peso_anterior THEN r.ubicacion_id ELSE NULL END,
             ABS(r.peso_nuevo - r.peso_anterior),
-            'guia_remision', p_guia_id
+            'entrega', p_entrega_id
         FROM rolls r
         JOIN pesajes p ON p.lote_id = r.lote_id
         WHERE r.peso_nuevo <> r.peso_anterior
@@ -999,35 +999,35 @@ BEGIN
     GET DIAGNOSTICS v_updated = ROW_COUNT;
 
     INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('registrar_pesaje_guia_individual', v_usr_id, jsonb_build_object(
-        'guia_id', p_guia_id,
+    VALUES ('registrar_pesaje_entrega_individual', v_usr_id, jsonb_build_object(
+        'entrega_id', p_entrega_id,
         'pesos', p_pesos
     ));
 
-    RETURN format('Pesaje individual registrado para guía #%s: %s rollos actualizados.', p_guia_id, v_updated);
+    RETURN format('Pesaje individual registrado para guía #%s: %s rollos actualizados.', p_entrega_id, v_updated);
 
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in registrar_pesaje_guia_individual - User: %, guia: %, Error: %, Detail: %',
-              v_usr_id, p_guia_id, v_message, v_detail;
+    RAISE LOG 'Error in registrar_pesaje_entrega_individual - User: %, entrega: %, Error: %, Detail: %',
+              v_usr_id, p_entrega_id, v_message, v_detail;
     RAISE;
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_guia(BIGINT, NUMERIC, NUMERIC)  TO authenticated;
-GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_guia_individual(BIGINT, JSONB)  TO authenticated;
+GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_entrega(BIGINT, NUMERIC, NUMERIC)  TO authenticated;
+GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_entrega_individual(BIGINT, JSONB)  TO authenticated;
 
 -- ═══════════════════════════════════════════════════════════════
 -- inventario.registrar_pesaje_grupo
 --
 -- Called once per grid row after the operator fills in the weighing
--- form. Each row in the grid is a (partida, guia, item) group; the
+-- form. Each row in the grid is a (partida, entrega, item) group; the
 -- operator enters one total weight for that group and the function
 -- prorates it evenly across all rolls in the group.
 --
 -- Mirrors registrar_pesaje_produccion but scoped to a finer group:
---   (partida_id, guia_remision_id, item_id, flg_rib)
+--   (partida_id, entrega_id, item_id, flg_rib)
 -- instead of the full (partida_id, regular/rib) split.
 --
 -- Side-effects (same as every other weighing function):
@@ -1038,7 +1038,7 @@ GRANT EXECUTE ON FUNCTION inventario.registrar_pesaje_guia_individual(BIGINT, JS
 DROP FUNCTION IF EXISTS inventario.registrar_pesaje_grupo(BIGINT, BIGINT, INT, BOOLEAN, NUMERIC);
 CREATE OR REPLACE FUNCTION inventario.registrar_pesaje_grupo(
     p_partida_id        BIGINT,
-    p_guia_remision_id  BIGINT,     -- NULL for MLR-confectioned rolls (no ingress guia)
+    p_entrega_id  BIGINT,     -- NULL for MLR-confectioned rolls (no ingress entrega)
     p_item_id           INT,
     p_flg_rib           BOOLEAN,
     p_peso_total_kg     NUMERIC     -- total kg for the group; prorated evenly per roll
@@ -1081,13 +1081,13 @@ BEGIN
         WHERE pc.partida_id = p_partida_id
           AND l.item_id     = p_item_id
           AND (
-              (p_guia_remision_id IS NULL AND lrd.guia_remision_id IS NULL)
-              OR lrd.guia_remision_id = p_guia_remision_id
+              (p_entrega_id IS NULL AND lrd.entrega_id IS NULL)
+              OR lrd.entrega_id = p_entrega_id
           )
     ) THEN
         RAISE EXCEPTION
             'No se puede pesar el grupo: uno o más rollos ya tienen movimientos de producción (partida #%, item #%, guía %).',
-            p_partida_id, p_item_id, COALESCE(p_guia_remision_id::text, 'sin guía');
+            p_partida_id, p_item_id, COALESCE(p_entrega_id::text, 'sin guía');
     END IF;
 
     -- Count rolls in this group
@@ -1101,14 +1101,14 @@ BEGIN
     WHERE pc.partida_id = p_partida_id
       AND l.item_id     = p_item_id
       AND (
-          (p_guia_remision_id IS NULL AND lrd.guia_remision_id IS NULL)
-          OR lrd.guia_remision_id = p_guia_remision_id
+          (p_entrega_id IS NULL AND lrd.entrega_id IS NULL)
+          OR lrd.entrega_id = p_entrega_id
       );
 
     IF v_count = 0 THEN
         RAISE EXCEPTION
             'No se encontraron rollos para el grupo (partida #%, item #%, guía %, flg_rib %).',
-            p_partida_id, p_item_id, COALESCE(p_guia_remision_id::text, 'sin guía'), p_flg_rib;
+            p_partida_id, p_item_id, COALESCE(p_entrega_id::text, 'sin guía'), p_flg_rib;
     END IF;
 
     v_peso_cada := ROUND(p_peso_total_kg / v_count, 4);
@@ -1134,8 +1134,8 @@ BEGIN
         WHERE pc.partida_id = p_partida_id
           AND l.item_id     = p_item_id
           AND (
-              (p_guia_remision_id IS NULL AND lrd.guia_remision_id IS NULL)
-              OR lrd.guia_remision_id = p_guia_remision_id
+              (p_entrega_id IS NULL AND lrd.entrega_id IS NULL)
+              OR lrd.entrega_id = p_entrega_id
           )
     ),
     pesajes AS (
@@ -1176,7 +1176,7 @@ BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('registrar_pesaje_grupo', v_usr_id, jsonb_build_object(
         'partida_id',       p_partida_id,
-        'guia_remision_id', p_guia_remision_id,
+        'entrega_id', p_entrega_id,
         'item_id',          p_item_id,
         'flg_rib',          p_flg_rib,
         'peso_total_kg',    p_peso_total_kg
@@ -1185,7 +1185,7 @@ BEGIN
     RETURN format(
         'Pesaje registrado: partida #%s, item #%s, guía %s — %s rollos × %s kg (total %s kg).',
         p_partida_id, p_item_id,
-        COALESCE(p_guia_remision_id::text, 'sin guía'),
+        COALESCE(p_entrega_id::text, 'sin guía'),
         v_count, v_peso_cada, p_peso_total_kg
     );
 
@@ -1406,7 +1406,7 @@ GRANT EXECUTE ON FUNCTION inventario.corregir_pesaje_produccion(BIGINT, NUMERIC,
 -- GET MOVIMIENTOS ITEM — full movement ledger for one item
 --   Returns header (stock, MAP price) + chronological movement
 --   timeline with running balance. Polymorphic document context
---   resolved for partida_paso_ejecucion and guia_remision.
+--   resolved for partida_paso_ejecucion and entrega.
 --   Frontend filters by date client-side (dataset is small per item).
 -- ═══════════════════════════════════════════════════════════════
 CREATE OR REPLACE FUNCTION inventario.get_movimientos_item(p_item_id INT)
@@ -1496,9 +1496,9 @@ BEGIN
                                       || '-' || LPAD(p.numero::TEXT, 4, '0'),
                     'operacion',      op.nombre
                 )
-                WHEN 'guia_remision' THEN jsonb_build_object(
-                    'tipo',      'guia',
-                    'guia_id',   gr.id,
+                WHEN 'entrega' THEN jsonb_build_object(
+                    'tipo',      'entrega',
+                    'entrega_id',   gr.id,
                     'numero',    gr.serie || '-' || gr.correlativo,
                     'proveedor', t.nombre
                 )
@@ -1518,10 +1518,10 @@ BEGIN
         LEFT JOIN mes.partida_paso pp ON pp.id = ppe.partida_paso_id
         LEFT JOIN mes.partida      p  ON p.id  = pp.partida_id
         LEFT JOIN mes.operacion    op ON op.id = pp.operacion_id
-        -- guia_remision context
-        LEFT JOIN doc.guia_remision gr
+        -- entrega context
+        LEFT JOIN doc.entrega gr
             ON gr.id = im.documento_id
-           AND im.documento_tipo = 'guia_remision'
+           AND im.documento_tipo = 'entrega'
         LEFT JOIN tercero t ON t.id = gr.tercero_id
         WHERE im.item_id = p_item_id
     ) m;

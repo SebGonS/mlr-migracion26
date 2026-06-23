@@ -1,17 +1,17 @@
 ﻿-- ============================================================
 -- DEPRECATED — COMPRA_INGRESO path replaced by doc.ingresar_compra
---              or doc.crear_guia(compra_id=X) for the guia-in-hand case.
+--              or doc.crear_entrega(compra_id=X) for the entrega-in-hand case.
 --              CLIENTE_ENVIO_PROCESO path is still valid but should be
---              run via doc.crear_guia directly rather than this script.
+--              run via doc.crear_entrega directly rather than this script.
 --              Kept for historical reference only.
 -- ============================================================
--- Ingresar rollos via guia_remision y asignar a partida
+-- Ingresar rollos via entrega y asignar a partida
 --
 -- Use case: rolls arriving from a supplier (COMPRA_INGRESO) or
 -- from a client sending fabric for processing (CLIENTE_ENVIO_PROCESO).
--- Creates the guia header, one lote per roll, lote_rollo_detalle
+-- Creates the entrega header, one lote per roll, lote_rollo_detalle
 -- (billing anchor), partida_componente assignment, and the
--- appropriate ingress movement derived from guia_remision_tipo.
+-- appropriate ingress movement derived from entrega_tipo.
 --
 -- Assumes the partida has no pre-existing roll components for
 -- the items being ingressed (no ON CONFLICT guard needed, but
@@ -21,9 +21,9 @@
 --   v_tipo_codigo   : 'COMPRA_INGRESO' or 'CLIENTE_ENVIO_PROCESO'
 --   v_tercero_id    : NULL for CLIENTE_ENVIO_PROCESO (derived from partida.tercero_id)
 --                     set explicitly for COMPRA_INGRESO (supplier, not on the partida)
---   v_serie         : serie from the physical guia
---   v_correlativo   : correlativo from the physical guia
---   v_fecha_emision : date on the physical guia
+--   v_serie         : serie from the physical entrega
+--   v_correlativo   : correlativo from the physical entrega
+--   v_fecha_emision : date on the physical entrega
 --   v_partida_id    : partida.id these rolls are assigned to
 --   v_prorate       : TRUE  → v_peso_regular / v_peso_rib are TOTALS, divided by n_rollos
 --                     FALSE → v_peso_regular / v_peso_rib are PER-ROLL weights (uniform)
@@ -41,7 +41,7 @@ SELECT id, estado_produccion FROM mes.partida WHERE id = 5229;   -- <- v_partida
 SELECT COUNT(*) FROM mes.partida_componente
 WHERE partida_id = 5229 AND lote_id IS NOT NULL;                 -- expect 0
 */
--- ---5252 guia 2186
+-- ---5252 entrega 2186
 -- SELECT i.id,i.nombre,pd.cantidad,COUNT(*) FROM mes.partida_detalle pd
 -- JOIN item i ON i.id = pd.item_id 
 -- LEFT JOIN mes.partida_componente pc ON pc.partida_id = pd.partida_id
@@ -71,14 +71,14 @@ DECLARE
     v_peso_regular  NUMERIC     := 380.0;                          -- <- CHANGE  total or per-roll kg for regular rolls
     v_peso_rib      NUMERIC     := 18.5;                           -- <- CHANGE  total or per-roll kg for rib rolls (0 if none)
 
-    -- List every (item_id, n_rollos) pair for this guia.
+    -- List every (item_id, n_rollos) pair for this entrega.
     -- Example: ARRAY[(101, 18), (102, 4)]  where 102 is the rib item.
     v_rollos            INT[][]     := ARRAY[
 
                                            ARRAY[254::INT, 19::INT]  ,ARRAY[278::INT, 1::INT]--, --<- CHANGE  [item_id, n_rollos]
                                        ];
 
-    v_guia_id           BIGINT;
+    v_entrega_id           BIGINT;
     v_tipo_id           SMALLINT;
     v_mov_tipo_id       SMALLINT;
     v_propietario_id    INT;
@@ -92,10 +92,10 @@ DECLARE
     i                   INT;
     pair                INT[];
 BEGIN
-    -- Resolve guia tipo and its movement type in one shot
+    -- Resolve entrega tipo and its movement type in one shot
     SELECT grt.id, grt.item_movimiento_tipo_id
     INTO STRICT v_tipo_id, v_mov_tipo_id
-    FROM doc.guia_remision_tipo grt
+    FROM doc.entrega_tipo grt
     WHERE grt.codigo = v_tipo_codigo;
 
     -- Derive tercero + propietario from partida when not supplied explicitly.
@@ -120,29 +120,29 @@ BEGIN
     WHERE alm.codigo = 'ALM_CRU'
     LIMIT 1;
 
-    -- 1. Create guia header (idempotent: skip insert if already exists)
-    INSERT INTO doc.guia_remision (
-        guia_remision_tipo_id, tercero_id, serie, correlativo, fecha_emision
+    -- 1. Create entrega header (idempotent: skip insert if already exists)
+    INSERT INTO doc.entrega (
+        entrega_tipo_id, tercero_id, serie, correlativo, fecha_emision
     )
     VALUES (v_tipo_id, v_tercero_id, v_serie, v_correlativo, v_fecha_emision)
-    ON CONFLICT (tercero_id, serie, correlativo, guia_remision_tipo_id) DO NOTHING
-    RETURNING id INTO v_guia_id;
+    ON CONFLICT (tercero_id, serie, correlativo, entrega_tipo_id) DO NOTHING
+    RETURNING id INTO v_entrega_id;
 
-    IF v_guia_id IS NULL THEN
-        SELECT id INTO STRICT v_guia_id
-        FROM doc.guia_remision
+    IF v_entrega_id IS NULL THEN
+        SELECT id INTO STRICT v_entrega_id
+        FROM doc.entrega
         WHERE tercero_id             = v_tercero_id
           AND serie                  = v_serie
           AND correlativo            = v_correlativo
-          AND guia_remision_tipo_id  = v_tipo_id;
-        RAISE NOTICE 'Reusing existing guia_remision id=% (%-% tipo=%)',
-            v_guia_id, v_serie, v_correlativo, v_tipo_codigo;
+          AND entrega_tipo_id  = v_tipo_id;
+        RAISE NOTICE 'Reusing existing entrega id=% (%-% tipo=%)',
+            v_entrega_id, v_serie, v_correlativo, v_tipo_codigo;
     ELSE
-    RAISE NOTICE 'Created guia_remision id=% (%-% tipo=%)',
-        v_guia_id, v_serie, v_correlativo, v_tipo_codigo;
+    RAISE NOTICE 'Created entrega id=% (%-% tipo=%)',
+        v_entrega_id, v_serie, v_correlativo, v_tipo_codigo;
     END IF;
 
-    -- 2. One doc_movimiento_id groups all roll movements for this guia
+    -- 2. One doc_movimiento_id groups all roll movements for this entrega
     v_doc_mov_id := nextval('inventario.mov_doc_seq');
 
     -- 3. Per item, per roll
@@ -167,14 +167,14 @@ BEGIN
 
         FOR i IN 1 .. v_n_rollos LOOP
 
-            -- a. Lote — tagged to the guia (correct origin, not PARTIDA)
+            -- a. Lote — tagged to the entrega (correct origin, not PARTIDA)
             INSERT INTO inventario.lote (
                 item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre
             )
             VALUES (
                 v_item_id,
-                'guia_remision',
-                v_guia_id,
+                'entrega',
+                v_entrega_id,
                 v_peso_por_rollo,
                 v_propietario_id,
                 NULL
@@ -182,8 +182,8 @@ BEGIN
             RETURNING id INTO v_lote_id;
 
             -- b. Billing anchor
-            INSERT INTO inventario.lote_rollo_detalle (lote_id, guia_remision_id)
-            VALUES (v_lote_id, v_guia_id);
+            INSERT INTO inventario.lote_rollo_detalle (lote_id, entrega_id)
+            VALUES (v_lote_id, v_entrega_id);
 
             -- c. Assign to partida
             INSERT INTO mes.partida_componente (
@@ -212,24 +212,24 @@ BEGIN
                 NULL,             -- external origin, no internal source bin
                 v_ubicacion_id,
                 v_peso_por_rollo,
-                'guia_remision',
-                v_guia_id,
-                'Ingreso via guia ' || v_serie || '-' || v_correlativo
+                'entrega',
+                v_entrega_id,
+                'Ingreso via entrega ' || v_serie || '-' || v_correlativo
                     || ' para partida ' || v_partida_id,
                 NULL
             );
 
-            -- e. One detail row per roll; cantidad = weight of this lote (mirrors crear_guia)
-            INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, lote_id, cantidad)
-            VALUES (v_guia_id, v_item_id, v_lote_id, v_peso_por_rollo)
-            ON CONFLICT (guia_remision_id, item_id, lote_id, ubicacion_id) DO NOTHING;
+            -- e. One detail row per roll; cantidad = weight of this lote (mirrors crear_entrega)
+            INSERT INTO doc.entrega_detalle (entrega_id, item_id, lote_id, cantidad)
+            VALUES (v_entrega_id, v_item_id, v_lote_id, v_peso_por_rollo)
+            ON CONFLICT (entrega_id, item_id, lote_id, ubicacion_id) DO NOTHING;
 
         END LOOP;
 
     END LOOP;
 
-    RAISE NOTICE 'Done. guia_id=%, partida_id=%, doc_mov_id=%',
-        v_guia_id, v_partida_id, v_doc_mov_id;
+    RAISE NOTICE 'Done. entrega_id=%, partida_id=%, doc_mov_id=%',
+        v_entrega_id, v_partida_id, v_doc_mov_id;
 END;
 $$;
 
@@ -241,25 +241,25 @@ SELECT
     l.item_id,
     ird.flg_rib,
     l.cantidad,
-    lrd.guia_remision_id,
+    lrd.entrega_id,
     pc.partida_id
 FROM inventario.lote l
 JOIN inventario.lote_rollo_detalle  lrd ON lrd.lote_id = l.id
 JOIN item_rollo_detalle             ird ON ird.item_id = l.item_id
 JOIN mes.partida_componente         pc  ON pc.lote_id  = l.id
-WHERE l.documento_tipo = 'guia_remision'
-  AND l.documento_id   = <guia_id_from_above>
+WHERE l.documento_tipo = 'entrega'
+  AND l.documento_id   = <entrega_id_from_above>
 ORDER BY ird.flg_rib, l.id;
 
 -- Movements posted:
 SELECT m.item_id, m.lote_id, imt.codigo AS mov_tipo, m.cantidad
 FROM inventario.item_movimientos m
 JOIN inventario.item_movimiento_tipo imt ON imt.id = m.item_movimiento_tipo_id
-WHERE m.documento_tipo = 'guia_remision'
-  AND m.documento_id   = <guia_id_from_above>;
+WHERE m.documento_tipo = 'entrega'
+  AND m.documento_id   = <entrega_id_from_above>;
 
--- guia_remision_detalle:
-SELECT item_id, cantidad FROM doc.guia_remision_detalle
-WHERE guia_remision_id = <guia_id_from_above>;
+-- entrega_detalle:
+SELECT item_id, cantidad FROM doc.entrega_detalle
+WHERE entrega_id = <entrega_id_from_above>;
 */
 

@@ -3,7 +3,7 @@
 -- ----------------------------------------------------------------------------
 -- The sales/commercial side is deliberately scaled down: MLR does NOT emit
 -- facturas de venta (no SUNAT FE; the incumbent system owns emitted docs).
--- Dispatch and devoluciones are accepted as headless guias (movement only).
+-- Dispatch and devoluciones are accepted as headless entregas (movement only).
 --
 -- What we still want is "what was partida X priced at" — the per-kg rate only.
 -- NOT amounts: no cantidad × precio, no IGV, no totals. That math stays out of

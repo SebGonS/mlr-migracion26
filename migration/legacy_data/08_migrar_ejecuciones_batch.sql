@@ -137,7 +137,7 @@ SELECT
     pub.rib,
     pub.peso_rollos,
     pub.peso_rib,
-    pub.guia
+    pub.entrega
 FROM mes.partida mp
 JOIN public.partida pub ON pub.id = mp.id
 WHERE mp.estado_produccion != 'CANCELADA'

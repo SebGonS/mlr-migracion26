@@ -111,22 +111,22 @@ CREATE TRIGGER trg_bi_partida_detalle_audit BEFORE INSERT ON mes.partida_detalle
 CREATE TRIGGER trg_bu_partida_detalle_audit BEFORE UPDATE ON mes.partida_detalle
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
------GUIA REMISION TIPO
-CREATE TRIGGER trg_bi_guia_remision_tipo_audit BEFORE INSERT ON doc.guia_remision_tipo
+-----entrega REMISION TIPO
+CREATE TRIGGER trg_bi_entrega_tipo_audit BEFORE INSERT ON doc.entrega_tipo
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_guia_remision_tipo_audit BEFORE UPDATE ON doc.guia_remision_tipo
+CREATE TRIGGER trg_bu_entrega_tipo_audit BEFORE UPDATE ON doc.entrega_tipo
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
------GUIA REMISION
-CREATE TRIGGER trg_biud_guia_remision_audit BEFORE INSERT OR UPDATE OR DELETE ON doc.guia_remision
+-----entrega REMISION
+CREATE TRIGGER trg_biud_entrega_audit BEFORE INSERT OR UPDATE OR DELETE ON doc.entrega
     FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
-CREATE TRIGGER trg_bi_guia_remision_audit BEFORE INSERT ON doc.guia_remision
+CREATE TRIGGER trg_bi_entrega_audit BEFORE INSERT ON doc.entrega
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_cre_fields();
-CREATE TRIGGER trg_bu_guia_remision_audit BEFORE UPDATE ON doc.guia_remision
+CREATE TRIGGER trg_bu_entrega_audit BEFORE UPDATE ON doc.entrega
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_mod_fields();
 
----GUIA REMISION DETALLE
-CREATE TRIGGER trg_biud_guia_remision_detalle_audit BEFORE INSERT OR UPDATE OR DELETE ON doc.guia_remision_detalle
+---entrega REMISION DETALLE
+CREATE TRIGGER trg_biud_entrega_detalle_audit BEFORE INSERT OR UPDATE OR DELETE ON doc.entrega_detalle
     FOR EACH ROW EXECUTE FUNCTION audit.fn_audit_row();
 
 ---LOTE

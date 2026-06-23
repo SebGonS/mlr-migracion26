@@ -11,8 +11,8 @@ CREATE TRIGGER trg_bu_partida_elm
     BEFORE UPDATE ON mes.partida
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_elm_fields();
 
-CREATE TRIGGER trg_bu_guia_remision_elm
-    BEFORE UPDATE ON doc.guia_remision
+CREATE TRIGGER trg_bu_entrega_elm
+    BEFORE UPDATE ON doc.entrega
     FOR EACH ROW EXECUTE FUNCTION public.fn_trg_set_elm_fields();
 
 CREATE TRIGGER trg_bu_lote_elm

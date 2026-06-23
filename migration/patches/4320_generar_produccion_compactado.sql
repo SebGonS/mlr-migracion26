@@ -6,7 +6,7 @@
 --   1. Reopen partida (CERRADA → EN_PROCESO)
 --   2. Create 12 output lotes linked to ejecucion 7863 (enables Path A QC)
 --   3. Post PROD_ING movements → trigger updates lote_saldo
---   4. lote_rollo_detalle inherits guia/os anchor + origin link from input lotes
+--   4. lote_rollo_detalle inherits entrega/os anchor + origin link from input lotes
 -- Note: input roll SERV_ING/SERV_EGR history left intact — to be cleaned up in
 --       a separate history migration pass.
 
@@ -74,7 +74,7 @@ BEGIN
             l.item_id,
             l.propietario_id,
             l.cantidad,
-            lrd.guia_remision_id,
+            lrd.entrega_id,
             lrd.orden_servicio_id,
             lrd.flg_tenido   -- inherit: compactado doesn't change dye state
         FROM mes.partida_componente      pc
@@ -116,14 +116,14 @@ BEGIN
 
         INSERT INTO inventario.lote_rollo_detalle(
             lote_id,
-            guia_remision_id, orden_servicio_id, origen_lote_id,
+            entrega_id, orden_servicio_id, origen_lote_id,
             ancho, malla, rendimiento,
             color_x_cliente_id, tenido_id,
             flg_tenido, flg_antipilling
         )
         VALUES (
             v_new_lote_id,
-            r.guia_remision_id, r.orden_servicio_id, r.input_lote_id,
+            r.entrega_id, r.orden_servicio_id, r.input_lote_id,
             v_ancho, v_malla, v_rendimiento,
             v_cxc_id, v_tenido_id,
             r.flg_tenido, v_antipilling

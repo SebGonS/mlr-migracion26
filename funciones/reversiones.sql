@@ -28,11 +28,11 @@
 -- ───────────────────────────────────────────────────────────────
 -- inventario.anular_pesaje
 -- Reverts the weighing of a single input roll.
--- Resets lote.cantidad to the guia-declared weight, posts a
+-- Resets lote.cantidad to the entrega-declared weight, posts a
 -- counter-movement, and removes the pesaje row.
 --
 -- Guard: roll must not have entered production (no PROD_CONSUMO).
--- Guard: lote must have a guia_remision_detalle link (origin weight).
+-- Guard: lote must have a entrega_detalle link (origin weight).
 -- ───────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION inventario.anular_pesaje(
     p_lote_id   BIGINT,
@@ -63,12 +63,12 @@ BEGIN
         RAISE EXCEPTION 'Se requiere motivo para anular el pesaje.';
     END IF;
 
-    -- Resolve lote + declared weight from guia ingress
+    -- Resolve lote + declared weight from entrega ingress
     SELECT l.item_id, l.cantidad, grd.cantidad
     INTO   v_item_id, v_peso_actual, v_peso_declarado
     FROM   inventario.lote l
     JOIN   inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-    JOIN   doc.guia_remision_detalle grd     ON grd.id = lrd.guia_remision_detalle_id
+    JOIN   doc.entrega_detalle grd     ON grd.id = lrd.entrega_detalle_id
     WHERE  l.id = p_lote_id AND l.fyh_elm IS NULL;
 
     IF NOT FOUND THEN

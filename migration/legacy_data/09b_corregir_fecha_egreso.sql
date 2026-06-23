@@ -18,7 +18,7 @@
 -- it after, then force fecha_hora back to the true legacy date. The disable is
 -- transactional — any failure rolls it back automatically.
 --
--- guia.fecha_emision already holds the true date and is left unchanged.
+-- entrega.fecha_emision already holds the true date and is left unchanged.
 -- lote_saldo is unaffected (the saldo trigger is AFTER INSERT only, not UPDATE).
 -- Idempotent: only moves rows whose fecha_hora still differs from the true date.
 -- ═══════════════════════════════════════════════════════════════════════════════
@@ -43,7 +43,7 @@ SELECT a.codigo AS almacen, COUNT(*) AS movimientos
 FROM inventario.item_movimientos im
 JOIN inventario.ubicacion u ON u.id = im.origen_ubicacion_id
 JOIN inventario.almacen a   ON a.id = u.almacen_id
-WHERE im.documento_tipo = 'guia_remision'
+WHERE im.documento_tipo = 'entrega'
   AND im.observacion LIKE 'MIG-DESP despacho=%'
 GROUP BY a.codigo;
 
@@ -55,7 +55,7 @@ SELECT
 FROM inventario.item_movimientos im
 JOIN public.despacho d
   ON d.id = (substring(im.observacion FROM 'despacho=([0-9]+)'))::int
-WHERE im.documento_tipo = 'guia_remision'
+WHERE im.documento_tipo = 'entrega'
   AND im.observacion LIKE 'MIG-DESP despacho=%'
 GROUP BY 1, 2
 ORDER BY 1;
@@ -79,7 +79,7 @@ BEGIN
         FROM inventario.item_movimientos im2
         JOIN public.despacho d
           ON d.id = (substring(im2.observacion FROM 'despacho=([0-9]+)'))::int
-        WHERE im2.documento_tipo = 'guia_remision'
+        WHERE im2.documento_tipo = 'entrega'
           AND im2.observacion LIKE 'MIG-DESP despacho=%'
     ) tgt
     WHERE im.id = tgt.id
@@ -104,7 +104,7 @@ $$;
 -- true despacho dates, no longer clustered on the old corte+1min timestamp).
 SELECT im.fecha_hora, COUNT(*) AS movimientos
 FROM inventario.item_movimientos im
-WHERE im.documento_tipo = 'guia_remision'
+WHERE im.documento_tipo = 'entrega'
   AND im.observacion LIKE 'MIG-DESP despacho=%'
 GROUP BY im.fecha_hora
 ORDER BY im.fecha_hora;

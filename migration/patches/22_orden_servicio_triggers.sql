@@ -1,5 +1,5 @@
 -- Audit triggers for doc.orden_servicio + doc.orden_servicio_detalle
--- Mirrors the pattern on doc.guia_remision / doc.guia_remision_detalle.
+-- Mirrors the pattern on doc.entrega / doc.entrega_detalle.
 
 CREATE TRIGGER trg_biud_orden_servicio_audit
     BEFORE INSERT OR UPDATE OR DELETE ON doc.orden_servicio

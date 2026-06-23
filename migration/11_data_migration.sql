@@ -589,7 +589,7 @@ FROM inventario.almacen a
 WHERE a.codigo = 'ALM_PT';
 
 -- ============================================================================
--- TERCERO POPULATION (must precede partida, factura_proveedor, compra, guia_remision)
+-- TERCERO POPULATION (must precede partida, factura_proveedor, compra, entrega)
 -- ============================================================================
 -- id=1 (MLR) already inserted in step 5 with codigo='MLR'.
 -- Proveedores and clientes are entirely separate populations (no entity in both).
@@ -1564,6 +1564,17 @@ INSERT INTO mes.operacion (codigo, nombre, requiere_receta)
 VALUES ('ANTIPILLING', 'Antipilling', false)
 ON CONFLICT (codigo) DO NOTHING;
 
+-- PREPARADO operacion — added directly on the live DB 2026-05-26 (prep-before-teñido
+-- routed step; the "preparado" tablet station). Backported here so a fresh rebuild
+-- matches prod. requiere_maquina mirrors the live value (true) — revisit if prep is manual.
+INSERT INTO mes.operacion (codigo, nombre, requiere_receta, requiere_maquina)
+VALUES ('PREPARADO', 'Preparado', false, true)
+ON CONFLICT (codigo) DO NOTHING;
+
+-- LAVADO_HIDRO.requiere_receta was flipped true→false on the live DB 2026-05-28;
+-- reconcile the migration 07 seed (which still says true) so rebuilds don't regress it.
+UPDATE mes.operacion SET requiere_receta = false WHERE codigo = 'LAVADO_HIDRO';
+
 -- ============================================================================
 -- MIGRAR LOTES Y MOVIMIENTOS INICIALES DE INSUMOS
 -- ============================================================================
@@ -1589,7 +1600,7 @@ ON CONFLICT (codigo) DO NOTHING;
     -- SELECT si.* FROM salida_inventario si
     -- JOIN cuadre_inventario ci ON si.fyh_solicitud_tz = ci.fecha_cierre
 
---COMRPAS con mas de una guia de remision/ingreso
+--COMRPAS con mas de una entrega de remision/ingreso
 -- SELECT c.id FROM compra LEFT JOIN 
 -- WITH ec as(SELECT DISTINCT ei.id entrada_inventario_id,ci.compra_id FROM entrada_inventario ei
 -- JOIN entrada_inventario_detalle eid ON ei.id=eid.entrada_inventario_id
@@ -1599,10 +1610,10 @@ ON CONFLICT (codigo) DO NOTHING;
 --     FROM ec
 --     GROUP BY 1
 --     HAVING COUNT(*) > 1
--- )SELECT guia_remision FROM compra WHERE id IN (SELECT compra_id FROM repetidas)
+-- )SELECT entrega FROM compra WHERE id IN (SELECT compra_id FROM repetidas)
 ----NOTA, terminar de migrar entradas, diseño
 ---1. lotes ---primero lotes con mismo id de inventario, luego updatear los ids de documento
----2.guias
+---2.entregas
 ---3. movimientos
 ---LUEGO RECIEN SALIDAS
 
@@ -1681,12 +1692,12 @@ ON CONFLICT (item_id) DO UPDATE
 -- ============================================================================
 -- MIGRAR COMPRAS
 -- ============================================================================
--- Must run BEFORE the guia block below: doc.compra_guia_remision has FK → doc.compra(id)
--- and the guia block already inserts into doc.compra_guia_remision using public.compra.id
+-- Must run BEFORE the entrega block below: doc.compra_entrega has FK → doc.compra(id)
+-- and the entrega block already inserts into doc.compra_entrega using public.compra.id
 -- values, so doc.compra must exist with preserved IDs first.
 --
 -- Legacy shape (public schema):
---   compra            → header with factura text, guia_remision text, payment all-in-one
+--   compra            → header with factura text, entrega text, payment all-in-one
 --   compra_x_insumo   → line items (insumo_id, cantidad, precio_x_kg_usd)
 --   letra_compra      → payment letters tied to compra_id
 --
@@ -1694,7 +1705,7 @@ ON CONFLICT (item_id) DO UPDATE
 --   factura_proveedor → split out from compra; letras now hang off factura, not compra
 --   compra            → lightweight header; linked to facturas via doc.compra_factura_proveedor junction
 --   compra_detalle    → line items; insumo_id resolved → item_id directly (item.id = insumo.id)
---   compra_guia_remision → junction written by the guia block below; no action needed here
+--   compra_entrega → junction written by the entrega block below; no action needed here
 --   letra             → re-linked from compra → factura_proveedor chain
 -- ============================================================================
 
@@ -1868,8 +1879,8 @@ ON CONFLICT (letra_id, factura_proveedor_id) DO NOTHING;
 
 -- ============================================================================
 
-----CONFIGURAR GUIAS y
--- TRUNCATE TABLE doc.guia_remision_detalle,doc.guia_remision,doc.compra_guia_remision;
+----CONFIGURAR entregaS y
+-- TRUNCATE TABLE doc.entrega_detalle,doc.entrega,doc.compra_entrega;
 WITH 
 ec as(
     SELECT  DISTINCT inv.id inventario_id,ci.compra_id,eid.entrada_inventario_id,inv.insumo_x_proveedor_id,inv.cantidad FROM entrada_inventario ei
@@ -1887,25 +1898,25 @@ ec as(
 compra_data AS (
     SELECT 
         inv.*,
-        c.guia_remision,
+        c.entrega,
         c.proveedor_id,  -- adjust column name as needed
         c.fecha_remision,         -- adjust column name as needed
         c.fyh_cre + INTERVAL '5 hours' fyh_cre,
         CASE WHEN c.usr_cre NOT IN ('authenticated', 'anon', 'postgres') THEN c.usr_cre::INT ELSE NULL END AS usr_cre,
-        SPLIT_PART(c.guia_remision, '-', 1) AS serie, -- serie is always the prefix before '-'
+        SPLIT_PART(c.entrega, '-', 1) AS serie, -- serie is always the prefix before '-'
         CASE 
-            WHEN inv.rw = 1 THEN SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1)
-            ELSE SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1) || '-' || inv.rw::text
+            WHEN inv.rw = 1 THEN SUBSTRING(c.entrega FROM POSITION('-' IN c.entrega) + 1)
+            ELSE SUBSTRING(c.entrega FROM POSITION('-' IN c.entrega) + 1) || '-' || inv.rw::text
         END AS correlativo
     FROM inv
     JOIN compra c ON c.id = inv.compra_id
 ),
-inserted_guias AS (
-    INSERT INTO doc.guia_remision (
-        guia_remision_tipo_id, tercero_id, serie, correlativo, fecha_emision, usr_cre, fyh_cre
+inserted_entregas AS (
+    INSERT INTO doc.entrega (
+        entrega_tipo_id, tercero_id, serie, correlativo, fecha_emision, usr_cre, fyh_cre
     )
     SELECT
-        (SELECT id FROM doc.guia_remision_tipo WHERE codigo = 'COMPRA_INGRESO'),
+        (SELECT id FROM doc.entrega_tipo WHERE codigo = 'COMPRA_INGRESO'),
         (SELECT id FROM tercero WHERE proveedor_id = cd.proveedor_id),
         serie,
         correlativo,
@@ -1913,31 +1924,31 @@ inserted_guias AS (
         MAX(usr_cre)              AS usr_cre,
         MAX(fyh_cre)              AS fyh_cre
     FROM compra_data cd
-    -- GROUP BY unique key only: same (tipo,tercero,serie,correlativo) from multiple lotes → one guia.
-    -- UNIQUE constraint is (tercero_id, serie, correlativo, guia_remision_tipo_id) — see 07_new_tables.
+    -- GROUP BY unique key only: same (tipo,tercero,serie,correlativo) from multiple lotes → one entrega.
+    -- UNIQUE constraint is (tercero_id, serie, correlativo, entrega_tipo_id) — see 07_new_tables.
     GROUP BY 1,2,3,4
     RETURNING id, serie, correlativo
-),inserted_compra_guias_remision AS (
-    INSERT INTO doc.compra_guia_remision(guia_remision_id,compra_id)
-    SELECT i.id, c.compra_id FROM inserted_guias i JOIN compra_data c ON i.serie = c.serie AND i.correlativo = c.correlativo
+),inserted_compra_entregas_remision AS (
+    INSERT INTO doc.compra_entrega(entrega_id,compra_id)
+    SELECT i.id, c.compra_id FROM inserted_entregas i JOIN compra_data c ON i.serie = c.serie AND i.correlativo = c.correlativo
     GROUP BY 1,2
 )
 UPDATE inventario.lote 
-SET documento_tipo = 'guia_remision',
+SET documento_tipo = 'entrega',
 documento_id = i.id
 FROM compra_data c 
-JOIN inserted_guias i ON i.serie = c.serie AND i.correlativo = c.correlativo
+JOIN inserted_entregas i ON i.serie = c.serie AND i.correlativo = c.correlativo
 WHERE c.inventario_id = inventario.lote.id;
 
-INSERT INTO doc.guia_remision_detalle(
-guia_remision_id, item_id, cantidad
+INSERT INTO doc.entrega_detalle(
+entrega_id, item_id, cantidad
 )
-SELECT doc.guia_remision.id, l.item_id, l.cantidad
+SELECT doc.entrega.id, l.item_id, l.cantidad
 FROM inventario.lote l
-JOIN doc.guia_remision ON doc.guia_remision.id = l.documento_id AND l.documento_tipo='guia_remision';
+JOIN doc.entrega ON doc.entrega.id = l.documento_id AND l.documento_tipo='entrega';
 
-SELECT setval(pg_get_serial_sequence('doc.guia_remision',        'id'), (SELECT MAX(id) FROM doc.guia_remision));
-SELECT setval(pg_get_serial_sequence('doc.guia_remision_detalle','id'), (SELECT MAX(id) FROM doc.guia_remision_detalle));
+SELECT setval(pg_get_serial_sequence('doc.entrega',        'id'), (SELECT MAX(id) FROM doc.entrega));
+SELECT setval(pg_get_serial_sequence('doc.entrega_detalle','id'), (SELECT MAX(id) FROM doc.entrega_detalle));
 
 
 -- WITH
@@ -1957,29 +1968,29 @@ SELECT setval(pg_get_serial_sequence('doc.guia_remision_detalle','id'), (SELECT 
 -- compra_data AS (
 --     SELECT 
 --         inv.*,
---         c.guia_remision,
+--         c.entrega,
 --         c.proveedor_id,  -- adjust column name as needed
 --         c.fecha_remision,         -- adjust column name as needed
 --         c.fyh_cre + INTERVAL '5 hours' fyh_cre,
 --         c.usr_cre,
 --         CASE 
---             WHEN inv.rw = 1 THEN SPLIT_PART(c.guia_remision, '-', 1)
---             ELSE SPLIT_PART(c.guia_remision, '-', 1)  -- same serie?
+--             WHEN inv.rw = 1 THEN SPLIT_PART(c.entrega, '-', 1)
+--             ELSE SPLIT_PART(c.entrega, '-', 1)  -- same serie?
 --         END AS serie,
 --         CASE 
---             WHEN inv.rw = 1 THEN SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1)
---             ELSE SUBSTRING(c.guia_remision FROM POSITION('-' IN c.guia_remision) + 1) || '-' || inv.rw::text
+--             WHEN inv.rw = 1 THEN SUBSTRING(c.entrega FROM POSITION('-' IN c.entrega) + 1)
+--             ELSE SUBSTRING(c.entrega FROM POSITION('-' IN c.entrega) + 1) || '-' || inv.rw::text
 --         END AS correlativo
 --     FROM inv
 --     JOIN compra c ON c.id = inv.compra_id
 -- ),
--- inserted_guias AS (
---     INSERT INTO doc.guia_remision (
---         guia_remision_tipo_id, serie, correlativo, 
+-- inserted_entregas AS (
+--     INSERT INTO doc.entrega (
+--         entrega_tipo_id, serie, correlativo, 
 --         emisor_proveedor_id, fecha_emision, usr_cre, fyh_cre
 --     )
 --     SELECT 
---         (SELECT id FROM doc.guia_remision_tipo WHERE codigo = 'COMPRA_INGRESO'),
+--         (SELECT id FROM doc.entrega_tipo WHERE codigo = 'COMPRA_INGRESO'),
 --         serie,
 --         correlativo,
 --         proveedor_id,
@@ -1991,22 +2002,22 @@ SELECT setval(pg_get_serial_sequence('doc.guia_remision_detalle','id'), (SELECT 
 --     RETURNING id, serie, correlativo
 -- ),
 -- inserted_detalles AS (
---     INSERT INTO doc.guia_remision_detalle (
---         guia_remision_id, item_id, cantidad, usr_cre, fyh_cre
+--     INSERT INTO doc.entrega_detalle (
+--         entrega_id, item_id, cantidad, usr_cre, fyh_cre
 --     )
 --     SELECT 
---         inserted_guias.id,
+--         inserted_entregas.id,
 --         ip.item_id,
 --         i.cantidad,
 --         i.usr_cre,
 --         i.fyh_cre
 --     FROM compra_data c
 --     JOIN insumo_x_proveedor ip ON ip.id = c.insumo_x_proveedor_id
---     JOIN inserted_guias ON inserted_guias.serie = c.serie AND inserted_guias.correlativo = c.correlativo
+--     JOIN inserted_entregas ON inserted_entregas.serie = c.serie AND inserted_entregas.correlativo = c.correlativo
 --     JOIN item ON item.id = ip.insumo_id
 -- )
 -- UPDATE inventario.lote 
--- SET tipo_documento = 'guia_remision',
+-- SET tipo_documento = 'entrega',
 -- documento_id = i.documento_id
 -- FROM compra c 
 -- JOIN inv ON inv.compra_id = c.id
@@ -2130,14 +2141,14 @@ WHERE ei.motivo IN ('ajuste', 'reconteo')
 --          BACKFILL ROLL LOTES section below and have documento_tipo = 'PARTIDA').
 --
 -- Movement type mapping:
---   lote.documento_tipo = 'guia_remision'  → COMPRA_ING  (purchase arrival)
+--   lote.documento_tipo = 'entrega'  → COMPRA_ING  (purchase arrival)
 --   lote.documento_tipo = 'cuadre'         → AJUSTE_POS  (positive adjustment from count)
 --   entrada_inventario.motivo = 'muestra'  → MUESTRA_ING (non-valorizable sample receipt)
 --   anything else (orphan/manual entries)  → AJUSTE_POS  (safe fallback)
 --
 -- doc_movimiento_id grouping:
 --   One posting document per distinct (documento_tipo, documento_id) pair — i.e. one
---   per guia_remision or per cuadre.  Muestra events group by entrada_inventario.id.
+--   per entrega or per cuadre.  Muestra events group by entrada_inventario.id.
 --   nextval fires inside the inner DISTINCT subquery so each group gets exactly one seq.
 -- ============================================================================
 WITH lote_source AS (
@@ -2173,7 +2184,7 @@ SELECT
     ls.item_id,
     ls.id,
     CASE ls.documento_tipo
-        WHEN 'guia_remision' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING')
+        WHEN 'entrega' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING')
         WHEN 'cuadre'        THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS')
         ELSE CASE ls.motivo
             WHEN 'muestra' THEN (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'MUESTRA_ING')
@@ -2518,7 +2529,7 @@ opi_insert AS ( -- Step 2: assign each lote to the op(s) whose roll range covers
 ),
 lrd_insert AS ( -- Step 1b: lote_rollo_detalle for each raw roll lote
     -- Raw ingress: no spec fields (ancho/malla/rendimiento/color set at dyeing step)
-    -- guia_remision_id: NULL for now — will be wired when stub guias are created (point 3)
+    -- entrega_id: NULL for now — will be wired when stub entregas are created (point 3)
     INSERT INTO inventario.lote_rollo_detalle (
         lote_id,
         flg_tenido, flg_antipilling,
@@ -2943,14 +2954,14 @@ WHERE duracion IS NOT NULL
 -- Populates lote_rollo_detalle for remaining ROLLO lote origin types.
 -- PARTIDA lotes are handled inline in the roll lote CTE above (lrd_insert).
 -- Three remaining origin types:
---   GUIA_REMISION  → new-flow ingress rolls: billing anchor only, spec fields NULL
+--   entrega  → new-flow ingress rolls: billing anchor only, spec fields NULL
 --   partida_paso → dyed rolls: full identity from mes.partida
---   CUADRE         → surplus rolls from stock count: no guia, no spec fields
+--   CUADRE         → surplus rolls from stock count: no entrega, no spec fields
 
 
 INSERT INTO inventario.lote_rollo_detalle (
     lote_id,
-    guia_remision_id,
+    entrega_id,
     ancho,
     malla,
     rendimiento,
@@ -2960,7 +2971,7 @@ INSERT INTO inventario.lote_rollo_detalle (
     flg_antipilling,
     fyh_cre
 )
--- New-flow ingress rolls (GUIA_REMISION) — guia IS the documento_id; spec fields not yet set
+-- New-flow ingress rolls (entrega) — entrega IS the documento_id; spec fields not yet set
 SELECT
     l.id,
     l.documento_id,
@@ -2971,13 +2982,13 @@ SELECT
 FROM inventario.lote l
 JOIN item i       ON i.id = l.item_id
 JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
-WHERE l.documento_tipo = 'guia_remision'
+WHERE l.documento_tipo = 'entrega'
   AND l.fyh_elm IS NULL
 
 UNION ALL
 
--- Dyed rolls — spec fields from partida directly; no guia for legacy PARTIDA-origin rolls
--- (legacy fabric rolls arrived via partida flow, not guia_remision, so guia_remision_id = NULL)
+-- Dyed rolls — spec fields from partida directly; no entrega for legacy PARTIDA-origin rolls
+-- (legacy fabric rolls arrived via partida flow, not entrega, so entrega_id = NULL)
 -- At insert time documento_tipo = 'partida_paso'; end-of-migration re-stamp updates
 -- these lotes to 'partida_paso_ejecucion' after ejecucion rows are created.
 SELECT
@@ -3001,7 +3012,7 @@ WHERE l.documento_tipo = 'partida_paso'
 
 UNION ALL
 
--- Surplus rolls from stock count — no ingress guia, no spec fields
+-- Surplus rolls from stock count — no ingress entrega, no spec fields
 SELECT
     l.id,
     NULL,
@@ -3153,8 +3164,8 @@ BEGIN
 END;
 $$;
 SELECT setval(
-    pg_get_serial_sequence('doc.guia_remision', 'id'),
-    (SELECT MAX(id) FROM doc.guia_remision)
+    pg_get_serial_sequence('doc.entrega', 'id'),
+    (SELECT MAX(id) FROM doc.entrega)
 );
 -- ── Sequences: reset all to MAX(id) post-migration ──────────────
 SELECT setval(pg_get_serial_sequence('item',                           'id'),     COALESCE((SELECT MAX(id)     FROM item),                           1));
@@ -3177,8 +3188,8 @@ SELECT setval(pg_get_serial_sequence('doc.compra',                     'id'),   
 SELECT setval(pg_get_serial_sequence('doc.compra_detalle',             'id'),     COALESCE((SELECT MAX(id)     FROM doc.compra_detalle),             1));
 SELECT setval(pg_get_serial_sequence('doc.factura_proveedor',          'id'),     COALESCE((SELECT MAX(id)     FROM doc.factura_proveedor),          1));
 SELECT setval(pg_get_serial_sequence('doc.letra',                      'id'),     COALESCE((SELECT MAX(id)     FROM doc.letra),                     1));
-SELECT setval(pg_get_serial_sequence('doc.guia_remision',              'id'),     COALESCE((SELECT MAX(id)     FROM doc.guia_remision),              1));
-SELECT setval(pg_get_serial_sequence('doc.guia_remision_detalle',      'id'),     COALESCE((SELECT MAX(id)     FROM doc.guia_remision_detalle),      1));
+SELECT setval(pg_get_serial_sequence('doc.entrega',              'id'),     COALESCE((SELECT MAX(id)     FROM doc.entrega),              1));
+SELECT setval(pg_get_serial_sequence('doc.entrega_detalle',      'id'),     COALESCE((SELECT MAX(id)     FROM doc.entrega_detalle),      1));
 SELECT setval(pg_get_serial_sequence('doc.factura',                    'id'),     COALESCE((SELECT MAX(id)     FROM doc.factura),                    1));
 SELECT setval(pg_get_serial_sequence('doc.catalogo_precios',           'id'),     COALESCE((SELECT MAX(id)     FROM doc.catalogo_precios),           1));
 SELECT setval(pg_get_serial_sequence('notification.notifications',           'id'),     COALESCE((SELECT MAX(id)     FROM notification.notifications),           1));

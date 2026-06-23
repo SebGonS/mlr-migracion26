@@ -79,10 +79,10 @@ $$;
 -- ───────────────────────────────────────────────────────────────
 -- alertas.check_rollos_sin_programar
 -- Fires daily.
--- Condition: CLIENTE_ENVIO_PROCESO guia with fecha_emision > 5 days
+-- Condition: CLIENTE_ENVIO_PROCESO entrega with fecha_emision > 5 days
 --            ago that still has at least one in-stock roll with no
 --            partida_componente assignment.
--- Resolves: when all in-stock rolls from the guia are assigned to a partida.
+-- Resolves: when all in-stock rolls from the entrega are assigned to a partida.
 -- Notifies: jefe_planta, supervisor_produccion
 -- ───────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION alertas.check_rollos_sin_programar()
@@ -92,7 +92,7 @@ SECURITY DEFINER
 SET search_path TO 'public', 'doc', 'mes', 'inventario', 'iam', 'notification'
 AS $$
 BEGIN
-    -- OPEN: guias older than 5 days with at least one in-stock unassigned roll
+    -- OPEN: entregas older than 5 days with at least one in-stock unassigned roll
     INSERT INTO notification.notifications (
         user_id, title, body, tipo, categoria,
         objeto_tipo, objeto_id, payload
@@ -105,17 +105,17 @@ BEGIN
             || ' días con rollos sin asignar a una orden de producción.',
         'alert',
         'rollo_sin_programar',
-        'guia_remision',
+        'entrega',
         gr.id,
         jsonb_build_object(
-            'guia_remision_id',  gr.id,
-            'guia_numero',       gr.serie || '-' || gr.correlativo,
+            'entrega_id',  gr.id,
+            'entrega_numero',       gr.serie || '-' || gr.correlativo,
             'tercero',           t.nombre,
             'dias_espera',       (CURRENT_DATE - gr.fecha_emision::DATE),
             'fecha_emision',     gr.fecha_emision
         )
-    FROM doc.guia_remision gr
-    JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
+    FROM doc.entrega gr
+    JOIN doc.entrega_tipo grt ON grt.id = gr.entrega_tipo_id
     JOIN tercero t ON t.id = gr.tercero_id
     CROSS JOIN (
         SELECT ur.user_id
@@ -132,24 +132,24 @@ BEGIN
           JOIN inventario.lote l              ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
           JOIN inventario.vw_stock_lotes sl   ON sl.lote_id = l.id
           LEFT JOIN mes.partida_componente pc ON pc.lote_id = l.id
-          WHERE lrd.guia_remision_id = gr.id
+          WHERE lrd.entrega_id = gr.id
             AND pc.lote_id IS NULL
       )
       AND NOT EXISTS (
           SELECT 1 FROM notification.notifications n
           WHERE n.user_id     = ur.user_id
             AND n.categoria   = 'rollo_sin_programar'
-            AND n.objeto_tipo = 'guia_remision'
+            AND n.objeto_tipo = 'entrega'
             AND n.objeto_id   = gr.id
             AND n.fyh_resuelta IS NULL
       )
     ON CONFLICT DO NOTHING;
 
-    -- CLOSE: guias that no longer have any in-stock unassigned rolls
+    -- CLOSE: entregas that no longer have any in-stock unassigned rolls
     UPDATE notification.notifications n
     SET fyh_resuelta = now()
     WHERE n.categoria   = 'rollo_sin_programar'
-      AND n.objeto_tipo = 'guia_remision'
+      AND n.objeto_tipo = 'entrega'
       AND n.fyh_resuelta IS NULL
       AND NOT EXISTS (
           SELECT 1
@@ -157,7 +157,7 @@ BEGIN
           JOIN inventario.lote l              ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
           JOIN inventario.vw_stock_lotes sl   ON sl.lote_id = l.id
           LEFT JOIN mes.partida_componente pc ON pc.lote_id = l.id
-          WHERE lrd.guia_remision_id = n.objeto_id
+          WHERE lrd.entrega_id = n.objeto_id
             AND pc.lote_id IS NULL
       );
 END;

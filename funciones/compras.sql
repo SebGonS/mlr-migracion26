@@ -4,8 +4,8 @@
 
 -- ───────────────────────────────────────────────────────────────
 -- crear_compra
--- Creates a purchase event with line items and optional guia links.
--- Inventory movements are handled by the guia, not here.
+-- Creates a purchase event with line items and optional entrega links.
+-- Inventory movements are handled by the entrega, not here.
 -- ───────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION doc.crear_compra(p_datos jsonb)
 RETURNS bigint
@@ -26,12 +26,12 @@ BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('crear_compra', v_usr_id, p_datos);
 
-    -- Validate guias belong to the declared proveedor
-    IF p_datos->'guia_ids' IS NOT NULL AND jsonb_array_length(p_datos->'guia_ids') > 0 THEN
+    -- Validate entregas belong to the declared proveedor
+    IF p_datos->'entrega_ids' IS NOT NULL AND jsonb_array_length(p_datos->'entrega_ids') > 0 THEN
         IF EXISTS (
-            SELECT 1 FROM doc.guia_remision gr
+            SELECT 1 FROM doc.entrega gr
             WHERE gr.id IN (
-                SELECT jsonb_array_elements_text(p_datos->'guia_ids')::bigint
+                SELECT jsonb_array_elements_text(p_datos->'entrega_ids')::bigint
             )
             AND gr.tercero_id IS DISTINCT FROM (p_datos->>'tercero_id')::INT
         ) THEN
@@ -71,10 +71,10 @@ BEGIN
            v_usr_id
     FROM jsonb_array_elements(COALESCE(p_datos->'detalle', '[]'::jsonb)) d;
 
-    -- Link guias
-    IF p_datos->'guia_ids' IS NOT NULL AND jsonb_array_length(p_datos->'guia_ids') > 0 THEN
-        INSERT INTO doc.compra_guia_remision(compra_id, guia_remision_id)
-        SELECT v_compra_id, jsonb_array_elements_text(p_datos->'guia_ids')::bigint
+    -- Link entregas
+    IF p_datos->'entrega_ids' IS NOT NULL AND jsonb_array_length(p_datos->'entrega_ids') > 0 THEN
+        INSERT INTO doc.compra_entrega(compra_id, entrega_id)
+        SELECT v_compra_id, jsonb_array_elements_text(p_datos->'entrega_ids')::bigint
         ON CONFLICT DO NOTHING;
     END IF;
 
@@ -100,7 +100,7 @@ $function$;
 -- Blocked if the compra is already anulada.
 -- Optional full-replace semantics when key is present:
 --   'detalle'     → replaces all line items
---   'guia_ids'    → replaces all guia links
+--   'entrega_ids'    → replaces all entrega links
 --   'factura_ids' → replaces all factura links
 -- tercero_id is immutable after creation.
 -- ───────────────────────────────────────────────────────────────
@@ -160,23 +160,23 @@ BEGIN
         END IF;
     END IF;
 
-    -- Replace guia links only when 'guia_ids' key is explicitly present
-    IF p_datos ? 'guia_ids' THEN
-        IF jsonb_array_length(p_datos->'guia_ids') > 0 THEN
+    -- Replace entrega links only when 'entrega_ids' key is explicitly present
+    IF p_datos ? 'entrega_ids' THEN
+        IF jsonb_array_length(p_datos->'entrega_ids') > 0 THEN
             IF EXISTS (
-                SELECT 1 FROM doc.guia_remision
-                WHERE id IN (SELECT jsonb_array_elements_text(p_datos->'guia_ids')::bigint)
+                SELECT 1 FROM doc.entrega
+                WHERE id IN (SELECT jsonb_array_elements_text(p_datos->'entrega_ids')::bigint)
                   AND tercero_id IS DISTINCT FROM v_tercero_id
             ) THEN
                 RAISE EXCEPTION 'Una o más guías no pertenecen al proveedor de la compra #%.', p_compra_id;
             END IF;
         END IF;
 
-        DELETE FROM doc.compra_guia_remision WHERE compra_id = p_compra_id;
+        DELETE FROM doc.compra_entrega WHERE compra_id = p_compra_id;
 
-        IF jsonb_array_length(p_datos->'guia_ids') > 0 THEN
-            INSERT INTO doc.compra_guia_remision(compra_id, guia_remision_id)
-            SELECT p_compra_id, jsonb_array_elements_text(p_datos->'guia_ids')::bigint
+        IF jsonb_array_length(p_datos->'entrega_ids') > 0 THEN
+            INSERT INTO doc.compra_entrega(compra_id, entrega_id)
+            SELECT p_compra_id, jsonb_array_elements_text(p_datos->'entrega_ids')::bigint
             ON CONFLICT DO NOTHING;
         END IF;
     END IF;
@@ -545,9 +545,9 @@ AS $$
         JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
         WHERE imt.codigo = 'COMPRA_ING'
           AND im.item_id = cd.item_id
-          AND im.documento_tipo = 'guia_remision'
+          AND im.documento_tipo = 'entrega'
           AND im.documento_id IN (
-              SELECT guia_remision_id FROM doc.compra_guia_remision
+              SELECT entrega_id FROM doc.compra_entrega
               WHERE compra_id = p_compra_id
           )
     ), 0)
@@ -555,14 +555,14 @@ AS $$
 $$;
 
 -- ───────────────────────────────────────────────────────────────
--- vincular_guias_compra
--- Links one or more guias to an existing compra.
--- Validates each guia belongs to the compra's proveedor.
+-- vincular_entregas_compra
+-- Links one or more entregas to an existing compra.
+-- Validates each entrega belongs to the compra's proveedor.
 -- Idempotent: ON CONFLICT DO NOTHING.
 -- ───────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION doc.vincular_guias_compra(
+CREATE OR REPLACE FUNCTION doc.vincular_entregas_compra(
     p_compra_id bigint,
-    p_guia_ids  jsonb   -- [1, 2, 3]
+    p_entrega_ids  jsonb   -- [1, 2, 3]
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -587,17 +587,17 @@ BEGIN
         RAISE EXCEPTION 'Compra #% no encontrada.', p_compra_id;
     END IF;
 
-    -- All guias must belong to the same tercero as the compra
+    -- All entregas must belong to the same tercero as the compra
     IF EXISTS (
-        SELECT 1 FROM doc.guia_remision
-        WHERE id IN (SELECT jsonb_array_elements_text(p_guia_ids)::bigint)
+        SELECT 1 FROM doc.entrega
+        WHERE id IN (SELECT jsonb_array_elements_text(p_entrega_ids)::bigint)
           AND tercero_id IS DISTINCT FROM v_proveedor
     ) THEN
         RAISE EXCEPTION 'Una o más guías no pertenecen al proveedor de la compra #%.', p_compra_id;
     END IF;
 
-    INSERT INTO doc.compra_guia_remision(compra_id, guia_remision_id)
-    SELECT p_compra_id, jsonb_array_elements_text(p_guia_ids)::bigint
+    INSERT INTO doc.compra_entrega(compra_id, entrega_id)
+    SELECT p_compra_id, jsonb_array_elements_text(p_entrega_ids)::bigint
     ON CONFLICT DO NOTHING;
 
     GET DIAGNOSTICS v_linked = ROW_COUNT;
@@ -606,18 +606,18 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in vincular_guias_compra - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
+    RAISE LOG 'Error in vincular_entregas_compra - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
     RAISE;
 END;
 $function$;
 
 -- ───────────────────────────────────────────────────────────────
--- desvincular_guias_compra
--- Removes one or more guia links from a compra.
+-- desvincular_entregas_compra
+-- Removes one or more entrega links from a compra.
 -- ───────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION doc.desvincular_guias_compra(
+CREATE OR REPLACE FUNCTION doc.desvincular_entregas_compra(
     p_compra_id bigint,
-    p_guia_ids  jsonb   -- [1, 2, 3]
+    p_entrega_ids  jsonb   -- [1, 2, 3]
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -638,10 +638,10 @@ BEGIN
         RAISE EXCEPTION 'Compra #% no encontrada.', p_compra_id;
     END IF;
 
-    DELETE FROM doc.compra_guia_remision
+    DELETE FROM doc.compra_entrega
     WHERE compra_id = p_compra_id
-      AND guia_remision_id IN (
-          SELECT jsonb_array_elements_text(p_guia_ids)::bigint
+      AND entrega_id IN (
+          SELECT jsonb_array_elements_text(p_entrega_ids)::bigint
       );
 
     GET DIAGNOSTICS v_unlinked = ROW_COUNT;
@@ -650,7 +650,7 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in desvincular_guias_compra - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
+    RAISE LOG 'Error in desvincular_entregas_compra - User: %, compra: %, Error: %', v_usr_id, p_compra_id, v_message;
     RAISE;
 END;
 $function$;
@@ -813,8 +813,8 @@ GRANT EXECUTE ON FUNCTION doc.actualizar_compra(bigint, jsonb)              TO a
 GRANT EXECUTE ON FUNCTION doc.registrar_factura_proveedor(jsonb)            TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.registrar_letra(jsonb)                        TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.pagar_letra(bigint, date, int)                TO authenticated;
-GRANT EXECUTE ON FUNCTION doc.vincular_guias_compra(bigint, jsonb)          TO authenticated;
-GRANT EXECUTE ON FUNCTION doc.desvincular_guias_compra(bigint, jsonb)       TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.vincular_entregas_compra(bigint, jsonb)          TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.desvincular_entregas_compra(bigint, jsonb)       TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.vincular_facturas_compra(bigint, jsonb)       TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.desvincular_facturas_compra(bigint, jsonb)    TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.marcar_compra_recibida(bigint)                TO authenticated;
@@ -822,7 +822,7 @@ GRANT EXECUTE ON FUNCTION doc.marcar_compra_recibida(bigint)                TO a
 
 -- ───────────────────────────────────────────────────────────────
 -- get_compra
--- Full read: compra header + line items + linked guias + linked
+-- Full read: compra header + line items + linked entregas + linked
 -- supplier invoices. Designed for document-detail screens.
 -- ───────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION doc.get_compra(p_compra_id BIGINT)
@@ -853,17 +853,17 @@ SELECT jsonb_build_object(
         JOIN item i ON i.id = cd.item_id
         WHERE cd.compra_id = c.id
     ), '[]'::jsonb),
-    'guias', COALESCE((
+    'entregas', COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
-            'guia_remision_id', gr.id,
+            'entrega_id', gr.id,
             'serie',            gr.serie,
             'correlativo',      gr.correlativo,
             'fecha_emision',    gr.fecha_emision,
             'tipo',             grt.nombre
         ) ORDER BY gr.fecha_emision, gr.id)
-        FROM doc.compra_guia_remision cgr
-        JOIN doc.guia_remision gr         ON gr.id = cgr.guia_remision_id
-        JOIN doc.guia_remision_tipo grt   ON grt.id = gr.guia_remision_tipo_id
+        FROM doc.compra_entrega cgr
+        JOIN doc.entrega gr         ON gr.id = cgr.entrega_id
+        JOIN doc.entrega_tipo grt   ON grt.id = gr.entrega_tipo_id
         WHERE cgr.compra_id = c.id
     ), '[]'::jsonb),
     'facturas', COALESCE((
@@ -1403,7 +1403,7 @@ $$;
 --   INSUMO → one lote per line, cantidad = received quantity
 --   ROLLO  → one lote per roll, n_rollos required, cantidad = per-roll weight
 --
--- To also register the physical guia (SUNAT document), call doc.crear_guia
+-- To also register the physical entrega (SUNAT document), call doc.crear_entrega
 -- separately with tipo=COMPRA_INGRESO and compra_id. Independent — never posts
 -- movements. Can be called before or after this function.
 --
@@ -1442,6 +1442,12 @@ DECLARE
     v_flg_rollo     boolean;
     v_precio        numeric;
     v_fecha_mov     TIMESTAMPTZ;
+    v_detalle_id      bigint;     -- compra_detalle line (≈ EBELP) for documento_linea_id
+    v_entrega_id      bigint;     -- optional browsable guía (inbound delivery)
+    v_entrega_tipo_id smallint;
+    v_tercero_id      int;
+    v_has_guia        boolean;
+    v_linea           smallint := 0;
     i               int;
 BEGIN
     IF NOT jwt_has_permission('comercial.crear') THEN
@@ -1478,6 +1484,30 @@ BEGIN
     v_fecha_mov  := COALESCE((p_datos->>'fecha_recepcion')::TIMESTAMPTZ, now());
     v_doc_mov_id := nextval('inventario.mov_doc_seq');
 
+    -- Optional supplier guía: create a browsable inbound delivery (entrega) and
+    -- link it to the compra. Stock still posts against the PO below; the entrega
+    -- is the logistics/browse record (≈ SAP inbound delivery), NOT a stock event.
+    v_has_guia := (p_datos ? 'guia') AND (p_datos->'guia'->>'correlativo') IS NOT NULL;
+    IF v_has_guia THEN
+        SELECT tercero_id INTO v_tercero_id FROM doc.compra WHERE id = v_compra_id;
+        SELECT id INTO STRICT v_entrega_tipo_id
+        FROM doc.entrega_tipo WHERE codigo = 'COMPRA_INGRESO';
+
+        INSERT INTO doc.entrega (entrega_tipo_id, tercero_id, serie, correlativo, fecha_emision, fecha_recepcion)
+        VALUES (
+            v_entrega_tipo_id, v_tercero_id,
+            p_datos->'guia'->>'serie',
+            p_datos->'guia'->>'correlativo',
+            COALESCE((p_datos->'guia'->>'fecha')::TIMESTAMPTZ, v_fecha_mov),
+            v_fecha_mov
+        )
+        RETURNING id INTO v_entrega_id;
+
+        INSERT INTO doc.compra_entrega (compra_id, entrega_id)
+        VALUES (v_compra_id, v_entrega_id)
+        ON CONFLICT DO NOTHING;
+    END IF;
+
     FOR v_elem IN SELECT jsonb_array_elements(p_datos->'items') LOOP
         v_item_id  := (v_elem->>'item_id')::int;
         v_cantidad := (v_elem->>'cantidad')::numeric;
@@ -1489,7 +1519,7 @@ BEGIN
             WHERE i.id = v_item_id
         ) INTO v_flg_rollo;
 
-        SELECT precio_unitario INTO v_precio
+        SELECT id, precio_unitario INTO v_detalle_id, v_precio
         FROM doc.compra_detalle
         WHERE compra_id = v_compra_id AND item_id = v_item_id
         ORDER BY id LIMIT 1;
@@ -1511,17 +1541,17 @@ BEGIN
                 VALUES (v_item_id, 'compra', v_compra_id, v_peso_rollo, NULL, v_usr_id)
                 RETURNING id INTO v_lote_id;
 
-                INSERT INTO inventario.lote_rollo_detalle (lote_id, guia_remision_id, flg_tenido)
-                VALUES (v_lote_id, NULL, false);
+                INSERT INTO inventario.lote_rollo_detalle (lote_id, entrega_id, flg_tenido)
+                VALUES (v_lote_id, v_entrega_id, false);   -- entrega_id NULL when no guía
 
                 INSERT INTO inventario.item_movimientos (
                     doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
                     origen_ubicacion_id, destino_ubicacion_id,
-                    cantidad, precio_unitario, fecha_hora, documento_tipo, documento_id, observacion, usr_cre
+                    cantidad, precio_unitario, fecha_hora, documento_tipo, documento_id, documento_linea_id, observacion, usr_cre
                 ) VALUES (
                     v_doc_mov_id, v_item_id, v_lote_id, v_mov_tipo_id,
                     NULL, v_ubicacion_id,
-                    v_peso_rollo, v_precio, v_fecha_mov, 'compra', v_compra_id,
+                    v_peso_rollo, v_precio, v_fecha_mov, 'compra', v_compra_id, v_detalle_id,
                     'Ingreso compra #' || v_compra_id, v_usr_id
                 );
             END LOOP;
@@ -1535,14 +1565,21 @@ BEGIN
             INSERT INTO inventario.item_movimientos (
                 doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
                 origen_ubicacion_id, destino_ubicacion_id,
-                cantidad, precio_unitario, fecha_hora, documento_tipo, documento_id, observacion, usr_cre
+                cantidad, precio_unitario, fecha_hora, documento_tipo, documento_id, documento_linea_id, observacion, usr_cre
             ) VALUES (
                 v_doc_mov_id, v_item_id, v_lote_id, v_mov_tipo_id,
                 NULL, v_ubicacion_id,
-                v_cantidad, v_precio, v_fecha_mov, 'compra', v_compra_id,
+                v_cantidad, v_precio, v_fecha_mov, 'compra', v_compra_id, v_detalle_id,
                 'Ingreso compra #' || v_compra_id, v_usr_id
             );
 
+        END IF;
+
+        -- Guía line (browsable inbound-delivery detail) — declared receipt per item
+        IF v_has_guia THEN
+            v_linea := v_linea + 1;
+            INSERT INTO doc.entrega_detalle (entrega_id, linea, item_id, cantidad, n_rollos, ubicacion_id)
+            VALUES (v_entrega_id, v_linea, v_item_id, v_cantidad, v_n_rollos, v_ubicacion_id);
         END IF;
 
         UPDATE doc.compra_detalle

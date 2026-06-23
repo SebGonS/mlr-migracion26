@@ -104,7 +104,7 @@ ALTER TABLE public.articulo          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.color             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.cliente           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.proveedor         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.guia_remision_tipo   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.entrega_tipo   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.operacion            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE receta.operacion         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.maquina_tipo         ENABLE ROW LEVEL SECURITY;
@@ -122,7 +122,7 @@ DROP POLICY IF EXISTS "auth_read" ON public.articulo;
 DROP POLICY IF EXISTS "auth_read" ON public.color;
 DROP POLICY IF EXISTS "auth_read" ON public.cliente;
 DROP POLICY IF EXISTS "auth_read" ON public.proveedor;
-DROP POLICY IF EXISTS "auth_read" ON doc.guia_remision_tipo;
+DROP POLICY IF EXISTS "auth_read" ON doc.entrega_tipo;
 DROP POLICY IF EXISTS "auth_read" ON mes.operacion;
 DROP POLICY IF EXISTS "auth_read" ON receta.operacion;
 DROP POLICY IF EXISTS "auth_read" ON mes.maquina_tipo;
@@ -140,7 +140,7 @@ CREATE POLICY "auth_read" ON public.articulo          FOR SELECT TO authenticate
 CREATE POLICY "auth_read" ON public.color             FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON public.cliente           FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON public.proveedor         FOR SELECT TO authenticated USING (true);
-CREATE POLICY "auth_read" ON doc.guia_remision_tipo   FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read" ON doc.entrega_tipo   FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON mes.operacion            FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON receta.operacion         FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read" ON mes.maquina_tipo         FOR SELECT TO authenticated USING (true);
@@ -264,12 +264,12 @@ CREATE POLICY "ver_lote_rollo"  ON inventario.lote_rollo_detalle     FOR SELECT 
 -- ── Comercial ─────────────────────────────────────────────────────────────────
 ALTER TABLE mes.partida                ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mes.partida_detalle        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.guia_remision          ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.guia_remision_detalle  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.entrega          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.entrega_detalle  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.catalogo_precios              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.compra                        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.compra_detalle                ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc.compra_guia_remision          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc.compra_entrega          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.factura_proveedor             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.factura_proveedor_detalle     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc.letra                         ENABLE ROW LEVEL SECURITY;
@@ -280,12 +280,12 @@ ALTER TABLE doc.compra_factura_proveedor      ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "comercial_ver" ON mes.partida;
 DROP POLICY IF EXISTS "comercial_ver" ON mes.partida_detalle;
-DROP POLICY IF EXISTS "comercial_ver" ON doc.guia_remision;
-DROP POLICY IF EXISTS "comercial_ver" ON doc.guia_remision_detalle;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.entrega;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.entrega_detalle;
 DROP POLICY IF EXISTS "comercial_ver" ON doc.catalogo_precios;
 DROP POLICY IF EXISTS "comercial_ver" ON doc.compra;
 DROP POLICY IF EXISTS "comercial_ver" ON doc.compra_detalle;
-DROP POLICY IF EXISTS "comercial_ver" ON doc.compra_guia_remision;
+DROP POLICY IF EXISTS "comercial_ver" ON doc.compra_entrega;
 DROP POLICY IF EXISTS "comercial_ver" ON doc.factura_proveedor;
 DROP POLICY IF EXISTS "comercial_ver" ON doc.factura_proveedor_detalle;
 DROP POLICY IF EXISTS "comercial_ver" ON doc.letra;
@@ -302,12 +302,12 @@ DROP POLICY IF EXISTS "produccion_ver" ON mes.partida;
 DROP POLICY IF EXISTS "produccion_ver" ON mes.partida_detalle;
 CREATE POLICY "produccion_ver" ON mes.partida         FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
 CREATE POLICY "produccion_ver" ON mes.partida_detalle FOR SELECT TO authenticated USING (jwt_has_permission('produccion.ver'));
-CREATE POLICY "comercial_ver" ON doc.guia_remision              FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.guia_remision_detalle      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.entrega              FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.entrega_detalle      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.catalogo_precios           FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.compra                     FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.compra_detalle             FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
-CREATE POLICY "comercial_ver" ON doc.compra_guia_remision       FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
+CREATE POLICY "comercial_ver" ON doc.compra_entrega       FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.factura_proveedor          FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.factura_proveedor_detalle  FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
 CREATE POLICY "comercial_ver" ON doc.letra                      FOR SELECT TO authenticated USING (jwt_has_permission('comercial.ver'));
@@ -438,7 +438,7 @@ CREATE POLICY "configuracion_ver" ON iam.rol_permiso FOR SELECT TO authenticated
 -- │ COMERCIAL                                                                │
 -- │  crear_partida (header+steps+rolls, atomic)  │ comercial.crear            │
 -- │  actualizar_partida                          │ comercial.editar           │
--- │  registrar/anular guia_remision              │ comercial.crear/editar     │
+-- │  registrar/anular entrega              │ comercial.crear/editar     │
 -- │  crear_compra, vincular_*                    │ comercial.crear            │
 -- │  registrar_factura_proveedor                 │ comercial.crear            │
 -- │  registrar_letra, vincular_facturas_compra   │ comercial.editar           │

@@ -1,10 +1,10 @@
 -- ============================================================
--- Patch roll ingress — appends missing items to existing guia
+-- Patch roll ingress — appends missing items to existing entrega
 --
 -- Use when a partida already has lotes ingressed but partida_detalle
 -- has item types not yet covered by any partida_componente lote.
--- New lotes are created under the partida's newest guia (no new
--- guia header), and guia_remision_detalle is extended accordingly.
+-- New lotes are created under the partida's newest entrega (no new
+-- entrega header), and entrega_detalle is extended accordingly.
 --
 -- Parameters (edit before running):
 --   v_partida_id        : partida to patch
@@ -26,11 +26,11 @@ WHERE pd.partida_id = 5195   -- <- v_partida_id
         AND l.item_id     = pd.item_id
   );
 
--- Existing guia that new lotes will be appended to:
+-- Existing entrega that new lotes will be appended to:
 SELECT gr.id, gr.serie, gr.correlativo, COUNT(pc.lote_id) AS existing_lotes
 FROM mes.partida_componente        pc
 JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = pc.lote_id
-JOIN doc.guia_remision             gr  ON gr.id       = lrd.guia_remision_id
+JOIN doc.entrega             gr  ON gr.id       = lrd.entrega_id
 WHERE pc.partida_id = 0   -- <- v_partida_id
 GROUP BY 1,2,3
 ORDER BY gr.id DESC
@@ -43,7 +43,7 @@ DECLARE
     v_partida_id        INT     := 5195;     -- <- CHANGE
     v_peso_kg_por_rollo NUMERIC := 20.0;  -- <- CHANGE
 
-    v_guia_id        BIGINT;
+    v_entrega_id        BIGINT;
     v_mov_tipo_id    SMALLINT;
     v_propietario_id INT;
     v_ubicacion_id   INT;
@@ -53,29 +53,29 @@ DECLARE
     r                RECORD;
     i                INT;
 BEGIN
-    -- 1. Newest guia already linked to this partida
+    -- 1. Newest entrega already linked to this partida
     SELECT gr.id
-    INTO v_guia_id
+    INTO v_entrega_id
     FROM mes.partida_componente        pc
     JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = pc.lote_id
-    JOIN doc.guia_remision             gr  ON gr.id       = lrd.guia_remision_id
+    JOIN doc.entrega             gr  ON gr.id       = lrd.entrega_id
     WHERE pc.partida_id = v_partida_id
       AND pc.lote_id IS NOT NULL
     ORDER BY pc.fyh_cre DESC
     LIMIT 1;
 
-    IF v_guia_id IS NULL THEN
-        RAISE EXCEPTION 'No existing guia for partida_id=%. Run the full bulk ingress first.', v_partida_id;
+    IF v_entrega_id IS NULL THEN
+        RAISE EXCEPTION 'No existing entrega for partida_id=%. Run the full bulk ingress first.', v_partida_id;
     END IF;
 
-    RAISE NOTICE 'Patching into guia_id=% for partida_id=%', v_guia_id, v_partida_id;
+    RAISE NOTICE 'Patching into entrega_id=% for partida_id=%', v_entrega_id, v_partida_id;
 
-    -- 2. Movement tipo and propietario from the guia
+    -- 2. Movement tipo and propietario from the entrega
     SELECT grt.item_movimiento_tipo_id, gr.tercero_id
     INTO v_mov_tipo_id, v_propietario_id
-    FROM doc.guia_remision gr
-    JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
-    WHERE gr.id = v_guia_id;
+    FROM doc.entrega gr
+    JOIN doc.entrega_tipo grt ON grt.id = gr.entrega_tipo_id
+    WHERE gr.id = v_entrega_id;
 
     SELECT ub.id INTO STRICT v_ubicacion_id
     FROM inventario.ubicacion ub
@@ -106,12 +106,12 @@ BEGIN
             INSERT INTO inventario.lote (
                 item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre
             )
-            VALUES (r.item_id, 'guia_remision', v_guia_id,
+            VALUES (r.item_id, 'entrega', v_entrega_id,
                     v_peso_kg_por_rollo, v_propietario_id, NULL)
             RETURNING id INTO v_lote_id;
 
-            INSERT INTO inventario.lote_rollo_detalle (lote_id, guia_remision_id)
-            VALUES (v_lote_id, v_guia_id);
+            INSERT INTO inventario.lote_rollo_detalle (lote_id, entrega_id)
+            VALUES (v_lote_id, v_entrega_id);
 
             INSERT INTO mes.partida_componente (
                 partida_id, lote_id, item_id, partida_paso_id,
@@ -130,21 +130,21 @@ BEGIN
             VALUES (
                 v_doc_mov_id, r.item_id, v_lote_id, v_mov_tipo_id,
                 NULL, v_ubicacion_id, v_peso_kg_por_rollo,
-                'guia_remision', v_guia_id,
-                'Patch ingreso guia_id=' || v_guia_id || ' partida=' || v_partida_id,
+                'entrega', v_entrega_id,
+                'Patch ingreso entrega_id=' || v_entrega_id || ' partida=' || v_partida_id,
                 NULL
             );
 
-            INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, lote_id, cantidad)
-            VALUES (v_guia_id, r.item_id, v_lote_id, v_peso_kg_por_rollo)
-            ON CONFLICT (guia_remision_id, item_id, lote_id, ubicacion_id) DO NOTHING;
+            INSERT INTO doc.entrega_detalle (entrega_id, item_id, lote_id, cantidad)
+            VALUES (v_entrega_id, r.item_id, v_lote_id, v_peso_kg_por_rollo)
+            ON CONFLICT (entrega_id, item_id, lote_id, ubicacion_id) DO NOTHING;
 
         END LOOP;
     END LOOP;
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
 
-    RAISE NOTICE 'Patch complete — guia_id=%, partida_id=%, doc_mov_id=%',
-        v_guia_id, v_partida_id, v_doc_mov_id;
+    RAISE NOTICE 'Patch complete — entrega_id=%, partida_id=%, doc_mov_id=%',
+        v_entrega_id, v_partida_id, v_doc_mov_id;
 END;
 $$;

@@ -1,31 +1,31 @@
 -- ============================================================
 -- Bulk roll ingress — loops over all pending partidas from
--- vw_partidas_resumen (non-MLR clients, guia without dash).
+-- vw_partidas_resumen (non-MLR clients, entrega without dash).
 --
 -- Derives per-iteration:
 --   partida_id    ← vw.partida
---   correlativo   ← vw.guia
+--   correlativo   ← vw.entrega
 --   fecha_emision ← vw.fecha_registro
 --
 -- Fixed params (edit before running):
 --   v_tipo_codigo       : always CLIENTE_ENVIO_PROCESO for this query
---   v_serie             : serie prefix for all guias
+--   v_serie             : serie prefix for all entregas
 --   v_peso_kg_por_rollo : used only when Mode A creates new lotes
 --
--- Per-partida logic mirrors ingreso_rollos_guia_bulk.sql:
+-- Per-partida logic mirrors ingreso_rollos_entrega_bulk.sql:
 --   A. New items → lote + lote_rollo_detalle + partida_componente +
---                  item_movimientos + guia_remision_detalle
+--                  item_movimientos + entrega_detalle
 --   B. Existing lotes missing lrd → lote_rollo_detalle +
---                                   guia_remision_detalle only
+--                                   entrega_detalle only
 -- ============================================================
 
 -- -- DRY RUN: partidas that will be processed ------------------
 /*
-SELECT partida, guia, fecha_registro, cliente
+SELECT partida, entrega, fecha_registro, cliente
 FROM vw_partidas_resumen
 WHERE estado IN ('Pendiente Receta', 'Pendiente Termofijar', 'Para Programar')
   AND cliente NOT IN ('Fredy Gaytan','MLR/Rudy','Oswaldo','Montes','MLR/Oswaldo','Jimmy','Boston','A&R TEXTILES')
-  AND guia NOT LIKE '%-%'
+  AND entrega NOT LIKE '%-%'
 ORDER BY partida;
 */
 
@@ -48,7 +48,7 @@ DECLARE
     v_fecha_emision  TIMESTAMPTZ;
     v_tercero_id     INT;
     v_propietario_id INT;
-    v_guia_id        BIGINT;
+    v_entrega_id        BIGINT;
     v_doc_mov_id     BIGINT;
     v_lote_id        INT;
     v_count_new      INT;
@@ -59,7 +59,7 @@ BEGIN
     -- Resolve tipo and ubicacion once for the whole batch
     SELECT grt.id, grt.item_movimiento_tipo_id
     INTO STRICT v_tipo_id, v_mov_tipo_id
-    FROM doc.guia_remision_tipo grt
+    FROM doc.entrega_tipo grt
     WHERE grt.codigo = v_tipo_codigo;
 
     SELECT ub.id INTO STRICT v_ubicacion_id
@@ -70,12 +70,12 @@ BEGIN
 
     FOR p IN
         SELECT partida::INT      AS partida_id,
-               guia              AS correlativo,
+               entrega              AS correlativo,
                fecha_registro    AS fecha_emision
         FROM vw_partidas_resumen
         WHERE estado IN ('Pendiente Receta', 'Pendiente Termofijar', 'Para Programar')
           AND cliente NOT IN ('Fredy Gaytan','MLR/Rudy','Oswaldo','Montes','MLR/Oswaldo','Jimmy','Boston','A&R TEXTILES')
-          AND guia NOT LIKE '%-%'
+          AND entrega NOT LIKE '%-%'
         ORDER BY partida::INT
     LOOP
         v_partida_id    := p.partida_id;
@@ -94,26 +94,26 @@ BEGIN
 
         v_propietario_id := v_tercero_id;  -- always CLIENTE_ENVIO_PROCESO
 
-        -- Guia header — create or reuse
-        INSERT INTO doc.guia_remision (
-            guia_remision_tipo_id, tercero_id, serie, correlativo, fecha_emision
+        -- entrega header — create or reuse
+        INSERT INTO doc.entrega (
+            entrega_tipo_id, tercero_id, serie, correlativo, fecha_emision
         )
         VALUES (v_tipo_id, v_tercero_id, v_serie, v_correlativo, v_fecha_emision)
-        ON CONFLICT (tercero_id, serie, correlativo, guia_remision_tipo_id) DO NOTHING
-        RETURNING id INTO v_guia_id;
+        ON CONFLICT (tercero_id, serie, correlativo, entrega_tipo_id) DO NOTHING
+        RETURNING id INTO v_entrega_id;
 
-        IF v_guia_id IS NULL THEN
-            SELECT id INTO STRICT v_guia_id
-            FROM doc.guia_remision
+        IF v_entrega_id IS NULL THEN
+            SELECT id INTO STRICT v_entrega_id
+            FROM doc.entrega
             WHERE tercero_id            = v_tercero_id
               AND serie                 = v_serie
               AND correlativo           = v_correlativo
-              AND guia_remision_tipo_id = v_tipo_id;
-            RAISE NOTICE '  [guia] Reusing id=% (%-%) partida=%',
-                v_guia_id, v_serie, v_correlativo, v_partida_id;
+              AND entrega_tipo_id = v_tipo_id;
+            RAISE NOTICE '  [entrega] Reusing id=% (%-%) partida=%',
+                v_entrega_id, v_serie, v_correlativo, v_partida_id;
         ELSE
-            RAISE NOTICE '  [guia] Created id=% (%-%) partida=%',
-                v_guia_id, v_serie, v_correlativo, v_partida_id;
+            RAISE NOTICE '  [entrega] Created id=% (%-%) partida=%',
+                v_entrega_id, v_serie, v_correlativo, v_partida_id;
         END IF;
 
         v_doc_mov_id := nextval('inventario.mov_doc_seq');
@@ -137,12 +137,12 @@ BEGIN
                 INSERT INTO inventario.lote (
                     item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre
                 )
-                VALUES (r.item_id, 'guia_remision', v_guia_id,
+                VALUES (r.item_id, 'entrega', v_entrega_id,
                         v_peso_kg_por_rollo, v_propietario_id, NULL)
                 RETURNING id INTO v_lote_id;
 
-                INSERT INTO inventario.lote_rollo_detalle (lote_id, guia_remision_id)
-                VALUES (v_lote_id, v_guia_id);
+                INSERT INTO inventario.lote_rollo_detalle (lote_id, entrega_id)
+                VALUES (v_lote_id, v_entrega_id);
 
                 INSERT INTO mes.partida_componente (
                     partida_id, lote_id, item_id, partida_paso_id, cantidad_reservada, usr_cre
@@ -158,15 +158,15 @@ BEGIN
                 VALUES (
                     v_doc_mov_id, r.item_id, v_lote_id, v_mov_tipo_id,
                     NULL, v_ubicacion_id, v_peso_kg_por_rollo,
-                    'guia_remision', v_guia_id,
-                    'Ingreso via guia ' || v_serie || '-' || v_correlativo
+                    'entrega', v_entrega_id,
+                    'Ingreso via entrega ' || v_serie || '-' || v_correlativo
                         || ' para partida ' || v_partida_id,
                     NULL
                 );
 
-                INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, lote_id, cantidad)
-                VALUES (v_guia_id, r.item_id, v_lote_id, v_peso_kg_por_rollo)
-                ON CONFLICT (guia_remision_id, item_id, lote_id, ubicacion_id) DO NOTHING;
+                INSERT INTO doc.entrega_detalle (entrega_id, item_id, lote_id, cantidad)
+                VALUES (v_entrega_id, r.item_id, v_lote_id, v_peso_kg_por_rollo)
+                ON CONFLICT (entrega_id, item_id, lote_id, ubicacion_id) DO NOTHING;
 
                 v_count_new := v_count_new + 1;
             END LOOP;
@@ -186,18 +186,18 @@ BEGIN
         LOOP
             RAISE NOTICE '  [PATCH] partida=% lote_id=%', v_partida_id, r.lote_id;
 
-            INSERT INTO inventario.lote_rollo_detalle (lote_id, guia_remision_id)
-            VALUES (r.lote_id, v_guia_id)
+            INSERT INTO inventario.lote_rollo_detalle (lote_id, entrega_id)
+            VALUES (r.lote_id, v_entrega_id)
             ON CONFLICT DO NOTHING;
 
-            INSERT INTO doc.guia_remision_detalle (guia_remision_id, item_id, lote_id, cantidad)
-            VALUES (v_guia_id, r.item_id, r.lote_id, r.cantidad)
-            ON CONFLICT (guia_remision_id, item_id, lote_id, ubicacion_id) DO NOTHING;
+            INSERT INTO doc.entrega_detalle (entrega_id, item_id, lote_id, cantidad)
+            VALUES (v_entrega_id, r.item_id, r.lote_id, r.cantidad)
+            ON CONFLICT (entrega_id, item_id, lote_id, ubicacion_id) DO NOTHING;
 
             v_count_patched := v_count_patched + 1;
         END LOOP;
 
-        RAISE NOTICE 'Done partida_id=% guia=%-% — % new lote(s), % patched anchor(s)',
+        RAISE NOTICE 'Done partida_id=% entrega=%-% — % new lote(s), % patched anchor(s)',
             v_partida_id, v_serie, v_correlativo, v_count_new, v_count_patched;
     END LOOP;
 

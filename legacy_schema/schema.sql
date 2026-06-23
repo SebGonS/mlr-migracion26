@@ -3750,21 +3750,21 @@ ALTER FUNCTION public.get_componentes_matizado(partida_param integer) OWNER TO p
 -- Name: get_compra_detalles(text); Type: FUNCTION; Schema: public; Owner: postgres
 --
 
-CREATE FUNCTION public.get_compra_detalles(guia_compra text) RETURNS json
+CREATE FUNCTION public.get_compra_detalles(entrega_compra text) RETURNS json
     LANGUAGE plpgsql
     AS $$DECLARE
     compra_json JSON;
     v_compra_id INTEGER;  -- assuming PK is an integer
 BEGIN
-    -- Derive the primary key from guia_compra
+    -- Derive the primary key from entrega_compra
     SELECT id INTO v_compra_id
     FROM compra
-    WHERE guia_remision = guia_compra;
+    WHERE entrega = entrega_compra;
     SELECT json_build_object(
         'compra_id',c.id,
         'proveedor_id', c.proveedor_id,
         'factura', c.factura,
-        'guia_remision', c.guia_remision,
+        'entrega', c.entrega,
         'tipo_pago', c.tipo_pago,
         'fecha_remision', c.fecha_remision,
         'fecha_giro', c.fecha_giro,
@@ -3801,7 +3801,7 @@ BEGIN
 END;$$;
 
 
-ALTER FUNCTION public.get_compra_detalles(guia_compra text) OWNER TO postgres;
+ALTER FUNCTION public.get_compra_detalles(entrega_compra text) OWNER TO postgres;
 
 --
 -- Name: get_cuadre_inventario(integer); Type: FUNCTION; Schema: public; Owner: postgres
@@ -3906,11 +3906,11 @@ ALTER FUNCTION public.get_entrada_inventario_detalles(entrada_id integer) OWNER 
 -- Name: get_info_partida(integer); Type: FUNCTION; Schema: public; Owner: postgres
 --
 
-CREATE FUNCTION public.get_info_partida(partida_param integer) RETURNS TABLE(partida integer, guia text, cliente text, articulo text, color text, ancho text, rendimiento text, malla text, fibra text, rollos integer, rib integer, rollos_rib text, peso double precision, fecha_entrega date, color2 text, primera_partida text, duracion interval, observacion text)
+CREATE FUNCTION public.get_info_partida(partida_param integer) RETURNS TABLE(partida integer, entrega text, cliente text, articulo text, color text, ancho text, rendimiento text, malla text, fibra text, rollos integer, rib integer, rollos_rib text, peso double precision, fecha_entrega date, color2 text, primera_partida text, duracion interval, observacion text)
     LANGUAGE sql
     AS $$SELECT
     a.partida,
-    a.guia,
+    a.entrega,
     a.cliente,
     a.articulo,
     concat(a.color, ' ', a.tenido) AS color,
@@ -4146,7 +4146,7 @@ ALTER FUNCTION public.get_max_pk_partida() OWNER TO postgres;
 
 SELECT 
 'partida_id',p.id,
-        'guia',p.guia,
+        'entrega',p.entrega,
         'fecha_entrega',p.fecha_entrega,
         'prioridad_id', p.prioridad_id,
         'cliente_id', p.cliente_id,
@@ -4182,7 +4182,7 @@ DECLARE
 BEGIN
     SELECT json_build_object(
         'partida_id',p_partida_id,
-        'guia',p.guia,
+        'entrega',p.entrega,
         'fecha_entrega',p.fecha_entrega,
         'prioridad_id', p.prioridad_id,
         'cliente_id', p.cliente_id,
@@ -5077,7 +5077,7 @@ BEGIN
     INSERT INTO compra AS c (
         proveedor_id,
         factura,
-        guia_remision,
+        entrega,
         tipo_pago,
         fecha_remision,
         fecha_giro,
@@ -5088,7 +5088,7 @@ BEGIN
     VALUES (
         (json_data->>'proveedor_id')::SMALLINT,
         (json_data->>'factura'),
-        (json_data->>'guia_remision'),
+        (json_data->>'entrega'),
         (json_data->>'tipo_pago')::tipo_pago_enum,
         nullif((json_data->>'fecha_remision'),'')::date,
         nullif((json_data->>'fecha_giro'),'')::date,
@@ -5233,7 +5233,7 @@ DECLARE
 BEGIN
     -- Insert the main 'partida' record using an alias for clarity
     INSERT INTO partida AS p (
-        guia,
+        entrega,
         fecha_entrega,
         prioridad_id,
         cliente_id,
@@ -5251,7 +5251,7 @@ BEGIN
         observacion
     )
     VALUES (
-        json_data->>'guia',
+        json_data->>'entrega',
         (json_data->>'fecha_entrega')::DATE,
         (json_data->>'prioridad_id')::SMALLINT,
         (json_data->>'cliente_id')::SMALLINT,
@@ -6021,7 +6021,7 @@ CREATE FUNCTION public.insertar_devolucion(json_data jsonb) RETURNS void
     insert into devolucion (
         partida_id,
         fecha_devolucion,
-        guia_remision,
+        entrega,
         rollos,
         rib,
         motivo,
@@ -6030,7 +6030,7 @@ CREATE FUNCTION public.insertar_devolucion(json_data jsonb) RETURNS void
     values (
         (json_data->>'partida_id')::int,
         (json_data->>'fecha_devolucion')::date,
-        (json_data->>'guia_remision')::text,
+        (json_data->>'entrega')::text,
         (json_data->>'rollos')::int,
         (json_data->>'rib')::int,
         (json_data->>'motivo')::text
@@ -6513,7 +6513,7 @@ DECLARE
 BEGIN
     -- Insertar el registro principal en 'partida' utilizando un alias para mayor claridad
     INSERT INTO partida AS p (
-        guia,
+        entrega,
         fecha_entrega,
         prioridad_id,
         cliente_id,
@@ -6530,7 +6530,7 @@ BEGIN
         rollos
     )
     VALUES (
-        json_data->>'guia',
+        json_data->>'entrega',
         (json_data->>'fecha_entrega')::DATE,
         (json_data->>'prioridad_id')::SMALLINT,
         (json_data->>'cliente_id')::SMALLINT,
@@ -8490,7 +8490,7 @@ BEGIN
  
   UPDATE partida
   SET 
-    guia = COALESCE(json_data->>'guia', guia),
+    entrega = COALESCE(json_data->>'entrega', entrega),
     fecha_entrega = COALESCE((json_data->>'fecha_entrega')::DATE, fecha_entrega),
     articulo_id = COALESCE((json_data->>'articulo_id')::smallint, articulo_id),
     prioridad_id = COALESCE((json_data->>'prioridad_id')::smallint, prioridad_id),
@@ -11816,7 +11816,7 @@ CREATE TABLE public.compra (
     id integer NOT NULL,
     proveedor_id smallint,
     factura text,
-    guia_remision text,
+    entrega text,
     tipo_pago public.tipo_pago_enum,
     fecha_remision date,
     fecha_giro date,
@@ -12075,7 +12075,7 @@ CREATE VIEW public.comrpas_pendientes_completas AS
          SELECT com.id AS pk_compra,
             com.proveedor_id AS fk_proveedor,
             com.factura,
-            com.guia_remision,
+            com.entrega,
             com.tipo_pago,
             com.fecha_remision,
             com.fecha_giro,
@@ -12303,7 +12303,7 @@ CREATE TABLE public.devolucion (
     id integer NOT NULL,
     partida_id integer NOT NULL,
     fecha_devolucion date NOT NULL,
-    guia_remision text NOT NULL,
+    entrega text NOT NULL,
     rollos integer NOT NULL,
     rib integer NOT NULL,
     motivo text,
@@ -13161,7 +13161,7 @@ ALTER TABLE public.partida_codigo_seq OWNER TO postgres;
 CREATE TABLE public.partida (
     id integer NOT NULL,
     fecha_registro date DEFAULT CURRENT_DATE,
-    guia character varying(250),
+    entrega character varying(250),
     fecha_entrega date,
     prioridad_id smallint,
     cliente_id smallint,
@@ -14433,7 +14433,7 @@ CREATE VIEW public.vw_compras_reporte AS
     p.proveedor,
     c.factura,
     (c.fyh_cre)::date AS fecha_registro,
-    c.guia_remision,
+    c.entrega,
     c.fecha_remision,
     c.total_usd,
     c.tipo_pago,
@@ -14476,7 +14476,7 @@ ALTER TABLE public.vw_compra_x_proveedor_x_mes OWNER TO postgres;
 CREATE VIEW public.vw_compras AS
  SELECT c.id AS compra_id,
     c.factura,
-    c.guia_remision,
+    c.entrega,
     c.tipo_pago,
     p.proveedor,
     c.fecha_remision,
@@ -14939,7 +14939,7 @@ CREATE VIEW public.vw_despacho_resumen AS
     min(v.fecha_despacho) AS primera_salida,
     max(v.fecha_despacho) AS ultima_salida,
     array_agg(DISTINCT v.nfactura ORDER BY v.nfactura) AS facturas_relacionadas,
-    count(*) AS guias_emitidas,
+    count(*) AS entregas_emitidas,
     (COALESCE(sum(((v.rollos_total)::double precision * v.precio_unit)), (0)::double precision))::numeric(14,2) AS monto_facturado_total
    FROM public.despacho v
   WHERE (v.flg_elm = false)
@@ -15152,7 +15152,7 @@ CREATE VIEW public.vw_partidas_resumen AS
         )
  SELECT part.id AS partida,
     part.fecha_registro,
-    part.guia,
+    part.entrega,
     part.fecha_entrega,
     pri.prioridad,
     cli.cliente,
@@ -16272,7 +16272,7 @@ CREATE VIEW public.vw_partidas_resumen_v2 AS
         )
  SELECT part.id AS partida,
     part.fecha_registro,
-    part.guia,
+    part.entrega,
     part.fecha_entrega,
     pri.prioridad,
     part.cliente_id,
@@ -16491,7 +16491,7 @@ CREATE VIEW public.vw_partidas_x_despachar AS
            FROM public.auditoria
         )
  SELECT a.id AS partida_id,
-    a.guia,
+    a.entrega,
     c.cliente,
     d.articulo,
     e.color,
@@ -16544,7 +16544,7 @@ CREATE VIEW public.vw_partidas_x_pesar AS
           GROUP BY pxe.partida_id
         )
  SELECT part.partida,
-    part.guia,
+    part.entrega,
     part.cliente,
     concat(part.color, ' ', part.tenido) AS color,
     part.articulo,
@@ -17368,7 +17368,7 @@ ALTER TABLE public.vw_reporte_detecciones OWNER TO postgres;
 CREATE VIEW public.vw_resumen_auditorias AS
  SELECT a.id,
     b.id AS partida,
-    b.guia,
+    b.entrega,
     a.fecha_auditoria,
     c.cliente,
     d.grupo_articulo AS tipo_articulo,
@@ -17466,7 +17466,7 @@ CREATE VIEW public.vw_seguimiento_entregas AS
         )
  SELECT part.id AS partida,
     part.fecha_registro,
-    part.guia,
+    part.entrega,
     part.fecha_entrega,
         CASE
             WHEN (cli.cliente ~~ '%J.Ripaz%'::text) THEN 'J.Ripaz'::text
@@ -17658,7 +17658,7 @@ CREATE VIEW public.vw_ultimo_precio_insumo_proveedor AS
             ci.precio_x_kg_usd,
             ci.cantidad,
             c.fyh_cre,
-            c.guia_remision,
+            c.entrega,
             ci.insumo_x_proveedor_id AS fk_insumo_x_proveedor
            FROM (public.compra_x_insumo ci
              LEFT JOIN public.compra c ON ((c.id = ci.compra_id)))

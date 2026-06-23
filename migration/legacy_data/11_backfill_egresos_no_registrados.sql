@@ -62,7 +62,7 @@
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 -- 0a. Lines that CANNOT be computed (NULL amount) — fix machine relacion_bano first.
-WITH params AS (SELECT '2026-01-01'::timestamptz AS win_ini, '2026-04-01'::timestamptz AS win_fin),
+WITH params AS (SELECT '2026-05-25 00:00:00+00'::timestamptz AS win_ini, '2026-06-19 00:00:00+00'::timestamptz AS win_fin),
 egr_tipo AS (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo='PROD_CONSUMO'),
 pasos AS (
     SELECT pe.id AS ejecucion_id, pp.id AS paso_id, pp.partida_id, pp.receta_id,
@@ -114,7 +114,7 @@ CREATE TEMP TABLE _egresos_backfill (
 ) ON COMMIT DROP;
 
 -- TENIDO lines
-WITH params AS (SELECT '2026-01-01'::timestamptz AS win_ini, '2026-04-01'::timestamptz AS win_fin),
+WITH params AS (SELECT '2026-05-25 00:00:00+00'::timestamptz AS win_ini, '2026-06-19 00:00:00+00'::timestamptz AS win_fin),
 egr_tipo AS (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo='PROD_CONSUMO'),
 pasos AS (
     SELECT pe.id AS ejecucion_id, pp.id AS paso_id, pp.partida_id, pp.receta_id,
@@ -167,7 +167,7 @@ GROUP BY c.ejecucion_id, rtpi.item_id, iid.medida, iid.factor_stock,
          c.volumen, c.peso, c.fyh_evento;
 
 -- LAVADO_MAQUINA lines (fixed quantities)
-WITH params AS (SELECT '2026-01-01'::timestamptz AS win_ini, '2026-04-01'::timestamptz AS win_fin)
+WITH params AS (SELECT '2026-05-25 00:00:00+00'::timestamptz AS win_ini, '2026-06-19 00:00:00+00'::timestamptz AS win_fin)
 INSERT INTO _egresos_backfill (documento_tipo, documento_id, item_id, cantidad, fyh_evento)
 SELECT 'lavado_maquina', lm.id, lmpi.item_id,
        SUM(lmpi.cantidad),
@@ -337,7 +337,7 @@ END $$;
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 -- 3a. Zero-egress runs remaining in the window (should be 0, minus uncomputable 0a rows)
-WITH params AS (SELECT '2026-01-01'::timestamptz AS win_ini, '2026-04-01'::timestamptz AS win_fin),
+WITH params AS (SELECT '2026-05-25 00:00:00+00'::timestamptz AS win_ini, '2026-06-19 00:00:00+00'::timestamptz AS win_fin),
 egr_tipo AS (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo='PROD_CONSUMO')
 SELECT
     COUNT(*) FILTER (WHERE tipo='tenido') AS tenido_sin_egreso_restantes,
@@ -411,3 +411,18 @@ ORDER BY SUM(si.cantidad_actual);
 --      (If the corte trigger blocks the delete, it only guards INSERT/UPDATE — DELETE
 --       is unaffected. Run step 1 before step 2.)
 -- ═══════════════════════════════════════════════════════════════════════════════
+
+
+SELECT documento_tipo, COUNT(*) AS movimientos, COUNT(DISTINCT documento_id) AS documentos,
+       ROUND(SUM(cantidad),4) AS cantidad_total, ROUND(SUM(monto),2) AS valor_total
+FROM inventario.item_movimientos
+WHERE observacion = 'BACKFILL_EGRESO_NO_REGISTRADO'
+GROUP BY documento_tipo;
+
+
+SELECT i.id, i.codigo, i.nombre, ROUND(SUM(si.cantidad_actual),4) AS stock
+FROM inventario.item_saldo si JOIN item i ON i.id=si.item_id
+WHERE EXISTS (SELECT 1 FROM inventario.item_movimientos im
+             WHERE im.item_id=i.id AND im.observacion='BACKFILL_EGRESO_NO_REGISTRADO')
+GROUP BY i.id,i.codigo,i.nombre HAVING SUM(si.cantidad_actual) < 0
+ORDER BY 4;

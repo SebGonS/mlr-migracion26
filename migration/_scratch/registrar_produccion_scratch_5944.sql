@@ -1106,7 +1106,7 @@ COMMIT;
 
 
 
-SELECT * FROM doc.guia_remision
+SELECT * FROM doc.entrega
 WHERE correlativo ILIKE '%2646%'
 
 SELECT * FROM item WHERE nombre ILIKE '%rib%f poly%24%1%'
@@ -1119,13 +1119,13 @@ SELECT * FROM item WHERE id=258
 UPDATE inventario.lote
 SET item_id=297
 WHERE item_id=258
-AND id IN (SELECT lote_id FROM inventario.lote_rollo_detalle WHERE guia_remision_id=739)
+AND id IN (SELECT lote_id FROM inventario.lote_rollo_detalle WHERE entrega_id=739)
 
-SELECT * FROM doc.guia_remision_detalle
+SELECT * FROM doc.entrega_detalle
 
-UPDATE doc.guia_remision_detalle
+UPDATE doc.entrega_detalle
 SET item_id=297
-WHERE guia_remision_id=739 AND item_id=258 
+WHERE entrega_id=739 AND item_id=258 
 
 
 SELECT tipo_articulo_id, COUNT(*) AS rows
@@ -1204,7 +1204,7 @@ FROM inventario.lote l
 JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
 JOIN inventario.vw_stock_lotes sl      ON sl.lote_id = l.id
 WHERE l.fyh_elm IS NULL
-  AND lrd.guia_remision_id IS NULL
+  AND lrd.entrega_id IS NULL
   AND lrd.orden_servicio_id IS NULL;
 
 
@@ -1316,7 +1316,7 @@ COMMIT;
 
 -- 1) Does this tipo satisfy esDevolucion (codigo LIKE 'DEV_%') and !esEmitida (flg_emitida = false)?
 select id, codigo, nombre, flg_emitida, flg_cliente
-from doc.guia_remision_tipo
+from doc.entrega_tipo
 where nombre ilike '%devoluci%cliente%servicio%';
 
 -- 2) Does the dispatched view actually return rows for the client you selected?
@@ -1324,3 +1324,54 @@ where nombre ilike '%devoluci%cliente%servicio%';
 select lote_id, item_nombre, propietario_id, partida_codigo, cantidad_disponible
 from inventario.vw_lotes_rollos_despachados
 where propietario_id = (SELECT id FROm tercero WHERE nombre ILIKE '%faride%');
+
+
+
+SELECT * FROM doc.entrega ORDER by id desc
+
+SELECT * FROM doc.entrega_detalle WHERE entrega_id=834 --5854
+
+SELECT * FROm inventario.item_movimientos WHERE documento_id=834 
+
+SELECT * FROM inventario.lote 
+WHERE id IN (SELECT lote_id FROm inventario.item_movimientos WHERE documento_id>=834 and documento_tipo='entrega')
+SELECT * FROM tercero WHERE id=1
+SELECT lote_id, entrega_id, entrega_serie, orden_servicio_id, os_serie, factura_hilo
+FROM inventario.vw_lotes_rollos_stock
+WHERE entrega_id IS NOT NULL
+LIMIT 20;
+
+
+SELECT
+  count(*)                       AS total,
+  count(entrega_id)              AS with_entrega,
+  count(entrega_serie)           AS searchable_by_entrega_serie,
+  count(orden_servicio_id)       AS with_os,
+  count(os_serie)                AS searchable_by_os_serie,
+  count(factura_hilo)            AS searchable_by_factura_hilo
+FROM inventario.vw_lotes_rollos_disponibles;
+
+
+
+
+-- 1. Is the entrega itself headless (no correlativo to search by)?
+SELECT id, serie, correlativo, entrega_tipo_id FROM doc.entrega WHERE id = 834;
+
+-- 2. Are its rolls linked in lote_rollo_detalle? (THE likely culprit)
+SELECT count(*) AS rolls_linked
+FROM inventario.lote_rollo_detalle WHERE entrega_id = 834;
+
+-- 3. Do they surface in the stock view with a serie/correlativo?
+SELECT lote_id, entrega_id, entrega_serie, entrega_correlativo, cantidad_disponible
+FROM inventario.vw_lotes_rollos_stock WHERE entrega_id = 834 LIMIT 10;
+
+-- 4. And are they actually available (not reserved/consumed)?
+SELECT count(*) AS available
+FROM inventario.vw_lotes_rollos_disponibles WHERE entrega_id = 834;
+
+SELECT * FROM produccion_tenido
+
+SELECT p.id
+FROM partida p
+LEFT JOIN produccion_tenido pt ON pt.partida_id=p.id
+LEFT JOIN partida_x_recetas pxr ON pxr.partida_id=pt.id AND 

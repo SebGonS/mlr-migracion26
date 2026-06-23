@@ -189,7 +189,7 @@ DECLARE
     v_context   text;
     v_sqlstate  text;
     v_almacen_id   INT;
-    v_guia_tipo guia_remision_tipo%ROWTYPE;
+    v_entrega_tipo entrega_tipo%ROWTYPE;
     v_usr_id int := get_user_id();
     v_lote_id int;
     v_error_payload jsonb;
@@ -242,7 +242,7 @@ DECLARE
     v_context   text;
     v_sqlstate  text;
     v_almacen_id   INT;
-    v_guia_tipo guia_remision_tipo%ROWTYPE;
+    v_entrega_tipo entrega_tipo%ROWTYPE;
     v_usr_id int := get_user_id();
     v_lote_id int;
     v_error_payload jsonb;
@@ -306,7 +306,7 @@ DECLARE
     v_context   text;
     v_sqlstate  text;
     v_almacen_id   INT;
-    v_guia_tipo guia_remision_tipo%ROWTYPE;
+    v_entrega_tipo entrega_tipo%ROWTYPE;
     v_usr_id int := get_user_id();
     v_almacen_nombre text;
     v_error_payload jsonb;
@@ -1175,7 +1175,7 @@ $function$;
 
 
 
-CREATE OR REPLACE FUNCTION doc.crear_guia(p_guia jsonb)
+CREATE OR REPLACE FUNCTION doc.crear_entrega(p_entrega jsonb)
 RETURNS text
 LANGUAGE plpgsql
  SECURITY DEFINER
@@ -1187,54 +1187,56 @@ DECLARE
     v_hint      text;
     v_context   text;
     v_sqlstate  text;
-    v_guia_id           BIGINT;
-    v_guia_tipo         guia_remision_tipo%ROWTYPE;
+    v_entrega_id           BIGINT;
+    v_entrega_tipo         entrega_tipo%ROWTYPE;
     v_doc_movimiento_id BIGINT;
     v_usr_id            int := get_user_id();
     v_lote_id           int;
     v_error_payload     jsonb;
     v_fecha_mov         TIMESTAMPTZ;
+    v_detalle_id        BIGINT;
+    v_linea_rec         RECORD;
 BEGIN
     IF NOT jwt_has_permission('comercial.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
- SELECT * INTO v_guia_tipo FROM guia_remision_tipo WHERE id = (p_guia->>'guia_remision_tipo_id')::SMALLINT;
+ SELECT * INTO v_entrega_tipo FROM entrega_tipo WHERE id = (p_entrega->>'entrega_tipo_id')::SMALLINT;
  IF NOT FOUND THEN
-     RAISE EXCEPTION 'Tipo de guía con id % no existe', (p_guia->>'guia_remision_tipo_id');
+     RAISE EXCEPTION 'Tipo de guía con id % no existe', (p_entrega->>'entrega_tipo_id');
  END IF;
 
  -- COMPRA_INGRESO must always be tied to a compra — ensures precio_unitario is available
- -- and stock is traceable to a PO. Use doc.ingresar_compra when no guia is in hand.
- IF v_guia_tipo.codigo = 'COMPRA_INGRESO' AND (p_guia->>'compra_id') IS NULL THEN
+ -- and stock is traceable to a PO. Use doc.ingresar_compra when no entrega is in hand.
+ IF v_entrega_tipo.codigo = 'COMPRA_INGRESO' AND (p_entrega->>'compra_id') IS NULL THEN
      RAISE EXCEPTION 'Guía tipo COMPRA_INGRESO requiere compra_id'
          USING HINT = 'Si no tiene guía física aún, use doc.ingresar_compra en su lugar.';
  END IF;
 
- -- Movement timestamp: for incoming guias use fecha_recepcion (allows backdating), for outgoing use now()
+ -- Movement timestamp: for incoming entregas use fecha_recepcion (allows backdating), for outgoing use now()
  v_fecha_mov := CASE
-    WHEN v_guia_tipo.flg_emitida THEN (p_guia->>'fecha_emision')::TIMESTAMPTZ
-    ELSE COALESCE((p_guia->>'fecha_recepcion')::TIMESTAMPTZ, now())
+    WHEN v_entrega_tipo.flg_emitida THEN (p_entrega->>'fecha_emision')::TIMESTAMPTZ
+    ELSE COALESCE((p_entrega->>'fecha_recepcion')::TIMESTAMPTZ, now())
 END;
 
--- Single posting document id shared by all movements from this guia call
+-- Single posting document id shared by all movements from this entrega call
 SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
 
-IF v_guia_tipo.flg_emitida THEN
+IF v_entrega_tipo.flg_emitida THEN
         -- SELECT im.lote_id,COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id),SUM(CASE WHEN im.movimiento_tipo = 'EGRESO' THEN -im.cantidad WHEN im.movimiento_tipo = 'INGRESO' THEN im.cantidad ELSE 0 END) FROM inventario.item_movimientos im
-        -- JOIN jsonb_array_elements(p_guia->'items') AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
+        -- JOIN jsonb_array_elements(p_entrega->'items') AS items ON items.item_id=im.item_id AND items.lote_id=im.lote_id AND items.ubicacion_id= COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
         -- GROUP BY im.lote_id,COALESCE(im.destino_ubicacion_id,im.origen_ubicacion_id)
         ---------------------
         --VALIDAR DISPONIBILIDAD DE items
         -------------------
-        WITH guia_items AS (
+        WITH entrega_items AS (
         SELECT
             (i->>'item_id')::int        AS item_id,
             (i->>'lote_id')::int        AS lote_id,
             (i->>'ubicacion_id')::int  AS ubicacion_id,
             SUM((i->>'cantidad')::numeric)  AS cantidad
-        FROM jsonb_array_elements(p_guia->'items') i
+        FROM jsonb_array_elements(p_entrega->'items') i
         GROUP BY 1,2,3
     ),errores AS (
     SELECT
@@ -1244,7 +1246,7 @@ IF v_guia_tipo.flg_emitida THEN
         items.ubicacion_id,
         items.cantidad,
         COALESCE(sa.cantidad_disponible, 0) AS cantidad_disponible
-    FROM guia_items items
+    FROM entrega_items items
     LEFT JOIN inventario.vw_stock_lotes sa
         ON sa.item_id = items.item_id
         AND sa.lote_id = items.lote_id
@@ -1271,159 +1273,171 @@ IF v_guia_tipo.flg_emitida THEN
     END IF;
 END IF; -- stock validation (flg_emitida only)
 -----------------------------------------------------------------------------------------------------------------------
--- tercero validation applies to all guia types
-IF (p_guia->>'tercero_id') IS NULL THEN
+-- tercero validation applies to all entrega types
+IF (p_entrega->>'tercero_id') IS NULL THEN
     RAISE EXCEPTION 'Guía inválida: se esperaba tercero_id';
 END IF;
-IF v_guia_tipo.flg_cliente AND NOT EXISTS (
-    SELECT 1 FROM tercero WHERE id = (p_guia->>'tercero_id')::INT AND flg_cliente = true
+IF v_entrega_tipo.flg_cliente AND NOT EXISTS (
+    SELECT 1 FROM tercero WHERE id = (p_entrega->>'tercero_id')::INT AND flg_cliente = true
 ) THEN
-    RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un cliente', (p_guia->>'tercero_id');
-ELSIF NOT v_guia_tipo.flg_cliente AND NOT EXISTS (
-    SELECT 1 FROM tercero WHERE id = (p_guia->>'tercero_id')::INT AND flg_proveedor = true
+    RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un cliente', (p_entrega->>'tercero_id');
+ELSIF NOT v_entrega_tipo.flg_cliente AND NOT EXISTS (
+    SELECT 1 FROM tercero WHERE id = (p_entrega->>'tercero_id')::INT AND flg_proveedor = true
 ) THEN
-    RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un proveedor', (p_guia->>'tercero_id');
+    RAISE EXCEPTION 'Guía inválida: tercero_id % no corresponde a un proveedor', (p_entrega->>'tercero_id');
 END IF;
 
 
  INSERT INTO logs_api(function_name, user_id, params)
-        VALUES ('crear_guia', v_usr_id, p_guia);
+        VALUES ('crear_entrega', v_usr_id, p_entrega);
 
-    INSERT INTO doc.guia_remision(guia_remision_tipo_id, tercero_id, serie, correlativo, fecha_emision, fecha_recepcion)
+    INSERT INTO doc.entrega(entrega_tipo_id, tercero_id, serie, correlativo, fecha_emision, fecha_recepcion)
     VALUES (
-        (p_guia->>'guia_remision_tipo_id')::INT,
-        (p_guia->>'tercero_id')::INT,
-        p_guia->>'serie',
-        p_guia->>'correlativo',
-        (p_guia->>'fecha_emision')::TIMESTAMPTZ,
+        (p_entrega->>'entrega_tipo_id')::INT,
+        (p_entrega->>'tercero_id')::INT,
+        p_entrega->>'serie',
+        p_entrega->>'correlativo',
+        (p_entrega->>'fecha_emision')::TIMESTAMPTZ,
         CASE
-            WHEN v_guia_tipo.flg_emitida THEN NULL
-            ELSE COALESCE((p_guia->>'fecha_recepcion')::TIMESTAMPTZ, now())
+            WHEN v_entrega_tipo.flg_emitida THEN NULL
+            ELSE COALESCE((p_entrega->>'fecha_recepcion')::TIMESTAMPTZ, now())
         END
     )
-    RETURNING id INTO v_guia_id;
+    RETURNING id INTO v_entrega_id;
 
 -- COMPRA_INGRESO: static document registration only.
 -- Movements are always posted separately via doc.ingresar_compra.
 -- Returning early here prevents any possibility of double-posting.
-IF v_guia_tipo.codigo = 'COMPRA_INGRESO' THEN
-    INSERT INTO doc.compra_guia_remision (compra_id, guia_remision_id)
-    VALUES ((p_guia->>'compra_id')::BIGINT, v_guia_id)
+IF v_entrega_tipo.codigo = 'COMPRA_INGRESO' THEN
+    INSERT INTO doc.compra_entrega (compra_id, entrega_id)
+    VALUES ((p_entrega->>'compra_id')::BIGINT, v_entrega_id)
     ON CONFLICT DO NOTHING;
 
-    INSERT INTO doc.guia_remision_detalle (guia_remision_id, linea, item_id, cantidad, n_rollos)
-    SELECT v_guia_id,
+    INSERT INTO doc.entrega_detalle (entrega_id, linea, item_id, cantidad, n_rollos)
+    SELECT v_entrega_id,
            COALESCE((item->>'linea')::SMALLINT, (row_number() OVER ())::SMALLINT),
            (item->>'item_id')::INT, (item->>'cantidad')::NUMERIC,
            (item->>'cantidad_rollos')::INT
-    FROM jsonb_array_elements(p_guia->'items') AS item;
+    FROM jsonb_array_elements(p_entrega->'items') AS item;
 
-    RETURN format('Guía de remisión con ID %s registrada (documento SUNAT — sin movimientos).', v_guia_id);
+    RETURN format('Guía de remisión con ID %s registrada (documento SUNAT — sin movimientos).', v_entrega_id);
 END IF;
 
-IF v_guia_tipo.flg_emitida THEN
+IF v_entrega_tipo.flg_emitida THEN
     
-    INSERT INTO doc.guia_remision_detalle (guia_remision_id, linea, item_id, cantidad, lote_id, ubicacion_id, n_rollos)
-    SELECT
-        v_guia_id,
-        COALESCE((item->>'linea')::SMALLINT, (row_number() OVER ())::SMALLINT),
-        (item->>'item_id')::INT,
-        (item->>'cantidad')::NUMERIC(12,4),
-        (item->>'lote_id')::INT,
-        (item->>'ubicacion_id')::INT,
-        (item->>'n_rollos')::INT
-    FROM jsonb_array_elements(p_guia->'items') AS item;
-    -- For issued guides, create item movements as EGRESO from warehouse
-    INSERT INTO inventario.item_movimientos
-    (
-        doc_movimiento_id, item_id,
-        lote_id,
-        item_movimiento_tipo_id,
-        origen_ubicacion_id,
-        destino_ubicacion_id,
-        cantidad, fecha_hora, documento_tipo, documento_id)
-    SELECT
-        v_doc_movimiento_id,
-        (item->>'item_id')::INT,
-        (item->>'lote_id')::INT,
-        v_guia_tipo.item_movimiento_tipo_id,
-        (item->>'ubicacion_id')::INT,  -- per-item origin location
-        NULL, -- destination is external
-        (item->>'cantidad')::NUMERIC(12,4),
-        v_fecha_mov,
-        'guia_remision',
-        v_guia_id
-    FROM jsonb_array_elements(p_guia->'items') AS item;
-ELSE
-    -- Devolution: items with existing lote_id — movement only, no new lote
-    INSERT INTO inventario.item_movimientos
-        (doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-         destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id)
-    SELECT v_doc_movimiento_id, (item->>'item_id')::INT, (item->>'lote_id')::INT,
-           v_guia_tipo.item_movimiento_tipo_id, (item->>'ubicacion_id')::INT,
-           (item->>'cantidad')::NUMERIC(12,4), v_fecha_mov, 'guia_remision', v_guia_id
-    FROM jsonb_array_elements(p_guia->'items') AS item
-    WHERE item->>'lote_id' IS NOT NULL;
-
-    INSERT INTO doc.guia_remision_detalle (guia_remision_id, linea, item_id, cantidad, lote_id, ubicacion_id)
-    SELECT v_guia_id,
-           COALESCE((item->>'linea')::SMALLINT, (row_number() OVER ())::SMALLINT),
-           (item->>'item_id')::INT, (item->>'cantidad')::NUMERIC,
-           (item->>'lote_id')::INT, (item->>'ubicacion_id')::INT
-    FROM jsonb_array_elements(p_guia->'items') AS item
-    WHERE item->>'lote_id' IS NOT NULL;
-
-    -- Document layer
-    INSERT INTO doc.guia_remision_detalle (guia_remision_id, linea, item_id, cantidad, n_rollos)
-    SELECT v_guia_id,
-           COALESCE((item->>'linea')::SMALLINT, (row_number() OVER ())::SMALLINT),
-           (item->>'item_id')::INT, (item->>'cantidad')::NUMERIC,
-           (item->>'cantidad_rollos')::INT
-    FROM jsonb_array_elements(p_guia->'items') AS item
-    WHERE item->>'lote_id' IS NULL;
-
-    WITH expanded AS (
+    -- Issued guides (dispatch/devolution-out): EGRESO of existing lotes.
+    -- Insert detalle first (one line per item) capturing each line id, then post
+    -- movements linked to their line via documento_linea_id (≈ MSEG.EBELP).
+    WITH items AS (
         SELECT
-            (item->>'item_id')::INT   AS item_id,
-            (item->>'ubicacion_id')::INT AS ubicacion_id,
-            (item->>'cantidad')::NUMERIC AS cantidad,
-            (item->>'cantidad')::NUMERIC / NULLIF((item->>'cantidad_rollos')::INT, 0) AS peso_estimado,
-            (p_guia->>'propietario_id')::INT AS propietario_id
-        FROM jsonb_array_elements(p_guia->'items') AS item
-        LEFT JOIN LATERAL generate_series(1, COALESCE((item->>'cantidad_rollos')::INT, 1)) rollo_numero ON true
-        WHERE item->>'lote_id' IS NULL
+            COALESCE((item->>'linea')::SMALLINT, idx::SMALLINT) AS linea,
+            (item->>'item_id')::INT                             AS item_id,
+            (item->>'cantidad')::NUMERIC(12,4)                  AS cantidad,
+            (item->>'lote_id')::INT                             AS lote_id,
+            (item->>'ubicacion_id')::INT                        AS ubicacion_id,
+            (item->>'n_rollos')::INT                            AS n_rollos
+        FROM jsonb_array_elements(p_entrega->'items') WITH ORDINALITY AS t(item, idx)
     ),
-    nuevos_lotes AS (
-        INSERT INTO lote (item_id, documento_tipo, documento_id, cantidad, propietario_id)
-        SELECT item.item_id, 'guia_remision', v_guia_id,
-               COALESCE(item.peso_estimado, item.cantidad), item.propietario_id
-        FROM expanded AS item
-        RETURNING id, item_id, cantidad
-    ),
-    lrd_rows AS (
-        INSERT INTO inventario.lote_rollo_detalle (lote_id, guia_remision_id, flg_tenido)
-        SELECT nl.id, v_guia_id, false
-        FROM nuevos_lotes nl
-        JOIN item i   ON i.id = nl.item_id
-        JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+    det AS (
+        INSERT INTO doc.entrega_detalle (entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id, n_rollos)
+        SELECT v_entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id, n_rollos
+        FROM items
+        RETURNING id, linea
     )
     INSERT INTO inventario.item_movimientos (
         doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
         origen_ubicacion_id, destino_ubicacion_id,
-        cantidad, fecha_hora, documento_tipo, documento_id
+        cantidad, fecha_hora, documento_tipo, documento_id, documento_linea_id)
+    SELECT
+        v_doc_movimiento_id, i.item_id, i.lote_id, v_entrega_tipo.item_movimiento_tipo_id,
+        i.ubicacion_id,   -- per-item origin location
+        NULL,             -- destination is external
+        i.cantidad, v_fecha_mov, 'entrega', v_entrega_id, d.id
+    FROM items i
+    JOIN det d ON d.linea = i.linea;
+ELSE
+    -- Inbound (non-emitida): two item kinds.
+    --   (a) lote_id present → devolution: move an existing lote, no new lote.
+    --   (b) lote_id absent  → new client rolls: create N lotes + lrd + movements.
+    -- Both stamp documento_linea_id (≈ MSEG.EBELP) so receipts are line-auditable.
+
+    -- (a) Devolution lines: detalle first, movements linked per line.
+    WITH items AS (
+        SELECT
+            COALESCE((item->>'linea')::SMALLINT, idx::SMALLINT) AS linea,
+            (item->>'item_id')::INT                             AS item_id,
+            (item->>'cantidad')::NUMERIC(12,4)                  AS cantidad,
+            (item->>'lote_id')::INT                             AS lote_id,
+            (item->>'ubicacion_id')::INT                        AS ubicacion_id
+        FROM jsonb_array_elements(p_entrega->'items') WITH ORDINALITY AS t(item, idx)
+        WHERE item->>'lote_id' IS NOT NULL
+    ),
+    det AS (
+        INSERT INTO doc.entrega_detalle (entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id)
+        SELECT v_entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id
+        FROM items
+        RETURNING id, linea
     )
-    SELECT v_doc_movimiento_id, nl.item_id, nl.id,
-           v_guia_tipo.item_movimiento_tipo_id,
-           NULL, (p_guia->>'destino_ubicacion_id')::INT,
-           nl.cantidad, v_fecha_mov, 'guia_remision', v_guia_id
-    FROM nuevos_lotes nl;
+    INSERT INTO inventario.item_movimientos (
+        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+        destino_ubicacion_id, cantidad, fecha_hora,
+        documento_tipo, documento_id, documento_linea_id)
+    SELECT
+        v_doc_movimiento_id, i.item_id, i.lote_id, v_entrega_tipo.item_movimiento_tipo_id,
+        i.ubicacion_id, i.cantidad, v_fecha_mov, 'entrega', v_entrega_id, d.id
+    FROM items i
+    JOIN det d ON d.linea = i.linea;
+
+    -- (b) New client rolls — one declared line per item, expanded to N lotes,
+    --     each lote/lrd/movement carrying that line's documento_linea_id.
+    FOR v_linea_rec IN
+        SELECT
+            COALESCE((item->>'linea')::SMALLINT, idx::SMALLINT) AS linea,
+            (item->>'item_id')::INT                             AS item_id,
+            (item->>'ubicacion_id')::INT                        AS ubicacion_id,
+            (item->>'cantidad')::NUMERIC                        AS cantidad,
+            COALESCE((item->>'cantidad_rollos')::INT, 1)        AS cantidad_rollos
+        FROM jsonb_array_elements(p_entrega->'items') WITH ORDINALITY AS t(item, idx)
+        WHERE item->>'lote_id' IS NULL
+    LOOP
+        INSERT INTO doc.entrega_detalle (entrega_id, linea, item_id, cantidad, n_rollos)
+        VALUES (v_entrega_id, v_linea_rec.linea, v_linea_rec.item_id,
+                v_linea_rec.cantidad, v_linea_rec.cantidad_rollos)
+        RETURNING id INTO v_detalle_id;
+
+        WITH nuevos_lotes AS (
+            INSERT INTO lote (item_id, documento_tipo, documento_id, cantidad, propietario_id)
+            SELECT v_linea_rec.item_id, 'entrega', v_entrega_id,
+                   COALESCE(v_linea_rec.cantidad / NULLIF(v_linea_rec.cantidad_rollos, 0),
+                            v_linea_rec.cantidad),
+                   (p_entrega->>'propietario_id')::INT
+            FROM generate_series(1, v_linea_rec.cantidad_rollos)
+            RETURNING id, item_id, cantidad
+        ),
+        lrd_rows AS (
+            INSERT INTO inventario.lote_rollo_detalle (lote_id, entrega_id, flg_tenido)
+            SELECT nl.id, v_entrega_id, false
+            FROM nuevos_lotes nl
+            JOIN item i       ON i.id = nl.item_id
+            JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+        )
+        INSERT INTO inventario.item_movimientos (
+            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+            origen_ubicacion_id, destino_ubicacion_id,
+            cantidad, fecha_hora, documento_tipo, documento_id, documento_linea_id)
+        SELECT
+            v_doc_movimiento_id, nl.item_id, nl.id, v_entrega_tipo.item_movimiento_tipo_id,
+            NULL, (p_entrega->>'destino_ubicacion_id')::INT,
+            nl.cantidad, v_fecha_mov, 'entrega', v_entrega_id, v_detalle_id
+        FROM nuevos_lotes nl;
+    END LOOP;
 END IF;
 INSERT INTO notification.notifications(user_id,title,body,tipo,payload)
-SELECT ur.user_id,'Nueva Guia y movimientos', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' creó una nueva guía de remisión y generó movimientos de inventario', 'info',jsonb_build_object('objeto_tipo','guia_remision','guia_remision_id',v_guia_id)
+SELECT ur.user_id,'Nueva entrega y movimientos', COALESCE((SELECT COALESCE(nombre,'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id=v_usr_id),'sistema') || ' creó una nueva guía de remisión y generó movimientos de inventario', 'info',jsonb_build_object('objeto_tipo','entrega','entrega_id',v_entrega_id)
 FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
-   RETURN format('Guía de remisión con ID %s creada correctamente.', v_guia_id);
+   RETURN format('Guía de remisión con ID %s creada correctamente.', v_entrega_id);
 EXCEPTION
     WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS
@@ -1433,8 +1447,8 @@ EXCEPTION
             v_context  = PG_EXCEPTION_CONTEXT,
             v_sqlstate = RETURNED_SQLSTATE;
 
-        RAISE LOG 'Error in crear_guia - User: %, Params: %, Error: %, Detail: %',
-                  v_usr_id, p_guia::TEXT, v_message, v_detail;
+        RAISE LOG 'Error in crear_entrega - User: %, Params: %, Error: %, Detail: %',
+                  v_usr_id, p_entrega::TEXT, v_message, v_detail;
         RAISE;
 END;
 $function$;
@@ -1828,7 +1842,7 @@ DECLARE
     v_ubic           INT;
     v_detalle_id     BIGINT;
 BEGIN
-    -- reversal/anular is an editar-tier action (per the guia_remision convention)
+    -- reversal/anular is an editar-tier action (per the entrega convention)
     IF NOT jwt_has_permission('comercial.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
             USING ERRCODE = 'insufficient_privilege';
@@ -2057,7 +2071,7 @@ GRANT EXECUTE ON FUNCTION doc.actualizar_orden_servicio(BIGINT, jsonb) TO authen
 
 
 
-CREATE OR REPLACE FUNCTION doc.get_guia_remision(p_guia_id BIGINT)
+CREATE OR REPLACE FUNCTION doc.get_entrega(p_entrega_id BIGINT)
 RETURNS JSONB
 LANGUAGE sql
 STABLE
@@ -2066,7 +2080,7 @@ SET search_path TO 'iam', 'public', 'doc', 'inventario'
 AS $$
 SELECT jsonb_build_object(
     'id', gr.id,
-    'guia_remision_tipo_id', gr.guia_remision_tipo_id,
+    'entrega_tipo_id', gr.entrega_tipo_id,
     'tipo_codigo', grt.codigo,
     'tipo_nombre', grt.nombre,
     'flg_emitida', grt.flg_emitida,
@@ -2104,12 +2118,12 @@ SELECT jsonb_build_object(
                 )
             ) ORDER BY grd.id
         ), '[]'::jsonb)
-        FROM doc.guia_remision_detalle grd
+        FROM doc.entrega_detalle grd
         LEFT JOIN item i ON i.id = grd.item_id
         LEFT JOIN unidad u ON u.id = i.unidad_id
         LEFT JOIN inventario.ubicacion ub ON ub.id = grd.ubicacion_id
         LEFT JOIN inventario.almacen al ON al.id = ub.almacen_id
-        WHERE grd.guia_remision_id = gr.id
+        WHERE grd.entrega_id = gr.id
     ),
     'compras', COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
@@ -2118,18 +2132,18 @@ SELECT jsonb_build_object(
             'observacion', c.observacion,
             'fyh_elm',     c.fyh_elm
         ) ORDER BY c.fecha, c.id)
-        FROM doc.compra_guia_remision cgr
+        FROM doc.compra_entrega cgr
         JOIN doc.compra c ON c.id = cgr.compra_id
-        WHERE cgr.guia_remision_id = gr.id
+        WHERE cgr.entrega_id = gr.id
     ), '[]'::jsonb)
 )
-FROM doc.guia_remision gr
-LEFT JOIN doc.guia_remision_tipo grt ON grt.id = gr.guia_remision_tipo_id
+FROM doc.entrega gr
+LEFT JOIN doc.entrega_tipo grt ON grt.id = gr.entrega_tipo_id
 LEFT JOIN tercero t ON t.id = gr.tercero_id
-WHERE gr.id = p_guia_id;
+WHERE gr.id = p_entrega_id;
 $$;
 
-GRANT EXECUTE ON FUNCTION doc.get_guia_remision(BIGINT) TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.get_entrega(BIGINT) TO authenticated;
 
 GRANT EXECUTE ON FUNCTION mes.crear_partida(jsonb)                            TO authenticated;
 GRANT EXECUTE ON FUNCTION mes.actualizar_partida(int, jsonb)                  TO authenticated;

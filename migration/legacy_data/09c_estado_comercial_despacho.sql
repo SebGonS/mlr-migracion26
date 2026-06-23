@@ -1,8 +1,8 @@
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- FIX: set estado_comercial for legacy-dispatched partidas
 --
--- 09_despacho_egreso_legacy.sql egressed the rolls + created guias but did NOT
--- touch partida estado. The normal crear_guia flow doesn't set it either — the
+-- 09_despacho_egreso_legacy.sql egressed the rolls + created entregas but did NOT
+-- touch partida estado. The normal crear_entrega flow doesn't set it either — the
 -- commercial axis was only ever seeded by 11_data_migration's legacy-estado map
 -- ('Despachado' → ENTREGADA). So a partida that has a legacy despacho row but a
 -- different legacy estado (e.g. 'Para Despachar', or a rework whose family shipped)

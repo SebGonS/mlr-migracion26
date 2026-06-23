@@ -1,8 +1,8 @@
 -- ============================================================================
--- NUKE PARTIDAS: A&R TEXTILES / GUIA 505 (ran 2026-05-26)
+-- NUKE PARTIDAS: A&R TEXTILES / entrega 505 (ran 2026-05-26)
 -- ============================================================================
 -- Removes partidas that were incorrectly imported into the new system.
--- Target: SELECT partida FROM vw_partidas_resumen WHERE guia ILIKE '%505%'
+-- Target: SELECT partida FROM vw_partidas_resumen WHERE entrega ILIKE '%505%'
 --         AND cliente = 'A&R TEXTILES'
 --
 -- Approach:
@@ -22,7 +22,7 @@
 /*
 WITH target_ids AS (
     SELECT partida AS id FROM vw_partidas_resumen
-    WHERE guia ILIKE '%505%' AND cliente = 'A&R TEXTILES'
+    WHERE entrega ILIKE '%505%' AND cliente = 'A&R TEXTILES'
 ),
 target_lotes AS (
     SELECT
@@ -78,7 +78,7 @@ BEGIN
     SELECT array_agg(partida)
     INTO v_target_ids
     FROM vw_partidas_resumen
-    WHERE guia ILIKE '%505%' AND cliente = 'A&R TEXTILES';
+    WHERE entrega ILIKE '%505%' AND cliente = 'A&R TEXTILES';
 
     IF v_target_ids IS NULL OR array_length(v_target_ids, 1) = 0 THEN
         RAISE NOTICE 'No target partidas found — nothing to do.';

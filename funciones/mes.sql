@@ -11,23 +11,23 @@ LANGUAGE sql STABLE
 SET search_path TO 'public','doc','mes','inventario','receta'
 AS $$
 WITH partidas_del_dia AS MATERIALIZED (
-    -- Single scan of programacion for the date; both guias_partida and rollos_partida reference this.
+    -- Single scan of programacion for the date; both entregas_partida and rollos_partida reference this.
     SELECT pp2.partida_id
     FROM mes.programacion prog2
     JOIN mes.partida_paso pp2 ON pp2.id = prog2.actividad_id
     WHERE prog2.fecha = p_fecha AND prog2.actividad_tipo = 'partida_paso'
 ),
-guias_partida AS (
+entregas_partida AS (
     SELECT
         pc.partida_id,
         jsonb_agg(DISTINCT jsonb_build_object(
-            'tipo',   CASE WHEN lrd.guia_remision_id IS NOT NULL THEN 'guia' ELSE 'os' END,
-            'id',     COALESCE(lrd.guia_remision_id, lrd.orden_servicio_id),
+            'tipo',   CASE WHEN lrd.entrega_id IS NOT NULL THEN 'entrega' ELSE 'os' END,
+            'id',     COALESCE(lrd.entrega_id, lrd.orden_servicio_id),
             'codigo', COALESCE(gr.serie || '-' || gr.correlativo, os.serie || '-' || os.correlativo::text)
-        )) AS guias
+        )) AS entregas
     FROM mes.partida_componente        pc
     JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = pc.lote_id
-    LEFT JOIN doc.guia_remision        gr  ON gr.id = lrd.guia_remision_id
+    LEFT JOIN doc.entrega        gr  ON gr.id = lrd.entrega_id
     LEFT JOIN doc.orden_servicio       os  ON os.id = lrd.orden_servicio_id
     WHERE pc.lote_id IS NOT NULL
       AND pc.partida_id IN (SELECT partida_id FROM partidas_del_dia)
@@ -82,7 +82,7 @@ FROM (
         'cantidad_total',            rp.total_rollos,
         'cantidad_regular',          rp.cantidad_regular,
         'cantidad_rib',              rp.cantidad_rib,
-        'guias',                     gp.guias,
+        'entregas',                     gp.entregas,
         'ejecucion_fyh_inicio',      ppe.fyh_inicio,
         -- Lavado maquina fields (null when actividad_tipo = 'partida_paso')
         'lavado_id',                 lm.id,
@@ -110,7 +110,7 @@ FROM (
     LEFT JOIN public.valor vclr           ON vclr.id = cxc.valor_id
     LEFT JOIN articulo_tipo at            ON at.id         = p.articulo_tipo_id
     LEFT JOIN rollos_partida rp           ON rp.partida_id = p.id
-    LEFT JOIN guias_partida gp            ON gp.partida_id = p.id
+    LEFT JOIN entregas_partida gp            ON gp.partida_id = p.id
     LEFT JOIN mes.lavado_maquina lm       ON prog.actividad_tipo = 'LAVADO_MAQUINA' AND lm.id = prog.actividad_id
     LEFT JOIN receta.lavado_maquina rlm   ON rlm.id = lm.receta_id
     LEFT JOIN tipo_lavado_maquina tlm     ON tlm.id = rlm.tipo_lavado_mq_id
@@ -154,17 +154,17 @@ pasos_pendientes AS MATERIALIZED (
             AND prog.fecha >= CURRENT_DATE
       )
 ),
-guias_partida AS (
+entregas_partida AS (
     SELECT
         pc.partida_id,
         jsonb_agg(DISTINCT jsonb_build_object(
-            'tipo',   CASE WHEN lrd.guia_remision_id IS NOT NULL THEN 'guia' ELSE 'os' END,
-            'id',     COALESCE(lrd.guia_remision_id, lrd.orden_servicio_id),
+            'tipo',   CASE WHEN lrd.entrega_id IS NOT NULL THEN 'entrega' ELSE 'os' END,
+            'id',     COALESCE(lrd.entrega_id, lrd.orden_servicio_id),
             'codigo', COALESCE(gr.serie || '-' || gr.correlativo, os.serie || '-' || os.correlativo::text)
-        )) AS guias
+        )) AS entregas
     FROM mes.partida_componente        pc
     JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = pc.lote_id
-    LEFT JOIN doc.guia_remision        gr  ON gr.id = lrd.guia_remision_id
+    LEFT JOIN doc.entrega        gr  ON gr.id = lrd.entrega_id
     LEFT JOIN doc.orden_servicio       os  ON os.id = lrd.orden_servicio_id
     WHERE pc.lote_id IS NOT NULL
       AND pc.partida_id IN (SELECT partida_id FROM pasos_pendientes)
@@ -214,7 +214,7 @@ FROM (
             'total_rollos',       rp.total_rollos,
             'cantidad_regular',   rp.cantidad_regular,
             'cantidad_rib',       rp.cantidad_rib,
-            'guias',              gp.guias,
+            'entregas',              gp.entregas,
             'ejecucion_fyh_inicio', ppe.fyh_inicio
         ) AS row_obj
     FROM pasos_pendientes pend
@@ -229,7 +229,7 @@ FROM (
     LEFT JOIN vw_colores vc         ON vc.color_x_cliente_id = p.color_x_cliente_id
     LEFT JOIN color_x_cliente cxc   ON cxc.id = p.color_x_cliente_id
     LEFT JOIN public.valor vclr     ON vclr.id = cxc.valor_id
-    LEFT JOIN guias_partida gp      ON gp.partida_id = p.id
+    LEFT JOIN entregas_partida gp      ON gp.partida_id = p.id
     LEFT JOIN rollos_partida rp     ON rp.partida_id = p.id
     LEFT JOIN mes.partida_paso_ejecucion ppe ON ppe.partida_paso_id = pp.id AND ppe.estado = 'EN_PROCESO'
 
@@ -440,7 +440,7 @@ BEGIN
 
     -- 3. Roll aggregation (weight + count) from all components of this order
     --    Guard: all rolls must be weighed before recipe generation so that
-    --    lote.cantidad reflects real weight, not the guia-declared estimate.
+    --    lote.cantidad reflects real weight, not the entrega-declared estimate.
     IF EXISTS (
         SELECT 1
         FROM mes.partida_componente pc
@@ -1453,7 +1453,7 @@ DECLARE
     v_out_item_id       int;
     v_out_propietario   int;
     v_new_lote_id           int;
-    v_guia_remision_id      bigint;
+    v_entrega_id      bigint;
     v_orden_servicio_id     bigint;
     v_factura_hilo          TEXT;
     v_doc_movimiento_id     BIGINT;
@@ -1594,14 +1594,14 @@ BEGIN
     GET DIAGNOSTICS v_consumed = ROW_COUNT;
 
     -- 4b. Create output lotes (same item_id as input), PROD_ING movements,
-    --     and lote_rollo_detalle carrying guia_remision_id forward.
+    --     and lote_rollo_detalle carrying entrega_id forward.
     FOR v_elem IN SELECT value FROM jsonb_array_elements(v_p_output)
     LOOP
         v_input_lote_id := (v_elem->>'input_lote_id')::INT;
 
         -- Inherit item_id, propietario, billing anchor, rib flag, and original quantity from input lote
-        SELECT l.item_id, l.propietario_id, lrd.guia_remision_id, lrd.orden_servicio_id, lrd.factura_hilo, ird.flg_rib, l.cantidad
-        INTO v_out_item_id, v_out_propietario, v_guia_remision_id, v_orden_servicio_id, v_factura_hilo, v_flg_rib, v_lote_cantidad
+        SELECT l.item_id, l.propietario_id, lrd.entrega_id, lrd.orden_servicio_id, lrd.factura_hilo, ird.flg_rib, l.cantidad
+        INTO v_out_item_id, v_out_propietario, v_entrega_id, v_orden_servicio_id, v_factura_hilo, v_flg_rib, v_lote_cantidad
         FROM inventario.lote l
         JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
         JOIN item_rollo_detalle ird             ON ird.item_id = l.item_id
@@ -1644,13 +1644,13 @@ BEGIN
         -- Batch classification: carry ingress doc anchor + factura_hilo + parent-batch link forward;
         -- populate dyeing identity from partida.
         INSERT INTO inventario.lote_rollo_detalle(
-            lote_id, guia_remision_id, orden_servicio_id, factura_hilo, origen_lote_id,
+            lote_id, entrega_id, orden_servicio_id, factura_hilo, origen_lote_id,
             ancho, malla, rendimiento,
             color_x_cliente_id, tenido_id,
             flg_tenido, flg_antipilling
         )
         VALUES (
-            v_new_lote_id, v_guia_remision_id, v_orden_servicio_id, v_factura_hilo, v_input_lote_id,
+            v_new_lote_id, v_entrega_id, v_orden_servicio_id, v_factura_hilo, v_input_lote_id,
             v_partida_ancho, v_partida_malla, v_partida_rendimiento,
             v_partida_color_x_cliente, v_partida_tenido_id,
             true, v_partida_flg_antipilling
@@ -2029,6 +2029,113 @@ END;
 $function$;
 
 GRANT EXECUTE ON FUNCTION mes.omitir_paso(BIGINT, JSONB) TO authenticated;
+
+
+-- ═══════════════════════════════════════════════════════════════
+-- mes.revertir_inicio_paso
+-- Undo an accidental Iniciar: an EN_PROCESO run with no work recorded
+-- reverts to PENDIENTE and its run row is deleted.
+--
+-- Self-service (produccion.ejecutar, no motivo) because the guards make
+-- it non-destructive — there is nothing to unwind. Anything with recorded
+-- consumos or output must go through anular_produccion instead.
+--
+-- Guard: the paso must have an EN_PROCESO run.
+-- Guard: no item_movimientos on the run (no consumos / matizados).
+-- Guard: no output lotes created by the run.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.revertir_inicio_paso(p_paso_id BIGINT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id        int := get_user_id();
+    v_partida_id    bigint;
+    v_op_nombre     text;
+    v_maquina_id    int;
+    v_ejecucion_id  bigint;
+BEGIN
+    IF NOT jwt_has_permission('produccion.ejecutar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Resolve the active run for this paso
+    SELECT pp.partida_id, o.nombre, pe.id, pe.maquina_id
+    INTO   v_partida_id, v_op_nombre, v_ejecucion_id, v_maquina_id
+    FROM   mes.partida_paso pp
+    JOIN   mes.operacion o ON o.id = pp.operacion_id
+    JOIN   mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id AND pe.estado = 'EN_PROCESO'
+    WHERE  pp.id = p_paso_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Paso #% no tiene una ejecución EN_PROCESO para revertir.', p_paso_id;
+    END IF;
+
+    -- Guard: nothing consumed on this run
+    IF EXISTS (
+        SELECT 1 FROM inventario.item_movimientos
+        WHERE documento_tipo = 'partida_paso_ejecucion'
+          AND documento_id   = v_ejecucion_id
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede deshacer el inicio del paso %: ya tiene consumos registrados. Use anular_produccion.',
+            v_op_nombre;
+    END IF;
+
+    -- Guard: no output lotes produced by this run
+    IF EXISTS (
+        SELECT 1 FROM inventario.lote
+        WHERE documento_tipo = 'partida_paso_ejecucion'
+          AND documento_id   = v_ejecucion_id
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede deshacer el inicio del paso %: ya registró producción. Use anular_produccion.',
+            v_op_nombre;
+    END IF;
+
+    -- iniciar_paso only inserted the run row — safe to DELETE
+    DELETE FROM mes.partida_paso_ejecucion WHERE id = v_ejecucion_id;
+
+    -- Reset paso: PENDIENTE if this was the only run, else keep EN_PROCESO (partial batches remain)
+    UPDATE mes.partida_paso
+    SET estado = CASE
+            WHEN EXISTS (
+                SELECT 1 FROM mes.partida_paso_ejecucion
+                WHERE partida_paso_id = p_paso_id
+            ) THEN 'EN_PROCESO'::partida_paso_estado_enum
+            ELSE 'PENDIENTE'::partida_paso_estado_enum
+        END,
+        fyh_mod = NOW()
+    WHERE id = p_paso_id;
+
+    -- Release the machine the start had marked active
+    IF v_maquina_id IS NOT NULL THEN
+        UPDATE mes.maquina SET estado_actual = 'espera' WHERE id = v_maquina_id;
+    END IF;
+
+    PERFORM mes.actualizar_estado_partida(v_partida_id);
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('revertir_inicio_paso', v_usr_id,
+            jsonb_build_object('paso_id', p_paso_id, 'ejecucion_id', v_ejecucion_id));
+
+    RETURN format('Inicio del paso %s (#%s) deshecho. El paso vuelve a estar disponible.',
+                  v_op_nombre, p_paso_id);
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in revertir_inicio_paso - User: %, Paso: %, Error: %, Detail: %',
+              v_usr_id, p_paso_id, v_message, v_detail;
+    RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION mes.revertir_inicio_paso(BIGINT) TO authenticated;
 
 
 -- iniciar_lavado / finalizar_lavado removed — superseded by iniciar_lavado_maquina,
@@ -3004,7 +3111,7 @@ GRANT EXECUTE ON FUNCTION mes.actualizar_estado_partida(BIGINT) TO authenticated
 --
 --  Axis 2 — Dispatch (comercial):
 --    estado_comercial IN ('ENTREGADA', 'DEVUELTA_PARCIAL', 'DEVUELTA_TOTAL')
---    Set by the despacho/comercial module (doc.guia_remision flows). Indicates
+--    Set by the despacho/comercial module (doc.entrega flows). Indicates
 --    that finished goods have been delivered to or returned from the client.
 --
 --  Axis 3 — Billing (facturación):
@@ -3606,9 +3713,9 @@ BEGIN
                 'cantidad', l.cantidad,
                 'unidad', vi_mat.unidad_codigo,
                 'estado_calidad', l.estado_calidad,
-                'guia_remision_id',   lrd_in.guia_remision_id,
-                'guia_serie',         gr_in.serie,
-                'guia_correlativo',   gr_in.correlativo,
+                'entrega_id',   lrd_in.entrega_id,
+                'entrega_serie',         gr_in.serie,
+                'entrega_correlativo',   gr_in.correlativo,
                 'orden_servicio_id',  lrd_in.orden_servicio_id,
                 'os_serie',           os_in.serie,
                 'os_correlativo',     os_in.correlativo,
@@ -3626,7 +3733,7 @@ BEGIN
             LEFT JOIN inventario.lote l ON l.id = opi.lote_id
             LEFT JOIN vw_items vi_mat ON vi_mat.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_in ON lrd_in.lote_id = l.id
-            LEFT JOIN doc.guia_remision gr_in ON gr_in.id = lrd_in.guia_remision_id
+            LEFT JOIN doc.entrega gr_in ON gr_in.id = lrd_in.entrega_id
             LEFT JOIN doc.orden_servicio os_in ON os_in.id = lrd_in.orden_servicio_id
             LEFT JOIN inventario.pesaje ps ON ps.lote_id = l.id
             WHERE opi.partida_id = p.id
@@ -3645,9 +3752,9 @@ BEGIN
                 'unidad', vi_prod.unidad_codigo,
                 'estado_calidad', l.estado_calidad,
                 'fyh_cre', l.fyh_cre,
-                'guia_remision_id',   lrd_out.guia_remision_id,
-                'guia_serie',         gr_out.serie,
-                'guia_correlativo',   gr_out.correlativo,
+                'entrega_id',   lrd_out.entrega_id,
+                'entrega_serie',         gr_out.serie,
+                'entrega_correlativo',   gr_out.correlativo,
                 'orden_servicio_id',  lrd_out.orden_servicio_id,
                 'os_serie',           os_out.serie,
                 'os_correlativo',     os_out.correlativo,
@@ -3678,7 +3785,7 @@ BEGIN
             JOIN mes.partida_paso opp ON opp.id = pe.partida_paso_id AND opp.partida_id = p.id
             LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_out ON lrd_out.lote_id = l.id
-            LEFT JOIN doc.guia_remision gr_out ON gr_out.id = lrd_out.guia_remision_id
+            LEFT JOIN doc.entrega gr_out ON gr_out.id = lrd_out.entrega_id
             LEFT JOIN doc.orden_servicio os_out ON os_out.id = lrd_out.orden_servicio_id
             WHERE l.documento_tipo = 'partida_paso_ejecucion'
         ), '[]'::jsonb),

@@ -1,5 +1,5 @@
 -- ============================================================
--- RECLASIFICAR: change item_id of UNASSIGNED rolls on a guia
+-- RECLASIFICAR: change item_id of UNASSIGNED rolls on a entrega
 --
 -- Use case: rolls were ingressed under the wrong item. Move the
 -- ones that have NOT yet been assigned to a partida onto a
@@ -10,14 +10,14 @@
 --
 -- Because every layer is keyed per-lote, this is a pure UPDATE —
 -- no new line item to insert. Changing lote.item_id automatically
--- moves the roll onto the new item's guia_remision_detalle "line"
--- (the unique key is (guia, item, lote, ubicacion); lote_id is
+-- moves the roll onto the new item's entrega_detalle "line"
+-- (the unique key is (entrega, item, lote, ubicacion); lote_id is
 -- unique per roll, so there is no collision).
 --
 -- Touched layers (all item-bearing rows for the target lotes):
 --   inventario.lote                 .item_id
 --   inventario.item_movimientos     .item_id
---   doc.guia_remision_detalle       .item_id
+--   doc.entrega_detalle       .item_id
 --
 -- NOT touched:
 --   lote.cantidad / movimientos.cantidad / grd.cantidad
@@ -28,7 +28,7 @@
 --       -> item-agnostic or only for assigned rolls.
 --
 -- Parameters:
---   v_guia_id     : doc.guia_remision.id to correct
+--   v_entrega_id     : doc.entrega.id to correct
 --   v_old_item_id : item the rolls were WRONGLY ingressed under
 --   v_new_item_id : item they should be
 -- ============================================================
@@ -40,8 +40,8 @@ SELECT l.id AS lote_id, l.item_id, l.cantidad,
        (pc.lote_id IS NOT NULL) AS asignada
 FROM inventario.lote l
 LEFT JOIN mes.partida_componente pc ON pc.lote_id = l.id
-WHERE l.documento_tipo = 'guia_remision'
-  AND l.documento_id   = 700          -- <- v_guia_id
+WHERE l.documento_tipo = 'entrega'
+  AND l.documento_id   = 700          -- <- v_entrega_id
   AND l.item_id        = 254          -- <- v_old_item_id
   AND l.fyh_elm IS NULL
 ORDER BY asignada, l.id;
@@ -51,7 +51,7 @@ ORDER BY asignada, l.id;
 -- -- EXECUTE BLOCK ------------------------------------------
 DO $$
 DECLARE
-    v_guia_id     BIGINT := 700;   -- <- CHANGE
+    v_entrega_id     BIGINT := 700;   -- <- CHANGE
     v_old_item_id INT    := 254;   -- <- CHANGE  wrong item
     v_new_item_id INT    := 278;   -- <- CHANGE  correct item
 
@@ -64,11 +64,11 @@ BEGIN
         RAISE EXCEPTION 'old and new item are the same (%); nothing to do', v_new_item_id;
     END IF;
 
-    -- Target = rolls on this guia, under the wrong item, NOT assigned to any partida
+    -- Target = rolls on this entrega, under the wrong item, NOT assigned to any partida
     SELECT ARRAY_AGG(l.id) INTO v_lote_ids
     FROM inventario.lote l
-    WHERE l.documento_tipo = 'guia_remision'
-      AND l.documento_id   = v_guia_id
+    WHERE l.documento_tipo = 'entrega'
+      AND l.documento_id   = v_entrega_id
       AND l.item_id        = v_old_item_id
       AND l.fyh_elm IS NULL
       AND NOT EXISTS (
@@ -77,12 +77,12 @@ BEGIN
       );
 
     IF v_lote_ids IS NULL THEN
-        RAISE EXCEPTION 'No unassigned lotes found for guia_id=% item_id=% — nothing to reclassify',
-            v_guia_id, v_old_item_id;
+        RAISE EXCEPTION 'No unassigned lotes found for entrega_id=% item_id=% — nothing to reclassify',
+            v_entrega_id, v_old_item_id;
     END IF;
 
-    RAISE NOTICE 'Reclassifying % unassigned rolls on guia_id=% from item % -> %',
-        cardinality(v_lote_ids), v_guia_id, v_old_item_id, v_new_item_id;
+    RAISE NOTICE 'Reclassifying % unassigned rolls on entrega_id=% from item % -> %',
+        cardinality(v_lote_ids), v_entrega_id, v_old_item_id, v_new_item_id;
 
     -- 1. Lote
     UPDATE inventario.lote
@@ -97,14 +97,14 @@ BEGIN
       AND item_id = v_old_item_id;
     GET DIAGNOSTICS v_mov_upd = ROW_COUNT;
 
-    -- 3. Guia detail line (per-roll row -> just retag the item)
-    UPDATE doc.guia_remision_detalle
+    -- 3. entrega detail line (per-roll row -> just retag the item)
+    UPDATE doc.entrega_detalle
     SET item_id = v_new_item_id
     WHERE lote_id = ANY(v_lote_ids)
       AND item_id = v_old_item_id;
     GET DIAGNOSTICS v_grd_upd = ROW_COUNT;
 
-    RAISE NOTICE '  lote: %, movimientos: %, guia_remision_detalle: %',
+    RAISE NOTICE '  lote: %, movimientos: %, entrega_detalle: %',
         v_lote_upd, v_mov_upd, v_grd_upd;
     RAISE NOTICE 'Done. lotes=%', v_lote_ids;
 END;
@@ -116,9 +116,9 @@ SELECT l.id AS lote_id, l.item_id, i.nombre, l.cantidad,
        grd.item_id AS grd_item, m.item_id AS mov_item
 FROM inventario.lote l
 JOIN item i                          ON i.id = l.item_id
-LEFT JOIN doc.guia_remision_detalle grd ON grd.lote_id = l.id
+LEFT JOIN doc.entrega_detalle grd ON grd.lote_id = l.id
 LEFT JOIN inventario.item_movimientos m ON m.lote_id  = l.id
-WHERE l.documento_tipo = 'guia_remision'
-  AND l.documento_id   = 700          -- <- v_guia_id
+WHERE l.documento_tipo = 'entrega'
+  AND l.documento_id   = 700          -- <- v_entrega_id
 ORDER BY l.item_id, l.id;
 */

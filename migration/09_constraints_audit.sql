@@ -20,7 +20,7 @@ DO $$ DECLARE t TEXT; BEGIN
         'inventario.item_movimiento_motivo',
         'inventario.almacen',
         'inventario.ubicacion',
-        'doc.guia_remision_tipo',
+        'doc.entrega_tipo',
         'mes.operacion',
         'mes.maquina_tipo',
         'mes.maquina',
@@ -44,7 +44,7 @@ END $$;
 DO $$ DECLARE t TEXT; BEGIN
     FOREACH t IN ARRAY ARRAY[
         'mes.partida',
-        'doc.guia_remision',
+        'doc.entrega',
         'doc.compra',
         'inventario.lote'
     ] LOOP
@@ -140,7 +140,7 @@ REVOKE UPDATE (usr_cre, fyh_cre) ON inventario.pesaje FROM anon, authenticated;
 ---LOTE ROLLO DETALLE
 REVOKE INSERT (usr_cre, fyh_cre, usr_mod, fyh_mod) ON inventario.lote_rollo_detalle FROM anon, authenticated;
 -- Identity fields locked after insert: billing anchor and dyeing state
-REVOKE UPDATE (guia_remision_id, color_x_cliente_id, tenido_id, flg_tenido) ON inventario.lote_rollo_detalle FROM anon, authenticated;
+REVOKE UPDATE (entrega_id, color_x_cliente_id, tenido_id, flg_tenido) ON inventario.lote_rollo_detalle FROM anon, authenticated;
 
 ----ITEM TIPO
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON item_tipo FROM anon, authenticated;
@@ -192,13 +192,13 @@ REVOKE UPDATE (estado_produccion, estado_comercial, estado_facturacion)
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON mes.partida_detalle FROM anon, authenticated;
 REVOKE UPDATE (usr_cre, fyh_cre)                   ON mes.partida_detalle FROM anon, authenticated;
 
------GUIA REMISION TIPO
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.guia_remision_tipo FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.guia_remision_tipo FROM anon, authenticated;
+-----entrega REMISION TIPO
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.entrega_tipo FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.entrega_tipo FROM anon, authenticated;
 
------GUIA REMISION
-REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.guia_remision FROM anon, authenticated;
-REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.guia_remision FROM anon, authenticated;
+-----entrega REMISION
+REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON doc.entrega FROM anon, authenticated;
+REVOKE UPDATE (usr_cre, fyh_cre)                   ON doc.entrega FROM anon, authenticated;
 
 ---LOTE
 REVOKE INSERT (usr_cre, usr_mod, fyh_cre, fyh_mod) ON inventario.lote FROM anon, authenticated;
@@ -341,6 +341,9 @@ CREATE INDEX IF NOT EXISTS idx_partida_comp_partida_id  ON mes.partida_component
 CREATE INDEX IF NOT EXISTS idx_partida_comp_lote_id     ON mes.partida_componente(lote_id) WHERE lote_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_paso_ejec_paso_id        ON mes.partida_paso_ejecucion(partida_paso_id);
 CREATE INDEX IF NOT EXISTS idx_paso_ejec_estado         ON mes.partida_paso_ejecucion(estado, partida_paso_id);
+-- Driver for the station queues (mes.vw_cola_estacion): keeps only current WIP so
+-- "give me active partidas" is an index hit instead of a full partida scan.
+CREATE INDEX IF NOT EXISTS idx_partida_activa           ON mes.partida(id) WHERE estado_produccion IN ('PROGRAMADA','EN_PRODUCCION');
 CREATE INDEX IF NOT EXISTS idx_lote_doc             ON inventario.lote(documento_tipo, documento_id);
 CREATE INDEX IF NOT EXISTS idx_im_lote_id           ON inventario.item_movimientos(lote_id);
 CREATE INDEX IF NOT EXISTS idx_im_item_id           ON inventario.item_movimientos(item_id);
@@ -354,9 +357,9 @@ CREATE INDEX IF NOT EXISTS idx_compra_factura_factura_id ON doc.compra_factura_p
 CREATE INDEX IF NOT EXISTS idx_lrd_lote_id
     ON inventario.lote_rollo_detalle (lote_id);
 
-CREATE INDEX IF NOT EXISTS idx_lrd_guia
-    ON inventario.lote_rollo_detalle (guia_remision_id)
-    WHERE guia_remision_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_lrd_entrega
+    ON inventario.lote_rollo_detalle (entrega_id)
+    WHERE entrega_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_lrd_undyed
     ON inventario.lote_rollo_detalle (flg_tenido)
@@ -366,10 +369,10 @@ CREATE INDEX IF NOT EXISTS idx_lrd_color
     ON inventario.lote_rollo_detalle (color_x_cliente_id)
     WHERE color_x_cliente_id IS NOT NULL;
 
--- Coverage check index: powers the unbilled dispatch guias query.
-CREATE INDEX IF NOT EXISTS idx_factura_detalle_guia
-    ON doc.factura_detalle (guia_remision_id)
-    WHERE guia_remision_id IS NOT NULL;
+-- Coverage check index: powers the unbilled dispatch entregas query.
+CREATE INDEX IF NOT EXISTS idx_factura_detalle_entrega
+    ON doc.factura_detalle (entrega_id)
+    WHERE entrega_id IS NOT NULL;
 
 -- Grouping/display index: invoice review screen grouped by dimensions.
 CREATE INDEX IF NOT EXISTS idx_factura_detalle_dims

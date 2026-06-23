@@ -1,7 +1,7 @@
 -- ============================================================================
 -- DIAGNOSTIC: do partidas 4577, 4918, 5090, 4388 have production output and a
--- dispatch (guia) record? Context: they are being returned and must be
--- re-ingressed for rework under the appropriate guia.
+-- dispatch (entrega) record? Context: they are being returned and must be
+-- re-ingressed for rework under the appropriate entrega.
 -- Read-only. Run each block independently (or all at once).
 -- ============================================================================
 
@@ -87,17 +87,17 @@ LEFT JOIN inventario.item_movimientos im ON im.lote_id = l.id
 ORDER BY l.id, im.fyh_cre;
 
 
--- ── 4. Dispatch (guia) records — guias whose lines reference those output lotes
+-- ── 4. Dispatch (entrega) records — entregas whose lines reference those output lotes
 SELECT
     p.id                                   AS partida_id,
-    gr.id                                  AS guia_remision_id,
-    grt.codigo                             AS guia_tipo,
+    gr.id                                  AS entrega_id,
+    grt.codigo                             AS entrega_tipo,
     gr.serie,
     gr.correlativo,
     gr.fecha_emision,
     gr.tercero_id,
     gr.fyh_elm,
-    (gr.fyh_elm IS NOT NULL)               AS guia_anulada,
+    (gr.fyh_elm IS NOT NULL)               AS entrega_anulada,
     COUNT(grd.id)                          AS lineas,
     SUM(grd.n_rollos)                      AS rollos_declarados,
     ROUND(SUM(grd.cantidad)::NUMERIC, 2)   AS kg_despachados
@@ -107,9 +107,9 @@ JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
 JOIN inventario.lote l
        ON l.documento_tipo = 'partida_paso_ejecucion'
       AND l.documento_id   = pe.id
-JOIN doc.guia_remision_detalle grd ON grd.lote_id = l.id
-JOIN doc.guia_remision gr          ON gr.id = grd.guia_remision_id
-JOIN doc.guia_remision_tipo grt    ON grt.id = gr.guia_remision_tipo_id
+JOIN doc.entrega_detalle grd ON grd.lote_id = l.id
+JOIN doc.entrega gr          ON gr.id = grd.entrega_id
+JOIN doc.entrega_tipo grt    ON grt.id = gr.entrega_tipo_id
 WHERE p.id IN (4577, 4918, 5090, 4388)
 GROUP BY p.id, gr.id, grt.codigo, gr.serie, gr.correlativo,
          gr.fecha_emision, gr.tercero_id, gr.fyh_elm

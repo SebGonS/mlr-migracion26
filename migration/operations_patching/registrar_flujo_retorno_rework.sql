@@ -17,11 +17,11 @@
 --       ejecucion 8592: 22 rolls 493.9000 kg  — no output lotes
 --       Flow: restore ghost SERV_EGR → PROD_CONSUMO → PROD_ING → DESPACHO → DEVOLUCION
 --
--- 5090  Textil Valy (260)  output lotes dispatched via guia 778 (saldo=0)
+-- 5090  Textil Valy (260)  output lotes dispatched via entrega 778 (saldo=0)
 --       lotes 122731-122748 (18 rolls)
 --       Flow: DEVOLUCION only
 --
--- GUIA GROUPING (one header per tercero)
+-- entrega GROUPING (one header per tercero)
 --   DESPACHO_CLIENTE:          Valy → 4388+4918 outputs | Faride → 4577 outputs
 --   DEVOLUCION_CLIENTE_SERVICIO: Valy → 4388+4918+5090  | Faride → 4577
 --
@@ -57,7 +57,7 @@ BEGIN;
 
 DO $$
 DECLARE
-    -- Movement / guia tipo IDs
+    -- Movement / entrega tipo IDs
     v_serv_dev_tipo_id    INT;
     v_prod_consumo_tipo_id INT;
     v_prod_ing_tipo_id    INT;
@@ -95,10 +95,10 @@ DECLARE
     v_flg_antipil BOOLEAN;
 
     v_doc_mov_id    BIGINT;
-    v_guia_despacho_valy   BIGINT;
-    v_guia_despacho_faride BIGINT;
-    v_guia_dev_valy        BIGINT;
-    v_guia_dev_faride      BIGINT;
+    v_entrega_despacho_valy   BIGINT;
+    v_entrega_despacho_faride BIGINT;
+    v_entrega_dev_valy        BIGINT;
+    v_entrega_dev_faride      BIGINT;
 
     v_lote_rec      RECORD;
     v_new_lote_id   INT;
@@ -116,8 +116,8 @@ BEGIN
     SELECT id INTO v_prod_consumo_tipo_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
     SELECT id INTO v_prod_ing_tipo_id     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING';
     SELECT id INTO v_serv_egr_tipo_id     FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_EGR';
-    SELECT id INTO v_despacho_tipo_id     FROM doc.guia_remision_tipo WHERE codigo = 'DESPACHO_CLIENTE';
-    SELECT id INTO v_devolucion_tipo_id   FROM doc.guia_remision_tipo WHERE codigo = 'DEVOLUCION_CLIENTE_SERVICIO';
+    SELECT id INTO v_despacho_tipo_id     FROM doc.entrega_tipo WHERE codigo = 'DESPACHO_CLIENTE';
+    SELECT id INTO v_devolucion_tipo_id   FROM doc.entrega_tipo WHERE codigo = 'DEVOLUCION_CLIENTE_SERVICIO';
 
     -- ═══════════════════════════════════════════════════════════════════════
     -- STEP 1: Restore ghost SERV_EGR for 4577 and 4918
@@ -205,7 +205,7 @@ BEGIN
 
         FOR v_lote_rec IN (
             SELECT sub.lote_id, l.item_id, l.propietario_id,
-                   lrd.guia_remision_id, lrd.orden_servicio_id, lrd.factura_hilo
+                   lrd.entrega_id, lrd.orden_servicio_id, lrd.factura_hilo
             FROM (
                 SELECT pc.lote_id, ROW_NUMBER() OVER (ORDER BY pc.lote_id) AS rn
                 FROM mes.partida_componente pc WHERE pc.partida_id = v_partida_id
@@ -235,12 +235,12 @@ BEGIN
                     v_ubicacion_id, v_peso_roll, 'partida_paso_ejecucion', v_ejecucion_id);
 
             INSERT INTO inventario.lote_rollo_detalle(
-                lote_id, guia_remision_id, orden_servicio_id, factura_hilo, origen_lote_id,
+                lote_id, entrega_id, orden_servicio_id, factura_hilo, origen_lote_id,
                 ancho, malla, rendimiento, color_x_cliente_id, tenido_id, flg_tenido, flg_antipilling
             )
             VALUES (
                 v_new_lote_id,
-                v_lote_rec.guia_remision_id, v_lote_rec.orden_servicio_id, v_lote_rec.factura_hilo,
+                v_lote_rec.entrega_id, v_lote_rec.orden_servicio_id, v_lote_rec.factura_hilo,
                 v_lote_rec.lote_id,
                 v_ancho, v_malla, v_rendimiento, v_color_x_cli, v_tenido_id,
                 true, v_flg_antipil
@@ -256,16 +256,16 @@ BEGIN
     END LOOP;
 
     -- ═══════════════════════════════════════════════════════════════════════
-    -- STEP 3: Dispatch guias — one per tercero (output lotes from Step 2)
+    -- STEP 3: Dispatch entregas — one per tercero (output lotes from Step 2)
     -- Textil Valy (260): 4388 + 4918
     -- Faride       (228): 4577
     -- ═══════════════════════════════════════════════════════════════════════
 
     -- 3a. Valy dispatch (4388 + 4918)
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
-    INSERT INTO doc.guia_remision(guia_remision_tipo_id, tercero_id, fecha_emision)
+    INSERT INTO doc.entrega(entrega_tipo_id, tercero_id, fecha_emision)
     VALUES (v_despacho_tipo_id, 260, v_fecha_despacho_valy)
-    RETURNING id INTO v_guia_despacho_valy;
+    RETURNING id INTO v_entrega_despacho_valy;
 
     v_linea_valy := 0;
 
@@ -279,19 +279,19 @@ BEGIN
     )
     LOOP
         v_linea_valy := v_linea_valy + 1;
-        INSERT INTO doc.guia_remision_detalle(guia_remision_id, linea, item_id, cantidad, lote_id, ubicacion_id, n_rollos)
-        VALUES (v_guia_despacho_valy, v_linea_valy, v_lote_rec.item_id, v_lote_rec.cantidad, v_lote_rec.lote_id, v_ubicacion_id, 1);
+        INSERT INTO doc.entrega_detalle(entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id, n_rollos)
+        VALUES (v_entrega_despacho_valy, v_linea_valy, v_lote_rec.item_id, v_lote_rec.cantidad, v_lote_rec.lote_id, v_ubicacion_id, 1);
         INSERT INTO inventario.item_movimientos(doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id)
-        VALUES (v_doc_mov_id, v_lote_rec.item_id, v_lote_rec.lote_id, v_serv_egr_tipo_id, v_ubicacion_id, NULL, v_lote_rec.cantidad, v_fecha_despacho_valy, 'guia_remision', v_guia_despacho_valy);
+        VALUES (v_doc_mov_id, v_lote_rec.item_id, v_lote_rec.lote_id, v_serv_egr_tipo_id, v_ubicacion_id, NULL, v_lote_rec.cantidad, v_fecha_despacho_valy, 'entrega', v_entrega_despacho_valy);
     END LOOP;
 
-    RAISE NOTICE 'STEP 3 — DESPACHO Valy guia_id=%  lineas=%', v_guia_despacho_valy, v_linea_valy;
+    RAISE NOTICE 'STEP 3 — DESPACHO Valy entrega_id=%  lineas=%', v_entrega_despacho_valy, v_linea_valy;
 
     -- 3b. Faride dispatch (4577)
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
-    INSERT INTO doc.guia_remision(guia_remision_tipo_id, tercero_id, fecha_emision)
+    INSERT INTO doc.entrega(entrega_tipo_id, tercero_id, fecha_emision)
     VALUES (v_despacho_tipo_id, 228, v_fecha_despacho_faride)
-    RETURNING id INTO v_guia_despacho_faride;
+    RETURNING id INTO v_entrega_despacho_faride;
 
     v_linea_faride := 0;
 
@@ -305,16 +305,16 @@ BEGIN
     )
     LOOP
         v_linea_faride := v_linea_faride + 1;
-        INSERT INTO doc.guia_remision_detalle(guia_remision_id, linea, item_id, cantidad, lote_id, ubicacion_id, n_rollos)
-        VALUES (v_guia_despacho_faride, v_linea_faride, v_lote_rec.item_id, v_lote_rec.cantidad, v_lote_rec.lote_id, v_ubicacion_id, 1);
+        INSERT INTO doc.entrega_detalle(entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id, n_rollos)
+        VALUES (v_entrega_despacho_faride, v_linea_faride, v_lote_rec.item_id, v_lote_rec.cantidad, v_lote_rec.lote_id, v_ubicacion_id, 1);
         INSERT INTO inventario.item_movimientos(doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id)
-        VALUES (v_doc_mov_id, v_lote_rec.item_id, v_lote_rec.lote_id, v_serv_egr_tipo_id, v_ubicacion_id, NULL, v_lote_rec.cantidad, v_fecha_despacho_faride, 'guia_remision', v_guia_despacho_faride);
+        VALUES (v_doc_mov_id, v_lote_rec.item_id, v_lote_rec.lote_id, v_serv_egr_tipo_id, v_ubicacion_id, NULL, v_lote_rec.cantidad, v_fecha_despacho_faride, 'entrega', v_entrega_despacho_faride);
     END LOOP;
 
-    RAISE NOTICE 'STEP 3 — DESPACHO Faride guia_id=%  lineas=%', v_guia_despacho_faride, v_linea_faride;
+    RAISE NOTICE 'STEP 3 — DESPACHO Faride entrega_id=%  lineas=%', v_entrega_despacho_faride, v_linea_faride;
 
     -- ═══════════════════════════════════════════════════════════════════════
-    -- STEP 4: Return guias — one per tercero
+    -- STEP 4: Return entregas — one per tercero
     -- Textil Valy (260): 4388 output + 4918 output + 5090 lotes 122731-122748
     -- Faride       (228): 4577 output
     -- flg_emitida=false → no stock check, stock restored to ubicacion 9.
@@ -322,9 +322,9 @@ BEGIN
 
     -- 4a. Valy return
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
-    INSERT INTO doc.guia_remision(guia_remision_tipo_id, tercero_id, fecha_emision, fecha_recepcion)
+    INSERT INTO doc.entrega(entrega_tipo_id, tercero_id, fecha_emision, fecha_recepcion)
     VALUES (v_devolucion_tipo_id, 260, v_fecha_retorno, v_fecha_retorno)
-    RETURNING id INTO v_guia_dev_valy;
+    RETURNING id INTO v_entrega_dev_valy;
 
     v_linea_valy := 0;
 
@@ -345,19 +345,19 @@ BEGIN
     )
     LOOP
         v_linea_valy := v_linea_valy + 1;
-        INSERT INTO doc.guia_remision_detalle(guia_remision_id, linea, item_id, cantidad, lote_id, ubicacion_id)
-        VALUES (v_guia_dev_valy, v_linea_valy, v_lote_rec.item_id, v_lote_rec.cantidad, v_lote_rec.lote_id, v_ubicacion_id);
+        INSERT INTO doc.entrega_detalle(entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id)
+        VALUES (v_entrega_dev_valy, v_linea_valy, v_lote_rec.item_id, v_lote_rec.cantidad, v_lote_rec.lote_id, v_ubicacion_id);
         INSERT INTO inventario.item_movimientos(doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id, observacion)
-        VALUES (v_doc_mov_id, v_lote_rec.item_id, v_lote_rec.lote_id, v_serv_dev_tipo_id, NULL, v_ubicacion_id, v_lote_rec.cantidad, v_fecha_retorno, 'guia_remision', v_guia_dev_valy, 'Devolucion para reproceso — Textil Valy');
+        VALUES (v_doc_mov_id, v_lote_rec.item_id, v_lote_rec.lote_id, v_serv_dev_tipo_id, NULL, v_ubicacion_id, v_lote_rec.cantidad, v_fecha_retorno, 'entrega', v_entrega_dev_valy, 'Devolucion para reproceso — Textil Valy');
     END LOOP;
 
-    RAISE NOTICE 'STEP 4 — DEVOLUCION Valy guia_id=%  lineas=%', v_guia_dev_valy, v_linea_valy;
+    RAISE NOTICE 'STEP 4 — DEVOLUCION Valy entrega_id=%  lineas=%', v_entrega_dev_valy, v_linea_valy;
 
     -- 4b. Faride return
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
-    INSERT INTO doc.guia_remision(guia_remision_tipo_id, tercero_id, fecha_emision, fecha_recepcion)
+    INSERT INTO doc.entrega(entrega_tipo_id, tercero_id, fecha_emision, fecha_recepcion)
     VALUES (v_devolucion_tipo_id, 228, v_fecha_retorno, v_fecha_retorno)
-    RETURNING id INTO v_guia_dev_faride;
+    RETURNING id INTO v_entrega_dev_faride;
 
     v_linea_faride := 0;
 
@@ -371,13 +371,13 @@ BEGIN
     )
     LOOP
         v_linea_faride := v_linea_faride + 1;
-        INSERT INTO doc.guia_remision_detalle(guia_remision_id, linea, item_id, cantidad, lote_id, ubicacion_id)
-        VALUES (v_guia_dev_faride, v_linea_faride, v_lote_rec.item_id, v_lote_rec.cantidad, v_lote_rec.lote_id, v_ubicacion_id);
+        INSERT INTO doc.entrega_detalle(entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id)
+        VALUES (v_entrega_dev_faride, v_linea_faride, v_lote_rec.item_id, v_lote_rec.cantidad, v_lote_rec.lote_id, v_ubicacion_id);
         INSERT INTO inventario.item_movimientos(doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id, origen_ubicacion_id, destino_ubicacion_id, cantidad, fecha_hora, documento_tipo, documento_id, observacion)
-        VALUES (v_doc_mov_id, v_lote_rec.item_id, v_lote_rec.lote_id, v_serv_dev_tipo_id, NULL, v_ubicacion_id, v_lote_rec.cantidad, v_fecha_retorno, 'guia_remision', v_guia_dev_faride, 'Devolucion para reproceso — Faride');
+        VALUES (v_doc_mov_id, v_lote_rec.item_id, v_lote_rec.lote_id, v_serv_dev_tipo_id, NULL, v_ubicacion_id, v_lote_rec.cantidad, v_fecha_retorno, 'entrega', v_entrega_dev_faride, 'Devolucion para reproceso — Faride');
     END LOOP;
 
-    RAISE NOTICE 'STEP 4 — DEVOLUCION Faride guia_id=%  lineas=%', v_guia_dev_faride, v_linea_faride;
+    RAISE NOTICE 'STEP 4 — DEVOLUCION Faride entrega_id=%  lineas=%', v_entrega_dev_faride, v_linea_faride;
 
     RAISE NOTICE '──────────────────────────────────────────────────────';
     RAISE NOTICE 'Done. Switch ROLLBACK → COMMIT below to persist.';
