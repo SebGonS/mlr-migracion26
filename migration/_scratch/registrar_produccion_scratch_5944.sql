@@ -1375,3 +1375,316 @@ SELECT p.id
 FROM partida p
 LEFT JOIN produccion_tenido pt ON pt.partida_id=p.id
 LEFT JOIN partida_x_recetas pxr ON pxr.partida_id=pt.id AND 
+
+
+
+SELECT date_trunc('month', l.fyh_cre) AS mes, COUNT(*) AS rollos
+FROM inventario.lote l
+JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+JOIN inventario.vw_stock_lotes sl      ON sl.lote_id = l.id
+WHERE l.fyh_elm IS NULL
+  AND lrd.guia_remision_id IS NULL
+  AND lrd.orden_servicio_id IS NULL
+GROUP BY 1 ORDER BY 1 DESC;
+
+
+SELECT cuadre_id, COUNT(*) AS movs, COUNT(DISTINCT item_id) AS items, ROUND(SUM(cantidad),4) AS kg_restado
+FROM inventario.cuadre_backfill_ajuste
+GROUP BY cuadre_id;
+
+
+SELECT lm.id, lm.estado, lm.maquina_id, lm.receta_id,
+       lm.fyh_inicio, lm.fyh_fin, lm.fyh_cre,
+       prog.fecha AS prog_fecha
+FROM mes.lavado_maquina lm
+LEFT JOIN mes.programacion prog
+       ON prog.actividad_tipo = 'LAVADO_MAQUINA' AND prog.actividad_id = lm.id
+WHERE lm.estado IN ('PENDIENTE','EN_PROCESO')
+ORDER BY lm.estado, lm.id;
+
+
+
+SELECT id, numero, estado_facturacion, flg_antipilling, fyh_elm,
+       color_x_cliente_id, tercero_id, tenido_id, articulo_tipo_id
+FROM mes.partida
+WHERE id = 6114
+   OR numero IN (4632, 4631);
+
+
+-- fn_precios_partida filters on partida_componente with lote_id IS NOT NULL
+SELECT p.id, COUNT(pc.lote_id) AS rollos_asignados
+FROM mes.partida p
+LEFT JOIN mes.partida_componente pc ON pc.partida_id = p.id AND pc.lote_id IS NOT NULL
+WHERE p.id IN (SELECT id FROM mes.partida WHERE numero IN (4631, 4632))
+   OR p.id = 6114
+GROUP BY p.id;
+
+
+SELECT opp.partida_id, op.codigo, op.nombre,
+       EXISTS (
+           SELECT 1 FROM mes.partida_paso_ejecucion pe
+           WHERE pe.partida_paso_id = opp.id AND pe.estado = 'COMPLETADO'
+       ) AS completado
+FROM mes.partida_paso opp
+JOIN mes.operacion op ON op.id = opp.operacion_id
+WHERE opp.partida_id IN (6114 /*, other id */);
+
+
+-- vw_precios_pendientes requires an approved recipe for TENIDO
+-- Run for the specific dimensions of partida 6114
+SELECT rt.id, rt.flg_produccion, rt.flg_antipilling,
+       rt.color_x_cliente_id, rt.articulo_tipo_id, rt.fibra, rt.tenido_id
+FROM receta.tenido rt
+WHERE rt.color_x_cliente_id = (SELECT color_x_cliente_id FROM mes.partida WHERE id = 6114)
+  AND rt.articulo_tipo_id   = (SELECT articulo_tipo_id    FROM mes.partida WHERE id = 6114)
+  AND rt.tenido_id          = (SELECT tenido_id           FROM mes.partida WHERE id = 6114);
+
+
+SELECT cp.*
+FROM doc.catalogo_precios cp
+WHERE cp.fyh_elm IS NULL
+  AND cp.color_x_cliente_id = (SELECT color_x_cliente_id FROM mes.partida WHERE id = 6114)
+  AND (cp.articulo_tipo_id IS NULL
+       OR cp.articulo_tipo_id = doc.fn_familia_precio(
+           (SELECT articulo_tipo_id FROM mes.partida WHERE id = 6114),
+           (SELECT tercero_id FROM mes.partida WHERE id = 6114)
+       ));
+
+
+SELECT id, estado_facturacion FROM mes.partida WHERE id = 6114;
+
+
+
+
+
+
+
+-- Mirror the EXACT TENIDO gate from vw_precios_pendientes, per partida.
+-- fibra=1 for all three (confirmed). Base variant → flg_antipilling=false.
+WITH parts(partida_id, cxc, tipo, ten, fibra) AS (
+    VALUES (6111, 1587, 18::smallint, 4, 1::smallint),
+           (6112, 31,   18::smallint, 4, 1::smallint),
+           (6114, 1585, 18::smallint, 4, 1::smallint)
+)
+SELECT pp.partida_id, pp.cxc,
+       EXISTS (
+         SELECT 1 FROM receta.tenido rt
+         WHERE rt.flg_produccion = true
+           AND (rt.color_x_cliente_id IS NULL OR rt.color_x_cliente_id = pp.cxc)
+           AND rt.articulo_tipo_id = pp.tipo
+           AND rt.fibra            = pp.fibra
+           AND (rt.tenido_id IS NULL OR rt.tenido_id = pp.ten)
+           AND rt.flg_antipilling  = false
+       ) AS tenido_gate_passes
+FROM parts pp;
+
+
+-- Mirror the EXACT TENIDO gate from vw_precios_pendientes, per partida.
+-- fibra=1 for all three (confirmed). Base variant → flg_antipilling=false.
+WITH parts(partida_id, cxc, tipo, ten, fibra) AS (
+    VALUES (6111, 1587, 18::smallint, 4, 1::smallint),
+           (6112, 31,   18::smallint, 4, 1::smallint),
+           (6114, 1585, 18::smallint, 4, 1::smallint)
+)
+SELECT pp.partida_id, pp.cxc,
+       EXISTS (
+         SELECT 1 FROM receta.tenido rt
+         WHERE rt.flg_produccion = true
+           AND (rt.color_x_cliente_id IS NULL OR rt.color_x_cliente_id = pp.cxc)
+           AND rt.articulo_tipo_id = pp.tipo
+           AND rt.fibra            = pp.fibra
+           AND (rt.tenido_id IS NULL OR rt.tenido_id = pp.ten)
+           AND rt.flg_antipilling  = false
+       ) AS tenido_gate_passes
+FROM parts pp;
+
+
+SELECT flg_produccion, flg_antipilling, fibra,
+       color_x_cliente_id,
+       COUNT(*) AS n
+FROM receta.tenido
+WHERE articulo_tipo_id = 18 AND tenido_id = 4
+GROUP BY flg_produccion, flg_antipilling, fibra, color_x_cliente_id
+ORDER BY flg_produccion DESC, color_x_cliente_id NULLS FIRST;
+
+
+
+
+SELECT id, flg_produccion, flg_antipilling, color_x_cliente_id, fibra, tenido_id
+FROM receta.tenido
+WHERE articulo_tipo_id = 18 AND tenido_id = 4
+  AND color_x_cliente_id IN (1585, 1587, 31);
+
+
+SELECT id, flg_produccion, flg_antipilling, color_x_cliente_id, fibra, tenido_id
+FROM receta.tenido
+WHERE articulo_tipo_id = 18 AND tenido_id = 4
+  AND color_x_cliente_id IN (1585, 1587, 31);
+
+
+
+SELECT id, tipo_receta_id, flg_activo, flg_produccion,
+       color_x_cliente_id, tipo_articulo_id, fibra, tenido_id, flg_antipilling
+FROM receta2
+WHERE tipo_articulo_id = 18 AND tenido_id = 4
+  AND color_x_cliente_id IN (1585, 1587, 31);
+
+
+
+
+
+
+
+SELECT
+  p.id AS partida_id,
+  p.color_x_cliente_id AS p_cxc,    rt.color_x_cliente_id AS r_cxc,
+  p.articulo_tipo_id   AS p_tipo,   rt.articulo_tipo_id   AS r_tipo,
+  p.tenido_id          AS p_tenido, rt.tenido_id          AS r_tenido,
+  p.flg_antipilling    AS p_antip,  rt.flg_antipilling    AS r_antip
+FROM mes.partida p
+JOIN mes.partida_paso pp ON pp.partida_id = p.id
+JOIN mes.operacion op    ON op.id = pp.operacion_id AND op.codigo = 'TENIDO'
+LEFT JOIN receta.tenido rt ON rt.id = pp.receta_id
+WHERE p.id IN (6112, 6114);
+
+ROLLBACK
+
+SELECT * FROM public.articulo_tipo WHERE id IN (4, 18);
+SELECT cxc.id, cxc.color_id, c.color, cxc.tercero_id, t.nombre AS cliente
+FROM color_x_cliente cxc
+JOIN public.color c ON c.id = cxc.color_id
+JOIN tercero t      ON t.id = cxc.tercero_id
+WHERE cxc.id IN (31, 257, 1585, 929)
+ORDER BY cxc.color_id;
+SELECT doc.fn_familia_precio(18::smallint, 225) AS fam_18,
+       doc.fn_familia_precio(4::smallint, 225)  AS fam_4;
+
+
+
+WITH partidas_tenido AS (
+    SELECT DISTINCT
+        p.id, p.color_x_cliente_id, p.tercero_id,
+        p.articulo_tipo_id, p.tenido_id, p.flg_antipilling,
+        (SELECT ar.fibra
+         FROM mes.partida_componente pc
+         JOIN inventario.lote l ON l.id = pc.lote_id
+         JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+         JOIN articulo ar ON ar.id = ird.articulo_id
+         WHERE pc.partida_id = p.id AND pc.lote_id IS NOT NULL
+         LIMIT 1)::smallint AS fibra
+    FROM mes.partida p
+    JOIN mes.partida_paso pp ON pp.partida_id = p.id
+    JOIN mes.operacion op    ON op.id = pp.operacion_id AND op.codigo = 'TENIDO'
+    WHERE p.fyh_elm IS NULL
+      AND p.estado_facturacion <> 'facturado'
+      AND EXISTS (
+          SELECT 1 FROM mes.partida_paso_ejecucion pe
+          WHERE pe.partida_paso_id = pp.id AND pe.estado = 'COMPLETADO'
+      )
+)
+SELECT
+    pt.id AS partida_id,
+    EXTRACT(YEAR FROM pp2.fyh_cre)::text || '-' ||
+        LPAD(pp2.numero::text, 4, '0') AS codigo,
+    t.nombre  AS cliente,
+    c.color,
+    at.nombre AS articulo_tipo
+FROM partidas_tenido pt
+JOIN mes.partida pp2          ON pp2.id = pt.id
+JOIN tercero t                ON t.id = pt.tercero_id
+JOIN color_x_cliente cxc      ON cxc.id = pt.color_x_cliente_id
+JOIN public.color c           ON c.id = cxc.color_id
+JOIN public.articulo_tipo at  ON at.id = pt.articulo_tipo_id
+WHERE NOT EXISTS (
+    SELECT 1 FROM receta.tenido rt
+    WHERE rt.flg_produccion = true
+      AND (rt.color_x_cliente_id IS NULL OR rt.color_x_cliente_id = pt.color_x_cliente_id)
+      AND rt.articulo_tipo_id = pt.articulo_tipo_id
+      AND rt.fibra            = pt.fibra
+      AND (rt.tenido_id IS NULL OR rt.tenido_id = pt.tenido_id)
+      AND rt.flg_antipilling  = COALESCE(pt.flg_antipilling, false)
+)
+ORDER BY t.nombre, c.color, at.nombre, pt.id;
+
+
+
+-- ── 1. Color (color_x_cliente_id) → match the assigned recipe's cxc ──
+-- Same physical color (Azulino 22 / Italiano 69); only the shade entry changes.
+-- Billing client unaffected (stays on partida.tercero_id = 225).
+UPDATE mes.partida p
+SET color_x_cliente_id = v.cxc,
+    usr_mod = 4,
+    fyh_mod = NOW()
+FROM (VALUES (6112, 257), (6114, 929)) AS v(pid, cxc)
+WHERE p.id = v.pid;
+
+
+-- 6112 — Azulino, Dueñas, J301 Card, después de corrección
+SELECT * FROM doc.fn_precio_info(
+    2,    -- TENIDO operacion_id
+    257,  -- color_x_cliente_id (post-update)
+    225,  -- tercero_id (Dueñas, unchanged)
+    4,    -- articulo_tipo_id (J301 Card, post-update)
+    4,    -- tenido_id
+    1,    -- fibra (algodón)
+    false -- flg_antipilling
+);
+
+-- 6114 — Italiano, Dueñas, J301 Card, después de corrección
+SELECT * FROM doc.fn_precio_info(
+    2,    -- TENIDO operacion_id
+    929,  -- color_x_cliente_id (post-update)
+    225,  -- tercero_id (Dueñas, unchanged)
+    4,    -- articulo_tipo_id (J301 Card, post-update)
+    4,    -- tenido_id
+    1,    -- fibra (algodón)
+    false -- flg_antipilling
+);
+
+
+
+
+-- 1. What entregas are linked?
+SELECT ce.entrega_id, e.serie, e.correlativo, e.fecha_recepcion
+FROM doc.compra_entrega ce
+JOIN doc.entrega e ON e.id = ce.entrega_id
+WHERE ce.compra_id = 989;
+
+-- 2. Any entrega_detalle lines for those entregas?
+SELECT grd.entrega_id, grd.item_id, grd.cantidad
+FROM doc.compra_entrega ce
+JOIN doc.entrega_detalle grd ON grd.entrega_id = ce.entrega_id
+WHERE ce.compra_id = 989;
+
+-- 3. Any movements via those entregas?
+SELECT im.documento_tipo, im.documento_id, im.item_id, im.cantidad, imt.codigo
+FROM doc.compra_entrega ce
+JOIN inventario.item_movimientos im 
+    ON im.documento_tipo = 'entrega' AND im.documento_id = ce.entrega_id
+JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+WHERE ce.compra_id = 989;
+
+-- 4. Any direct compra movements?
+SELECT im.item_id, im.cantidad, imt.codigo
+FROM inventario.item_movimientos im
+JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+WHERE im.documento_tipo = 'compra' AND im.documento_id = 989;
+
+
+UPDATE doc.compra_detalle cd
+SET cantidad_recibida = COALESCE((
+    SELECT SUM(im.cantidad)
+    FROM inventario.item_movimientos im
+    JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+    WHERE imt.codigo = 'COMPRA_ING'
+      AND im.item_id = cd.item_id
+      AND im.documento_tipo = 'compra'
+      AND im.documento_id = 989
+), 0)
+WHERE cd.compra_id = 989;
+
+
+
+ROLLBACK;
+SELECT * FROM doc.orden_servicio;
+SELECT * FROM doc.orden_servicio_detalle;

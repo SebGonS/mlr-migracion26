@@ -547,3 +547,14 @@ WHERE pp.partida_id IN (
 )
 ORDER BY pp.partida_id, o.codigo, pe.fyh_inicio;
 
+
+
+
+SELECT date_trunc('month', l.fyh_cre) AS mes, COUNT(*) AS rollos
+FROM inventario.lote l
+JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+JOIN inventario.vw_stock_lotes sl      ON sl.lote_id = l.id
+WHERE l.fyh_elm IS NULL
+  AND lrd.entrega_id IS NULL
+  AND lrd.orden_servicio_id IS NULL
+GROUP BY 1 ORDER BY 1 DESC;

@@ -21,14 +21,14 @@ entregas_partida AS (
     SELECT
         pc.partida_id,
         jsonb_agg(DISTINCT jsonb_build_object(
-            'tipo',   CASE WHEN lrd.entrega_id IS NOT NULL THEN 'entrega' ELSE 'os' END,
-            'id',     COALESCE(lrd.entrega_id, lrd.orden_servicio_id),
-            'codigo', COALESCE(gr.serie || '-' || gr.correlativo, os.serie || '-' || os.correlativo::text)
+            'tipo',              'entrega',
+            'id',                lrd.entrega_id,
+            'entrega_serie',     gr.serie,
+            'entrega_correlativo', gr.correlativo
         )) AS entregas
     FROM mes.partida_componente        pc
     JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = pc.lote_id
-    LEFT JOIN doc.entrega        gr  ON gr.id = lrd.entrega_id
-    LEFT JOIN doc.orden_servicio       os  ON os.id = lrd.orden_servicio_id
+    LEFT JOIN doc.entrega              gr  ON gr.id = lrd.entrega_id
     WHERE pc.lote_id IS NOT NULL
       AND pc.partida_id IN (SELECT partida_id FROM partidas_del_dia)
     GROUP BY pc.partida_id
@@ -53,6 +53,7 @@ FROM (
         'maquina_id',                prog.maquina_id,
         'secuencia',                 prog.secuencia,
         'nota',                      prog.nota,
+        'relacion_bano',             prog.relacion_bano,
         'actividad_tipo',            prog.actividad_tipo,
         -- Production paso fields (null when actividad_tipo = 'LAVADO_MAQUINA')
         'paso_id',                   pp.id,
@@ -158,14 +159,14 @@ entregas_partida AS (
     SELECT
         pc.partida_id,
         jsonb_agg(DISTINCT jsonb_build_object(
-            'tipo',   CASE WHEN lrd.entrega_id IS NOT NULL THEN 'entrega' ELSE 'os' END,
-            'id',     COALESCE(lrd.entrega_id, lrd.orden_servicio_id),
-            'codigo', COALESCE(gr.serie || '-' || gr.correlativo, os.serie || '-' || os.correlativo::text)
+            'tipo',              'entrega',
+            'id',                lrd.entrega_id,
+            'entrega_serie',     gr.serie,
+            'entrega_correlativo', gr.correlativo
         )) AS entregas
     FROM mes.partida_componente        pc
     JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = pc.lote_id
-    LEFT JOIN doc.entrega        gr  ON gr.id = lrd.entrega_id
-    LEFT JOIN doc.orden_servicio       os  ON os.id = lrd.orden_servicio_id
+    LEFT JOIN doc.entrega              gr  ON gr.id = lrd.entrega_id
     WHERE pc.lote_id IS NOT NULL
       AND pc.partida_id IN (SELECT partida_id FROM pasos_pendientes)
     GROUP BY pc.partida_id
@@ -260,7 +261,8 @@ $$;
 -- ═══════════════════════════════════════════════════════════════
 -- GUARDAR PROGRAMACION - Full replace for a given date
 -- Accepts both production pasos and lavado_maquina activities
--- Each element: { actividad_tipo, actividad_id, maquina_id, secuencia, nota? }
+-- Each element: { actividad_tipo, actividad_id, maquina_id, secuencia, nota?, relacion_bano? }
+-- relacion_bano is optional; NULL = use machine standard when generating the recipe.
 -- ═══════════════════════════════════════════════════════════════
 CREATE OR REPLACE FUNCTION mes.guardar_programacion(
     p_fecha DATE,
@@ -296,14 +298,15 @@ BEGIN
     -- 3. Full replace for the date
     DELETE FROM mes.programacion WHERE fecha = p_fecha;
 
-    INSERT INTO mes.programacion (actividad_tipo, actividad_id, maquina_id, fecha, secuencia, nota)
+    INSERT INTO mes.programacion (actividad_tipo, actividad_id, maquina_id, fecha, secuencia, nota, relacion_bano)
     SELECT
         elem->>'actividad_tipo',
         (elem->>'actividad_id')::BIGINT,
         (elem->>'maquina_id')::INT,
         p_fecha,
         (elem->>'secuencia')::SMALLINT,
-        elem->>'nota'
+        elem->>'nota',
+        (elem->>'relacion_bano')::NUMERIC
     FROM jsonb_array_elements(p_programaciones) elem;
 
     -- Advance/revert PLANIFICADA ↔ PROGRAMADA for every affected partida.
@@ -371,7 +374,15 @@ Complex frontend state sync	Frontend is source of truth
 Need optimistic updates	Simple: save = replace
 Want me to add this to your funciones.sql?*/
 -- SELECT mes.generar_receta(7513)
-CREATE OR REPLACE FUNCTION mes.generar_receta(p_paso_id BIGINT)
+-- Drop the pre-refactor 1-arg signature; the new all-defaults version would otherwise
+-- be ambiguous with it on a single-argument call.
+DROP FUNCTION IF EXISTS mes.generar_receta(BIGINT);
+CREATE OR REPLACE FUNCTION mes.generar_receta(
+    p_paso_id        BIGINT,
+    p_maquina_id     INT     DEFAULT NULL,  -- tentative machine override; else resolved from programacion
+    p_relacion_bano  NUMERIC DEFAULT NULL,  -- tentative bath ratio override; highest precedence
+    p_commit         BOOLEAN DEFAULT TRUE   -- false = preview: no partida_componente write, no notification
+)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -384,7 +395,7 @@ DECLARE
     v_maq_nombre       text;
     v_maq_codigo       text;
     v_rb               numeric;  -- effective bath ratio (resolved after batch weight is known)
-    v_rb_paso          numeric;  -- order-step override (pp.relacion_bano_objetivo)
+    v_rb_paso          numeric;  -- scheduled override (programacion.relacion_bano)
     v_rb_maquina       numeric;  -- machine standard ratio
     v_cap_min_kg       numeric;  -- machine minimum operational load (kg)
     v_peso             numeric;
@@ -409,22 +420,36 @@ BEGIN
     END IF;
 
     -- 1. Validate paso, get receta + machine capacity data.
-    -- Machine resolved from programacion if the paso is already scheduled
-    -- (scheduled machine is authoritative over planning intent).
-    -- Falls back to maquina_planificada_id when not yet on the board.
+    -- Machine resolution (no more maquina_planificada_id — routing step carries no machine):
+    --   tentative override (p_maquina_id) wins, else the scheduled machine (programacion).
+    -- A caller previewing a recipe before scheduling passes p_maquina_id; committed
+    -- generation reads the machine the paso is scheduled on.
+    v_maquina_id := COALESCE(
+        p_maquina_id,
+        (SELECT maquina_id FROM mes.programacion
+         WHERE actividad_tipo = 'partida_paso' AND actividad_id = p_paso_id
+         ORDER BY fyh_cre DESC
+         LIMIT 1)
+    );
+
     SELECT pp.receta_id,
-           COALESCE(prog.maquina_id, pp.maquina_planificada_id),
-           pp.relacion_bano_objetivo,
+           prog.relacion_bano,
            m.relacion_bano, m.capacidad_min_kg,
            pp.partida_id, o.nombre
-    INTO v_receta_id, v_maquina_id, v_rb_paso,
+    INTO v_receta_id, v_rb_paso,
          v_rb_maquina, v_cap_min_kg,
          v_partida_id, v_op_nombre
     FROM mes.partida_paso pp
-    LEFT JOIN mes.operacion o   ON o.id   = pp.operacion_id
-    LEFT JOIN mes.programacion prog
-           ON prog.actividad_tipo = 'partida_paso' AND prog.actividad_id = pp.id
-    LEFT JOIN mes.maquina m     ON m.id   = COALESCE(prog.maquina_id, pp.maquina_planificada_id)
+    LEFT JOIN mes.operacion o ON o.id = pp.operacion_id
+    LEFT JOIN mes.maquina m   ON m.id = v_maquina_id
+    LEFT JOIN LATERAL (
+        SELECT relacion_bano FROM mes.programacion
+        WHERE actividad_tipo = 'partida_paso'
+          AND actividad_id   = p_paso_id
+          AND maquina_id     = v_maquina_id
+        ORDER BY fyh_cre DESC
+        LIMIT 1
+    ) prog ON true
     WHERE pp.id = p_paso_id;
 
     IF NOT FOUND THEN
@@ -432,6 +457,10 @@ BEGIN
     END IF;
     IF v_receta_id IS NULL THEN
         RAISE EXCEPTION 'Paso ID % sin receta asignada.', p_paso_id;
+    END IF;
+    IF v_maquina_id IS NULL THEN
+        RAISE EXCEPTION 'Debe programar el paso en una máquina o indicar una máquina tentativa para generar la receta.'
+            USING ERRCODE = 'P0001';
     END IF;
 
     -- 2. Machine info
@@ -472,7 +501,8 @@ BEGIN
     -- When batch weight is below machine minimum, volume is floored to cap_min_kg * rb
     -- so the bath covers the machine drum properly — g/L chemicals scale up accordingly.
     -- % chemicals always scale on actual fabric weight (v_peso), not the floor.
-    v_rb           := COALESCE(v_rb_paso, v_rb_maquina);
+    -- tentative override wins, then the scheduled custom ratio, then the machine standard
+    v_rb           := COALESCE(p_relacion_bano, v_rb_paso, v_rb_maquina);
     v_flg_cap_minima := v_cap_min_kg IS NOT NULL AND v_peso < v_cap_min_kg;
     v_peso_volumen := CASE WHEN v_flg_cap_minima THEN v_cap_min_kg ELSE v_peso END;
     v_volumen      := v_peso_volumen * v_rb;
@@ -569,6 +599,12 @@ BEGIN
     LEFT JOIN tercero cli    ON cli.id = p.tercero_id
     WHERE pp.id = p_paso_id;
 
+    -- Preview mode (p_commit = false): return the scaled JSON only — no reservation
+    -- write, no notification. Used to compare machines / bath ratios before scheduling.
+    IF NOT p_commit THEN
+        RETURN v_receta;
+    END IF;
+
     -- Write scaled chemical reservations into partida_componente (RESB chemical rows)
     DELETE FROM mes.partida_componente
     WHERE partida_paso_id = p_paso_id AND item_id IS NOT NULL;
@@ -626,6 +662,7 @@ DECLARE
     v_requiere_receta boolean;
     v_requiere_maquina boolean;
     v_receta_id       int;
+    v_maquina_id      int;
     v_ejecucion_id    bigint;
 BEGIN
     IF NOT jwt_has_permission('produccion.ejecutar') THEN
@@ -654,8 +691,15 @@ BEGIN
     IF v_requiere_receta AND v_receta_id IS NULL THEN
         RAISE EXCEPTION 'No se puede iniciar el paso % porque no tiene receta asignada.', v_op_nombre;
     END IF;
-    IF v_requiere_maquina AND (p_datos->>'maquina_id') IS NULL THEN
-        RAISE EXCEPTION 'No se puede iniciar el paso % porque no se proporcionó una máquina.', v_op_nombre;
+
+    -- Resolve machine: explicit override → scheduled programacion → fail
+    v_maquina_id := COALESCE(
+        (p_datos->>'maquina_id')::INT,
+        (SELECT maquina_id FROM mes.programacion WHERE id = (p_datos->>'programacion_id')::BIGINT)
+    );
+
+    IF v_requiere_maquina AND v_maquina_id IS NULL THEN
+        RAISE EXCEPTION 'No se puede iniciar el paso % porque no tiene máquina (indique maquina_id o programe el paso primero).', v_op_nombre;
     END IF;
 
     -- Guard: previous pasos in sequence must be complete and have no active run
@@ -685,14 +729,23 @@ BEGIN
 
     -- Create execution run record.
     -- fyh_inicio / fyh_cre accept a historical timestamp for backfill; live callers omit it → NOW().
-    INSERT INTO mes.partida_paso_ejecucion(partida_paso_id, estado, maquina_id, empleado_id, fyh_inicio, programacion_id, receta_id, usr_cre, fyh_cre)
+    INSERT INTO mes.partida_paso_ejecucion(partida_paso_id, estado, maquina_id, empleado_id, fyh_inicio, programacion_id, receta_id, relacion_bano_real, usr_cre, fyh_cre)
     VALUES (
         p_paso_id, 'EN_PROCESO',
-        (p_datos->>'maquina_id')::INT,
+        v_maquina_id,
         (p_datos->>'empleado_id')::SMALLINT,
         COALESCE((p_datos->>'fyh_inicio')::TIMESTAMPTZ, NOW()),
         (p_datos->>'programacion_id')::BIGINT,
         v_receta_id,
+        -- pre-populate from scheduled custom ratio, else machine standard (operator overrides at finalization)
+        COALESCE(
+            (p_datos->>'relacion_bano')::NUMERIC,
+            (SELECT COALESCE(prog.relacion_bano, m.relacion_bano)
+             FROM mes.programacion prog
+             JOIN mes.maquina m ON m.id = prog.maquina_id
+             WHERE prog.id = (p_datos->>'programacion_id')::BIGINT),
+            (SELECT relacion_bano FROM mes.maquina WHERE id = v_maquina_id)
+        ),
         v_usr_id,
         COALESCE((p_datos->>'fyh_inicio')::TIMESTAMPTZ, NOW())
     )
@@ -703,9 +756,9 @@ BEGIN
     PERFORM mes.actualizar_estado_partida(v_partida_id);
 
     -- Update machine state
-    IF (p_datos->>'maquina_id') IS NOT NULL THEN
+    IF v_maquina_id IS NOT NULL THEN
         UPDATE mes.maquina SET estado_actual = 'activa'
-        WHERE id = (p_datos->>'maquina_id')::INT;
+        WHERE id = v_maquina_id;
     END IF;
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
@@ -1454,8 +1507,6 @@ DECLARE
     v_out_propietario   int;
     v_new_lote_id           int;
     v_entrega_id      bigint;
-    v_orden_servicio_id     bigint;
-    v_factura_hilo          TEXT;
     v_doc_movimiento_id     BIGINT;
     v_flg_rib               BOOLEAN;
     v_lote_cantidad         NUMERIC;
@@ -1600,8 +1651,8 @@ BEGIN
         v_input_lote_id := (v_elem->>'input_lote_id')::INT;
 
         -- Inherit item_id, propietario, billing anchor, rib flag, and original quantity from input lote
-        SELECT l.item_id, l.propietario_id, lrd.entrega_id, lrd.orden_servicio_id, lrd.factura_hilo, ird.flg_rib, l.cantidad
-        INTO v_out_item_id, v_out_propietario, v_entrega_id, v_orden_servicio_id, v_factura_hilo, v_flg_rib, v_lote_cantidad
+        SELECT l.item_id, l.propietario_id, lrd.entrega_id, ird.flg_rib, l.cantidad
+        INTO v_out_item_id, v_out_propietario, v_entrega_id, v_flg_rib, v_lote_cantidad
         FROM inventario.lote l
         JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
         JOIN item_rollo_detalle ird             ON ird.item_id = l.item_id
@@ -1641,16 +1692,16 @@ BEGIN
         VALUES (v_doc_movimiento_id, v_out_item_id, v_new_lote_id, v_ing_tipo_id,
                 v_ubicacion_id, v_peso_salida, 'partida_paso_ejecucion', p_ejecucion_id);
 
-        -- Batch classification: carry ingress doc anchor + factura_hilo + parent-batch link forward;
+        -- Batch classification: carry ingress doc anchor + parent-batch link forward;
         -- populate dyeing identity from partida.
         INSERT INTO inventario.lote_rollo_detalle(
-            lote_id, entrega_id, orden_servicio_id, factura_hilo, origen_lote_id,
+            lote_id, entrega_id, origen_lote_id,
             ancho, malla, rendimiento,
             color_x_cliente_id, tenido_id,
             flg_tenido, flg_antipilling
         )
         VALUES (
-            v_new_lote_id, v_entrega_id, v_orden_servicio_id, v_factura_hilo, v_input_lote_id,
+            v_new_lote_id, v_entrega_id, v_input_lote_id,
             v_partida_ancho, v_partida_malla, v_partida_rendimiento,
             v_partida_color_x_cliente, v_partida_tenido_id,
             true, v_partida_flg_antipilling
@@ -2075,22 +2126,30 @@ BEGIN
         RAISE EXCEPTION 'Paso #% no tiene una ejecución EN_PROCESO para revertir.', p_paso_id;
     END IF;
 
-    -- Guard: nothing consumed on this run
+    -- Guard: net unconsumed quantity > 0 (anular_produccion posts PROD_CONSUMO_REV which nets to 0)
     IF EXISTS (
-        SELECT 1 FROM inventario.item_movimientos
-        WHERE documento_tipo = 'partida_paso_ejecucion'
-          AND documento_id   = v_ejecucion_id
+        SELECT 1
+        FROM (
+            SELECT SUM(CASE WHEN imt.codigo = 'PROD_CONSUMO_REV' THEN -im.cantidad
+                            ELSE im.cantidad END) AS net
+            FROM inventario.item_movimientos im
+            JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+            WHERE im.documento_tipo = 'partida_paso_ejecucion'
+              AND im.documento_id   = v_ejecucion_id
+              AND imt.codigo IN ('PROD_CONSUMO', 'PROD_CONSUMO_REV')
+        ) s WHERE s.net > 0
     ) THEN
         RAISE EXCEPTION
             'No se puede deshacer el inicio del paso %: ya tiene consumos registrados. Use anular_produccion.',
             v_op_nombre;
     END IF;
 
-    -- Guard: no output lotes produced by this run
+    -- Guard: no live (non-reversed) output lotes produced by this run
     IF EXISTS (
         SELECT 1 FROM inventario.lote
         WHERE documento_tipo = 'partida_paso_ejecucion'
           AND documento_id   = v_ejecucion_id
+          AND fyh_elm        IS NULL
     ) THEN
         RAISE EXCEPTION
             'No se puede deshacer el inicio del paso %: ya registró producción. Use anular_produccion.',
@@ -3232,10 +3291,9 @@ GRANT USAGE on SCHEMA mes TO authenticated;
 --         "operacion_id": 5,          required per paso
 --         "secuencia": 1,             optional (defaults to array position)
 --         "receta_id": 42,            optional — corrective recipe (different from original)
---         "maquina_planificada_id": 3,optional
 --         "ph_objetivo": 6.5,         optional
 --         "temperatura_objetivo": 80, optional
---         "relacion_bano_objetivo": 1.5, optional
+--         "relacion_bano_objetivo": removed — bath ratio lives on programacion, not paso
 --         "tiempo_estandar": 120      optional
 --       }
 --     ],
@@ -3347,20 +3405,18 @@ BEGIN
     -- can begin from CREADA immediately once steps are defined.
     IF p_datos->'pasos' IS NOT NULL AND jsonb_array_length(p_datos->'pasos') > 0 THEN
         INSERT INTO mes.partida_paso (
-            partida_id, secuencia, operacion_id, maquina_planificada_id,
+            partida_id, secuencia, operacion_id,
             receta_id, tiempo_estandar, ph_objetivo, temperatura_objetivo,
-            relacion_bano_objetivo, usr_cre
+            usr_cre
         )
         SELECT
             v_child_id,
             COALESCE((e->>'secuencia')::smallint, rn::smallint),
             (e->>'operacion_id')::smallint,
-            (e->>'maquina_planificada_id')::int,
             (e->>'receta_id')::int,
             (e->>'tiempo_estandar')::int,
             (e->>'ph_objetivo')::numeric,
             (e->>'temperatura_objetivo')::numeric,
-            (e->>'relacion_bano_objetivo')::numeric,
             v_usr_id
         FROM jsonb_array_elements(p_datos->'pasos') WITH ORDINALITY AS arr(e, rn);
     -- If no pasos provided, child is created as a blank draft — planner adds steps explicitly.
@@ -3565,10 +3621,10 @@ BEGIN
                     'operacion_id', opp.operacion_id,
                     'operacion_codigo', o.codigo,
                     'operacion_nombre', o.nombre,
-                    'maquina_planificada_id', opp.maquina_planificada_id,
-                    'maquina_planificada_nombre', maquina.nombre,
+                    'maquina_programada_id', prog.maquina_id,
+                    'maquina_programada_nombre', maquina.nombre,
                     'ph_objetivo', opp.ph_objetivo,
-                    'relacion_bano_objetivo', opp.relacion_bano_objetivo,
+                    'relacion_bano_objetivo', prog.relacion_bano,
                     'temperatura_objetivo', opp.temperatura_objetivo,
                     'tiempo_estandar', opp.tiempo_estandar,
                     'receta_id', opp.receta_id,
@@ -3697,7 +3753,12 @@ BEGIN
             )
             FROM mes.partida_paso opp
             LEFT JOIN mes.operacion o ON o.id = opp.operacion_id
-            LEFT JOIN mes.maquina ON maquina.id = opp.maquina_planificada_id
+            LEFT JOIN LATERAL (
+                SELECT maquina_id, relacion_bano FROM mes.programacion
+                WHERE actividad_tipo = 'partida_paso' AND actividad_id = opp.id
+                ORDER BY fyh_cre DESC LIMIT 1
+            ) prog ON true
+            LEFT JOIN mes.maquina ON maquina.id = prog.maquina_id
             WHERE opp.partida_id = p.id
         ), '[]'::jsonb),
 
@@ -3716,10 +3777,6 @@ BEGIN
                 'entrega_id',   lrd_in.entrega_id,
                 'entrega_serie',         gr_in.serie,
                 'entrega_correlativo',   gr_in.correlativo,
-                'orden_servicio_id',  lrd_in.orden_servicio_id,
-                'os_serie',           os_in.serie,
-                'os_correlativo',     os_in.correlativo,
-                'factura_hilo',       lrd_in.factura_hilo,
                 'ancho',              lrd_in.ancho,
                 'malla',              lrd_in.malla,
                 'flg_tenido',         lrd_in.flg_tenido,
@@ -3734,7 +3791,6 @@ BEGIN
             LEFT JOIN vw_items vi_mat ON vi_mat.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_in ON lrd_in.lote_id = l.id
             LEFT JOIN doc.entrega gr_in ON gr_in.id = lrd_in.entrega_id
-            LEFT JOIN doc.orden_servicio os_in ON os_in.id = lrd_in.orden_servicio_id
             LEFT JOIN inventario.pesaje ps ON ps.lote_id = l.id
             WHERE opi.partida_id = p.id
               AND opi.lote_id IS NOT NULL
@@ -3755,10 +3811,6 @@ BEGIN
                 'entrega_id',   lrd_out.entrega_id,
                 'entrega_serie',         gr_out.serie,
                 'entrega_correlativo',   gr_out.correlativo,
-                'orden_servicio_id',  lrd_out.orden_servicio_id,
-                'os_serie',           os_out.serie,
-                'os_correlativo',     os_out.correlativo,
-                'factura_hilo',       lrd_out.factura_hilo,
                 'ancho',              lrd_out.ancho,
                 'malla',              lrd_out.malla,
                 'rendimiento',        lrd_out.rendimiento,
@@ -3786,7 +3838,6 @@ BEGIN
             LEFT JOIN vw_items vi_prod ON vi_prod.item_id = l.item_id
             LEFT JOIN inventario.lote_rollo_detalle lrd_out ON lrd_out.lote_id = l.id
             LEFT JOIN doc.entrega gr_out ON gr_out.id = lrd_out.entrega_id
-            LEFT JOIN doc.orden_servicio os_out ON os_out.id = lrd_out.orden_servicio_id
             WHERE l.documento_tipo = 'partida_paso_ejecucion'
         ), '[]'::jsonb),
 
@@ -4187,6 +4238,7 @@ DECLARE
     v_insumos           JSONB;
     v_consumos          JSONB;
     v_error_payload     JSONB;
+    v_fyh_fin           TIMESTAMPTZ;
 BEGIN
     IF NOT jwt_has_permission('produccion.ejecutar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
@@ -4198,9 +4250,13 @@ BEGIN
         RAISE EXCEPTION 'lavado_maquina id=% no encontrado.', p_id;
     END IF;
 
-    IF v_lavado.estado <> 'EN_PROCESO' THEN
-        RAISE EXCEPTION 'lavado_maquina id=% en estado % — se esperaba EN_PROCESO.', p_id, v_lavado.estado;
+    -- PENDIENTE accepted for backdated transcription (fyh_inicio supplied in payload).
+    -- EN_PROCESO is the normal live path.
+    IF v_lavado.estado NOT IN ('EN_PROCESO', 'PENDIENTE') THEN
+        RAISE EXCEPTION 'lavado_maquina id=% en estado % — se esperaba EN_PROCESO o PENDIENTE.', p_id, v_lavado.estado;
     END IF;
+
+    v_fyh_fin := COALESCE((p_datos->>'fyh_fin')::TIMESTAMPTZ, now());
 
     -- Aggregate insumos across all recipe pasos, summed by item (fixed quantities, no scaling)
     SELECT jsonb_agg(jsonb_build_object('item_id', item_id, 'cantidad', cantidad))
@@ -4250,7 +4306,7 @@ BEGIN
         INSERT INTO inventario.item_movimientos(
             doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
             origen_ubicacion_id, cantidad, precio_unitario,
-            documento_tipo, documento_id, motivo_id
+            documento_tipo, documento_id, motivo_id, fecha_hora
         )
         SELECT
             v_doc_movimiento_id,
@@ -4263,20 +4319,22 @@ BEGIN
              WHERE iv.item_id = (c->>'item_id')::INT),
             'lavado_maquina',
             p_id,
-            v_motivo_id
+            v_motivo_id,
+            v_fyh_fin
         FROM jsonb_array_elements(v_consumos) c;
     END IF;
 
     UPDATE mes.lavado_maquina SET
-        estado  = 'COMPLETADO',
-        fyh_fin = COALESCE((p_datos->>'fyh_fin')::TIMESTAMPTZ, now()),
-        nota    = COALESCE(p_datos->>'nota', nota),
-        usr_mod = v_usr_id,
-        fyh_mod = now()
+        estado      = 'COMPLETADO',
+        fyh_inicio  = COALESCE(fyh_inicio, (p_datos->>'fyh_inicio')::TIMESTAMPTZ, now()),
+        fyh_fin     = v_fyh_fin,
+        nota        = COALESCE(p_datos->>'nota', nota),
+        usr_mod     = v_usr_id,
+        fyh_mod     = now()
     WHERE id = p_id;
 
     UPDATE mes.maquina SET
-        ultimo_mantenimiento = now(),
+        ultimo_mantenimiento = v_fyh_fin,
         usr_mod = v_usr_id,
         fyh_mod = now()
     WHERE id = v_lavado.maquina_id;

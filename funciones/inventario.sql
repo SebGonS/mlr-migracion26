@@ -426,6 +426,11 @@ BEGIN
 
     ELSE
         -- AJUSTE_NEG: FIFO debit from existing lotes
+        -- KNOWN LIMITATION (not a problem today, single-warehouse): calcular_fifo
+        -- resolves lotes by item_id across ALL ubicaciones, so p_ubicacion_id is
+        -- ignored on the debit side — a negative adjustment scoped to one ubicación
+        -- can deplete a lote in another. Scope FIFO to p_ubicacion_id if/when stock
+        -- is split across locations.
         SELECT id INTO v_tipo_id FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG';
 
         v_fifo_result := mes.calcular_fifo(
@@ -460,7 +465,7 @@ BEGIN
         'cantidad', p_cantidad, 'observacion', p_observacion
     ));
 
-    RETURN format('Ajuste de % registrado para item #% (doc #%).',
+    RETURN format('Ajuste de %s registrado para item #%s (doc #%s).',
                   p_cantidad, p_item_id, v_doc_movimiento_id);
 
 EXCEPTION WHEN OTHERS THEN
@@ -473,6 +478,91 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION inventario.registrar_ajuste(INT, INT, NUMERIC, TEXT) TO authenticated;
+
+
+-- ───────────────────────────────────────────────────────────────
+-- inventario.registrar_ajuste_a_total
+-- Total-based sibling of registrar_ajuste: the user enters the physical
+-- quantity they counted (p_cantidad_objetivo) and the function computes the
+-- delta itself, then delegates to the delta-based core.
+--
+-- Why this exists (vs computing the delta in the frontend): masking the delta
+-- client-side is a race. The frontend would read saldo, the user types a total,
+-- delta = total − saldo is computed, then posted — but any movement landing in
+-- that window (despacho, recepción, another ajuste) leaves the delta stale and
+-- the final quantity ≠ the total the user counted. Exactly the busy items that
+-- drift are the ones that race.
+--
+-- Here the read-and-adjust is atomic: we lock the (item, ubicación) item_saldo
+-- row FOR UPDATE, read the current saldo inside the same transaction, compute
+-- the delta, and post. Any concurrent movement on that saldo blocks until we
+-- commit, so the resulting saldo is guaranteed to equal the target. This is the
+-- same read-current-then-post pattern finalizar_cuadre runs per item — a
+-- one-row cuadre.
+--
+-- LIMITATION: if the item has no item_saldo row at the ubicación yet (saldo 0),
+-- FOR UPDATE locks nothing, so a concurrent first-ever ingress at that location
+-- is an unavoidable phantom. The realistic race (movements against existing
+-- stock) is fully closed.
+--
+-- Audit: the target, the saldo-at-the-moment, and the computed delta are folded
+-- into the observación passed to registrar_ajuste, so the movement and logs_api
+-- row preserve the user's intent — not just a bare delta.
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION inventario.registrar_ajuste_a_total(
+    p_item_id           INT,
+    p_ubicacion_id      INT,
+    p_cantidad_objetivo NUMERIC,
+    p_observacion       TEXT
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','public','inventario','mes'
+AS $$
+DECLARE
+    v_saldo_actual NUMERIC(15,7);
+    v_delta        NUMERIC;
+    v_obs          TEXT;
+BEGIN
+    IF NOT jwt_has_permission('inventario.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere inventario.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF p_cantidad_objetivo IS NULL OR p_cantidad_objetivo < 0 THEN
+        RAISE EXCEPTION 'La cantidad objetivo no puede ser nula ni negativa.';
+    END IF;
+
+    IF p_observacion IS NULL OR trim(p_observacion) = '' THEN
+        RAISE EXCEPTION 'La observación es obligatoria para registrar un ajuste.';
+    END IF;
+
+    -- Lock the saldo row so no other movement can change it between read and post.
+    SELECT cantidad_actual
+    INTO v_saldo_actual
+    FROM inventario.item_saldo
+    WHERE item_id = p_item_id AND ubicacion_id = p_ubicacion_id
+    FOR UPDATE;
+
+    v_saldo_actual := COALESCE(v_saldo_actual, 0);
+    v_delta        := p_cantidad_objetivo - v_saldo_actual;
+
+    IF v_delta = 0 THEN
+        RETURN format('Sin cambios: el saldo del item #%s ya es %s.',
+                      p_item_id, p_cantidad_objetivo);
+    END IF;
+
+    -- Preserve intent in the audit trail: target, saldo-at-the-moment, delta.
+    v_obs := format('%s [objetivo=%s, saldo=%s, delta=%s]',
+                    p_observacion, p_cantidad_objetivo, v_saldo_actual, v_delta);
+
+    -- Delegate to the delta-based core (shared posting / FIFO / valuation logic).
+    RETURN inventario.registrar_ajuste(p_item_id, p_ubicacion_id, v_delta, v_obs);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION inventario.registrar_ajuste_a_total(INT, INT, NUMERIC, TEXT) TO authenticated;
 
 
 -- ───────────────────────────────────────────────────────────────

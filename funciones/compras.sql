@@ -538,6 +538,13 @@ RETURNS void
 LANGUAGE sql
 SET search_path TO 'doc', 'inventario', 'public'
 AS $$
+    -- Recomputes cantidad_recibida from item_movimientos (ground truth).
+    -- Two paths both count toward the same PO line:
+    --   1. ingresar_compra:  documento_tipo='compra', documento_id=compra_id
+    --   2. orderless entrega: entrega_detalle lines linked via compra_entrega.
+    --      When entrega_detalle.compra_detalle_id is set, exact line match is used
+    --      (multi-compra deliveries). When NULL, falls back to item_id match
+    --      (single-compra deliveries — the common case, no admin overhead).
     UPDATE doc.compra_detalle cd
     SET cantidad_recibida = COALESCE((
         SELECT SUM(im.cantidad)
@@ -545,10 +552,16 @@ AS $$
         JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
         WHERE imt.codigo = 'COMPRA_ING'
           AND im.item_id = cd.item_id
-          AND im.documento_tipo = 'entrega'
-          AND im.documento_id IN (
-              SELECT entrega_id FROM doc.compra_entrega
-              WHERE compra_id = p_compra_id
+          AND (
+              (im.documento_tipo = 'compra'  AND im.documento_id = p_compra_id)
+           OR (im.documento_tipo = 'entrega' AND im.documento_id IN (
+                  SELECT grd.entrega_id
+                  FROM doc.entrega_detalle grd
+                  JOIN doc.compra_entrega ce ON ce.entrega_id = grd.entrega_id
+                  WHERE ce.compra_id = p_compra_id
+                    AND (grd.compra_detalle_id = cd.id
+                         OR (grd.compra_detalle_id IS NULL AND grd.item_id = cd.item_id))
+              ))
           )
     ), 0)
     WHERE cd.compra_id = p_compra_id;
@@ -601,6 +614,10 @@ BEGIN
     ON CONFLICT DO NOTHING;
 
     GET DIAGNOSTICS v_linked = ROW_COUNT;
+
+    -- Sync the denormalized receipt counter from actual entrega_detalle quantities.
+    -- Covers the orderless-receipt case where warehouse ingressed before the PO existed.
+    PERFORM doc.fn_refresh_compra_detalle_qtys(p_compra_id);
 
     RETURN format('%s guía(s) vinculada(s) a compra #%s.', v_linked, p_compra_id);
 EXCEPTION WHEN OTHERS THEN
@@ -819,6 +836,361 @@ GRANT EXECUTE ON FUNCTION doc.vincular_facturas_compra(bigint, jsonb)       TO a
 GRANT EXECUTE ON FUNCTION doc.desvincular_facturas_compra(bigint, jsonb)    TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.marcar_compra_recibida(bigint)                TO authenticated;
 
+
+-- ───────────────────────────────────────────────────────────────
+-- registrar_compra_completa
+-- One-shot: compra + entrega + stock + factura in a single transaction.
+-- Designed for the majority flow where supplier delivers everything at once
+-- with a matching guía and factura.
+--
+-- All three documents are optional independently:
+--   • guia absent   → stock posts against compra only (no browsable delivery)
+--   • factura absent → compra + stock registered, invoice entered separately
+--   • both present  → full one-shot (most common)
+--
+-- p_datos shape:
+-- {
+--   "tercero_id":   45,
+--   "fecha":        "2026-06-25",     -- compra date; defaults to today
+--   "observacion":  "...",
+--   "ubicacion_id": 5,                -- stock destination; defaults to ALM_CRU
+--   "guia": {                         -- optional
+--     "serie":       "T001",
+--     "correlativo": "00001285",
+--     "fecha":       "2026-06-25"
+--   },
+--   "factura": {                      -- optional
+--     "serie":            "F001",
+--     "numero":           "00001234",
+--     "fecha_emision":    "2026-06-25",
+--     "fecha_vencimiento":"2026-07-25",
+--     "subtotal":         1000.00,
+--     "igv":              180.00,
+--     "total":            1180.00,
+--     "moneda":           "USD",
+--     "tipo_cambio":      3.75,
+--     "tipo_pago":        "al contado"
+--   },
+--   "items": [
+--     { "item_id": 71,  "cantidad": 25, "precio_unitario": 15.00, "n_rollos": 2 },
+--     { "item_id": 196, "cantidad": 30, "precio_unitario": 12.50 }
+--   ]
+-- }
+--
+-- Returns: { "compra_id": N, "entrega_id": N|null, "factura_id": N|null }
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.registrar_compra_completa(p_datos jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'notification', 'public', 'inventario', 'doc'
+AS $$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id     int    := get_user_id();
+    v_tercero_id int    := (p_datos->>'tercero_id')::int;
+    v_compra_id  bigint;
+    v_entrega_id bigint;
+    v_factura_id bigint;
+    v_elem       jsonb;
+BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_compra_completa', v_usr_id, p_datos);
+
+    IF v_tercero_id IS NULL THEN
+        RAISE EXCEPTION 'tercero_id es requerido.';
+    END IF;
+
+    -- ── 1. Compra (PO) ───────────────────────────────────────────
+    INSERT INTO doc.compra (tercero_id, fecha, observacion, usr_cre)
+    VALUES (v_tercero_id,
+            COALESCE((p_datos->>'fecha')::DATE, CURRENT_DATE),
+            p_datos->>'observacion',
+            v_usr_id)
+    RETURNING id INTO v_compra_id;
+
+    INSERT INTO doc.compra_detalle (compra_id, item_id, cantidad, precio_unitario, usr_cre)
+    SELECT v_compra_id,
+           (item->>'item_id')::int,
+           (item->>'cantidad')::numeric,
+           (item->>'precio_unitario')::numeric,
+           v_usr_id
+    FROM jsonb_array_elements(p_datos->'items') item;
+
+    -- ── 2. Entrega (delivery doc + EKPO links) ───────────────────
+    IF p_datos ? 'guia' AND (p_datos->'guia'->>'correlativo') IS NOT NULL THEN
+        SELECT doc.registrar_entrega_compra(jsonb_build_object(
+            'compra_id',   v_compra_id,
+            'serie',       p_datos->'guia'->>'serie',
+            'correlativo', p_datos->'guia'->>'correlativo',
+            'fecha',       COALESCE(p_datos->'guia'->>'fecha', p_datos->>'fecha'),
+            'items',       (
+                SELECT jsonb_agg(jsonb_build_object(
+                    'item_id',  item->>'item_id',
+                    'cantidad', item->>'cantidad',
+                    'n_rollos', item->>'n_rollos'
+                ))
+                FROM jsonb_array_elements(p_datos->'items') item
+            )
+        )) INTO v_entrega_id;
+    END IF;
+
+    -- ── 3. Stock movements ───────────────────────────────────────
+    PERFORM doc.ingresar_compra(jsonb_build_object(
+        'compra_id',    v_compra_id,
+        'ubicacion_id', p_datos->>'ubicacion_id',
+        'items',        (
+            SELECT jsonb_agg(jsonb_build_object(
+                'item_id',  item->>'item_id',
+                'cantidad', item->>'cantidad',
+                'n_rollos', item->>'n_rollos',
+                'prorate',  true
+            ))
+            FROM jsonb_array_elements(p_datos->'items') item
+        )
+    ));
+
+    -- ── 4. Factura proveedor ─────────────────────────────────────
+    IF p_datos ? 'factura' AND (p_datos->'factura'->>'numero') IS NOT NULL THEN
+        SELECT doc.registrar_factura_proveedor(
+            p_datos->'factura'
+            || jsonb_build_object(
+                'tercero_id', v_tercero_id,
+                'compra_id',  v_compra_id,
+                'lineas', (
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'item_id',        item->>'item_id',
+                        'cantidad',       item->>'cantidad',
+                        'precio_unitario',item->>'precio_unitario'
+                    ))
+                    FROM jsonb_array_elements(p_datos->'items') item
+                )
+            )
+        ) INTO v_factura_id;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'compra_id',  v_compra_id,
+        'entrega_id', v_entrega_id,
+        'factura_id', v_factura_id
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS
+        v_message = MESSAGE_TEXT, v_detail = PG_EXCEPTION_DETAIL,
+        v_hint    = PG_EXCEPTION_HINT, v_context = PG_EXCEPTION_CONTEXT,
+        v_sqlstate = RETURNED_SQLSTATE;
+    RAISE EXCEPTION 'registrar_compra_completa: % | detail: % | hint: % | context: % | state: %',
+        v_message, v_detail, v_hint, v_context, v_sqlstate;
+END;
+$$;
+
+-- ───────────────────────────────────────────────────────────────
+-- registrar_entrega_compra
+-- Creates a supplier inbound delivery (entrega) and optionally posts stock.
+--
+-- Two modes determined by presence of compra_id:
+--   • WITH compra_id    → doc-only: creates entrega + detalle, links to compra,
+--                         syncs cantidad_recibida. Stock posts via ingresar_compra.
+--   • WITHOUT compra_id → orderless: creates entrega + detalle + lotes + movements.
+--                         Reconcile to a compra later via vincular_entregas_compra.
+--
+-- compra_detalle_id per item is optional: when provided it pins the exact PO line
+-- (needed when one entrega covers multiple compras). When absent, auto-matched by
+-- item_id (correct for the common single-compra case).
+--
+-- p_datos shape:
+-- {
+--   "compra_id":   123,          -- optional; omit for orderless receipt
+--   "tercero_id":  45,           -- required when no compra_id
+--   "serie":       "T001",       -- optional
+--   "correlativo": "00001285",   -- required
+--   "fecha":       "2026-06-20", -- optional, defaults to now()
+--   "ubicacion_id": 5,           -- destination (orderless only; ignored in doc-only)
+--   "items": [
+--     { "item_id": 71,  "cantidad": 25, "compra_detalle_id": 445 },
+--     { "item_id": 196, "cantidad": 25, "n_rollos": 2 }
+--   ]
+-- }
+-- ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION doc.registrar_entrega_compra(p_datos jsonb)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'notification', 'public', 'inventario', 'doc'
+AS $$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id          int      := get_user_id();
+    v_compra_id       bigint   := (p_datos->>'compra_id')::bigint;
+    v_entrega_id      bigint;
+    v_entrega_tipo_id smallint;
+    v_tercero_id      int;
+    v_ubicacion_id    int;
+    v_fecha_mov       timestamptz;
+    v_doc_mov_id      bigint;
+    v_mov_tipo_id     smallint;
+    v_elem            jsonb;
+    v_item_id         int;
+    v_cantidad        numeric;
+    v_n_rollos        int;
+    v_detalle_id      bigint;   -- entrega_detalle.id  (LIPS line)
+    v_compra_det_id   bigint;   -- compra_detalle.id   (EKPO link)
+    v_lote_id         int;
+    v_linea           smallint := 0;
+    v_flg_rollo       boolean;
+    v_flg_rib         boolean;
+    v_prorate         boolean;
+    v_peso_rollo      numeric;
+    i                 int;
+BEGIN
+    IF NOT jwt_has_permission('comercial.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('registrar_entrega_compra', v_usr_id, p_datos);
+
+    SELECT id INTO STRICT v_entrega_tipo_id
+    FROM doc.entrega_tipo WHERE codigo = 'COMPRA_INGRESO';
+
+    IF v_compra_id IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM doc.compra WHERE id = v_compra_id AND fyh_elm IS NULL) THEN
+            RAISE EXCEPTION 'Compra #% no existe o fue anulada.', v_compra_id;
+        END IF;
+        SELECT tercero_id INTO v_tercero_id FROM doc.compra WHERE id = v_compra_id;
+    ELSE
+        v_tercero_id := (p_datos->>'tercero_id')::int;
+        IF v_tercero_id IS NULL THEN
+            RAISE EXCEPTION 'tercero_id requerido cuando no se especifica compra_id.';
+        END IF;
+    END IF;
+
+    v_fecha_mov := COALESCE((p_datos->>'fecha')::timestamptz, now());
+
+    INSERT INTO doc.entrega (entrega_tipo_id, tercero_id, serie, correlativo, fecha_emision, fecha_recepcion)
+    VALUES (v_entrega_tipo_id, v_tercero_id, p_datos->>'serie', p_datos->>'correlativo',
+            v_fecha_mov, v_fecha_mov)
+    RETURNING id INTO v_entrega_id;
+
+    IF v_compra_id IS NOT NULL THEN
+        INSERT INTO doc.compra_entrega (compra_id, entrega_id)
+        VALUES (v_compra_id, v_entrega_id)
+        ON CONFLICT DO NOTHING;
+    ELSE
+        -- Orderless: resolve ubicacion once before the item loop
+        v_doc_mov_id := nextval('inventario.mov_doc_seq');
+        SELECT id INTO STRICT v_mov_tipo_id
+        FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING';
+
+        IF (p_datos->>'ubicacion_id') IS NOT NULL THEN
+            v_ubicacion_id := (p_datos->>'ubicacion_id')::int;
+        ELSE
+            SELECT ub.id INTO STRICT v_ubicacion_id
+            FROM inventario.ubicacion ub
+            JOIN inventario.almacen alm ON alm.id = ub.almacen_id
+            WHERE alm.codigo = 'ALM_CRU' LIMIT 1;
+        END IF;
+    END IF;
+
+    FOR v_elem IN SELECT jsonb_array_elements(p_datos->'items') LOOP
+        v_item_id       := (v_elem->>'item_id')::int;
+        v_cantidad      := (v_elem->>'cantidad')::numeric;
+        v_n_rollos      := (v_elem->>'n_rollos')::int;
+        v_linea         := v_linea + 1;
+
+        -- Resolve EKPO link: explicit from payload, or auto-match by item_id
+        v_compra_det_id := (v_elem->>'compra_detalle_id')::bigint;
+        IF v_compra_det_id IS NULL AND v_compra_id IS NOT NULL THEN
+            SELECT id INTO v_compra_det_id
+            FROM doc.compra_detalle
+            WHERE compra_id = v_compra_id AND item_id = v_item_id
+            ORDER BY id LIMIT 1;
+        END IF;
+
+        INSERT INTO doc.entrega_detalle (entrega_id, linea, item_id, cantidad, n_rollos, compra_detalle_id)
+        VALUES (v_entrega_id, v_linea, v_item_id, v_cantidad, v_n_rollos, v_compra_det_id)
+        RETURNING id INTO v_detalle_id;
+
+        -- Doc-only mode: stop here; stock posts via ingresar_compra
+        CONTINUE WHEN v_compra_id IS NOT NULL;
+
+        -- Orderless mode: post stock anchored to the entrega
+        SELECT EXISTS (
+            SELECT 1 FROM item i
+            JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+            WHERE i.id = v_item_id
+        ) INTO v_flg_rollo;
+
+        IF v_flg_rollo AND v_n_rollos IS NOT NULL THEN
+            v_prorate    := COALESCE((v_elem->>'prorate')::boolean, true);
+            v_peso_rollo := CASE WHEN v_prorate THEN v_cantidad / v_n_rollos ELSE v_cantidad END;
+
+            SELECT COALESCE(flg_rib, false) INTO v_flg_rib
+            FROM item_rollo_detalle WHERE item_id = v_item_id;
+
+            FOR i IN 1 .. v_n_rollos LOOP
+                INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre)
+                VALUES (v_item_id, 'entrega', v_entrega_id, v_peso_rollo, NULL, v_usr_id)
+                RETURNING id INTO v_lote_id;
+
+                INSERT INTO inventario.lote_rollo_detalle (lote_id, entrega_id, flg_tenido)
+                VALUES (v_lote_id, v_entrega_id, false);
+
+                INSERT INTO inventario.item_movimientos (
+                    doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+                    destino_ubicacion_id, cantidad, fecha_hora,
+                    documento_tipo, documento_id, documento_linea_id, usr_cre
+                ) VALUES (
+                    v_doc_mov_id, v_item_id, v_lote_id, v_mov_tipo_id,
+                    v_ubicacion_id, v_peso_rollo, v_fecha_mov,
+                    'entrega', v_entrega_id, v_detalle_id, v_usr_id
+                );
+            END LOOP;
+
+        ELSE
+            INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre)
+            VALUES (v_item_id, 'entrega', v_entrega_id, v_cantidad, NULL, v_usr_id)
+            RETURNING id INTO v_lote_id;
+
+            INSERT INTO inventario.item_movimientos (
+                doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+                destino_ubicacion_id, cantidad, fecha_hora,
+                documento_tipo, documento_id, documento_linea_id, usr_cre
+            ) VALUES (
+                v_doc_mov_id, v_item_id, v_lote_id, v_mov_tipo_id,
+                v_ubicacion_id, v_cantidad, v_fecha_mov,
+                'entrega', v_entrega_id, v_detalle_id, v_usr_id
+            );
+        END IF;
+
+    END LOOP;
+
+    -- Doc-only: sync the PO receipt counter now that entrega lines exist
+    IF v_compra_id IS NOT NULL THEN
+        PERFORM doc.fn_refresh_compra_detalle_qtys(v_compra_id);
+    END IF;
+
+    RETURN v_entrega_id;
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS
+        v_message = MESSAGE_TEXT, v_detail = PG_EXCEPTION_DETAIL,
+        v_hint    = PG_EXCEPTION_HINT, v_context = PG_EXCEPTION_CONTEXT,
+        v_sqlstate = RETURNED_SQLSTATE;
+    RAISE EXCEPTION 'registrar_entrega_compra: % | detail: % | hint: % | context: % | state: %',
+        v_message, v_detail, v_hint, v_context, v_sqlstate;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION doc.registrar_entrega_compra(jsonb)               TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.registrar_compra_completa(jsonb)              TO authenticated;
 
 -- ───────────────────────────────────────────────────────────────
 -- get_compra
@@ -1403,9 +1775,9 @@ $$;
 --   INSUMO → one lote per line, cantidad = received quantity
 --   ROLLO  → one lote per roll, n_rollos required, cantidad = per-roll weight
 --
--- To also register the physical entrega (SUNAT document), call doc.crear_entrega
--- separately with tipo=COMPRA_INGRESO and compra_id. Independent — never posts
--- movements. Can be called before or after this function.
+-- To register the physical supplier entrega (SUNAT document), call
+-- doc.registrar_entrega_compra separately. That function handles both
+-- doc-only (with compra_id) and orderless receipt (without compra_id).
 --
 -- p_datos shape:
 -- {
@@ -1443,11 +1815,6 @@ DECLARE
     v_precio        numeric;
     v_fecha_mov     TIMESTAMPTZ;
     v_detalle_id      bigint;     -- compra_detalle line (≈ EBELP) for documento_linea_id
-    v_entrega_id      bigint;     -- optional browsable guía (inbound delivery)
-    v_entrega_tipo_id smallint;
-    v_tercero_id      int;
-    v_has_guia        boolean;
-    v_linea           smallint := 0;
     i               int;
 BEGIN
     IF NOT jwt_has_permission('comercial.crear') THEN
@@ -1484,30 +1851,6 @@ BEGIN
     v_fecha_mov  := COALESCE((p_datos->>'fecha_recepcion')::TIMESTAMPTZ, now());
     v_doc_mov_id := nextval('inventario.mov_doc_seq');
 
-    -- Optional supplier guía: create a browsable inbound delivery (entrega) and
-    -- link it to the compra. Stock still posts against the PO below; the entrega
-    -- is the logistics/browse record (≈ SAP inbound delivery), NOT a stock event.
-    v_has_guia := (p_datos ? 'guia') AND (p_datos->'guia'->>'correlativo') IS NOT NULL;
-    IF v_has_guia THEN
-        SELECT tercero_id INTO v_tercero_id FROM doc.compra WHERE id = v_compra_id;
-        SELECT id INTO STRICT v_entrega_tipo_id
-        FROM doc.entrega_tipo WHERE codigo = 'COMPRA_INGRESO';
-
-        INSERT INTO doc.entrega (entrega_tipo_id, tercero_id, serie, correlativo, fecha_emision, fecha_recepcion)
-        VALUES (
-            v_entrega_tipo_id, v_tercero_id,
-            p_datos->'guia'->>'serie',
-            p_datos->'guia'->>'correlativo',
-            COALESCE((p_datos->'guia'->>'fecha')::TIMESTAMPTZ, v_fecha_mov),
-            v_fecha_mov
-        )
-        RETURNING id INTO v_entrega_id;
-
-        INSERT INTO doc.compra_entrega (compra_id, entrega_id)
-        VALUES (v_compra_id, v_entrega_id)
-        ON CONFLICT DO NOTHING;
-    END IF;
-
     FOR v_elem IN SELECT jsonb_array_elements(p_datos->'items') LOOP
         v_item_id  := (v_elem->>'item_id')::int;
         v_cantidad := (v_elem->>'cantidad')::numeric;
@@ -1523,6 +1866,12 @@ BEGIN
         FROM doc.compra_detalle
         WHERE compra_id = v_compra_id AND item_id = v_item_id
         ORDER BY id LIMIT 1;
+
+        IF v_detalle_id IS NULL THEN
+            RAISE EXCEPTION 'Item % no está en las líneas de la compra #%. Agregue la línea antes de ingresar stock.',
+                v_item_id, v_compra_id
+                USING HINT = 'Use actualizar_compra para agregar la línea de detalle primero.';
+        END IF;
 
         IF v_flg_rollo AND v_n_rollos IS NOT NULL THEN
             -- Roll path: one lote per roll
@@ -1575,18 +1924,12 @@ BEGIN
 
         END IF;
 
-        -- Guía line (browsable inbound-delivery detail) — declared receipt per item
-        IF v_has_guia THEN
-            v_linea := v_linea + 1;
-            INSERT INTO doc.entrega_detalle (entrega_id, linea, item_id, cantidad, n_rollos, ubicacion_id)
-            VALUES (v_entrega_id, v_linea, v_item_id, v_cantidad, v_n_rollos, v_ubicacion_id);
-        END IF;
-
-        UPDATE doc.compra_detalle
-        SET cantidad_recibida = cantidad_recibida + v_cantidad
-        WHERE compra_id = v_compra_id AND item_id = v_item_id;
 
     END LOOP;
+
+    -- Recompute from item_movimientos (both compra + entrega paths) rather than
+    -- incrementing inline — avoids drift and covers the orderless-receipt case.
+    PERFORM doc.fn_refresh_compra_detalle_qtys(v_compra_id);
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Ingreso de compra',

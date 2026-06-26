@@ -361,6 +361,9 @@ CREATE TABLE mes.ruta_plantilla_detalle (
 -- Planning intent only: maquina_planificada_id, receta_id, target params.
 -- Execution state (who ran it, when, actual params) lives in partida_paso_ejecucion.
 -- Completion is derived: a paso is done when it has a COMPLETADO partida_paso_ejecucion row.
+-- NOTE: maquina_planificada_id is dropped post-migration by patches/32 — machine truth
+-- moves to mes.programacion (plan) → partida_paso_ejecucion (actual). The column is kept
+-- here because migration/11 + legacy_data/* backfills still populate it on a full replay.
 CREATE TABLE mes.partida_paso (
     id                      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     partida_id              bigint NOT NULL REFERENCES mes.partida(id),

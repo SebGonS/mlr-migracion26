@@ -65,6 +65,7 @@ JOIN inventario.lote_rollo_detalle lrd
     ON  lrd.lote_id    = l.id
     AND lrd.flg_tenido = true           -- dyed rolls only
 JOIN inventario.vw_stock_lotes sa  ON sa.lote_id = l.id
+WHERE l.estado_calidad = 'APROBADO'
 GROUP BY
     p.id, p.numero, p.estado_produccion, p.tercero_id, t.nombre,
     p.color_x_cliente_id, vc.color, vc.tono, p.fecha_acordada
@@ -74,35 +75,28 @@ GRANT SELECT ON doc.vw_despacho_pendiente TO authenticated;
 
 
 -- ── doc.get_despacho_partida ──────────────────────────────────────────────
--- Returns a pre-built dispatch payload for a single partida.
+-- Pre-builds the dispatch payload for one or more partidas (all must share
+-- the same tercero_id). Groups rolls by ownership into DESPACHO_CLIENTE and
+-- VENTA_EGRESO entries; frontend adds serie/correlativo/fecha_emision to each
+-- and calls doc.crear_entrega once per entry.
 --
 -- Result shape:
 -- {
---   "partida_id": 123,
---   "codigo": "2025-0042",
 --   "tercero_id": 7,
---   "cliente": "Acme S.A.",
+--   "cliente":    "Acme S.A.",
+--   "partidas":   ["2026-0001", "2026-0003"],
 --   "entregas": [
 --     {
---       "entrega_tipo_id": 2,
---       "entrega_tipo_codigo": "DESPACHO_CLIENTE",
---       "entrega_tipo_nombre": "Servicio – Despacho de material procesado a cliente",
---       "tercero_id": 7,
---       "rolls": 12,
---       "kg_total": 245.60,
---       "items": [
---         { "item_id": 44, "lote_id": 901, "ubicacion_id": 3, "cantidad": 20.50, "propietario_id": 7 },
---         ...
---       ]
---     },
---     { ... }   -- second entry only present when tiene_mixto = true
+--       "entrega_tipo_id": 2, "entrega_tipo_codigo": "DESPACHO_CLIENTE", ...,
+--       "rolls": 32, "kg_total": 480.60,
+--       "items": [{ "item_id":44, "lote_id":901, "ubicacion_id":3, "cantidad":20.50, "propietario_id":7,
+--                  "color_x_cliente_id":12, "color":"AZUL", "tono":"MARINO", "color_hex":"#001f5b",
+--                  "ancho":"1.50", "articulo_id":3, "articulo_nombre":"RIB" }, ...]
+--     }
 --   ]
 -- }
---
--- Frontend adds serie, correlativo, fecha_emision to each entrega entry and
--- calls doc.crear_entrega once per entry.
 -- ─────────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION doc.get_despacho_partida(p_partida_id BIGINT)
+CREATE OR REPLACE FUNCTION doc.get_despacho_partida(p_partida_ids BIGINT[])
 RETURNS JSONB
 LANGUAGE plpgsql STABLE
 SECURITY DEFINER
@@ -110,89 +104,125 @@ SET search_path TO 'iam', 'doc', 'mes', 'inventario', 'public'
 AS $$
 DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
-    v_usr_id int := get_user_id();
-    v_result JSONB;
+    v_usr_id     int := get_user_id();
+    v_n_terceros int;
+    v_tercero_id int;
+    v_cliente    text;
+    v_result     JSONB;
 BEGIN
     IF NOT jwt_has_permission('comercial.ver') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.ver'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    SELECT jsonb_build_object(
-        'partida_id', p.id,
-        'codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT
-                          || '-' || LPAD(p.numero::TEXT, 4, '0'),
-        'tercero_id', p.tercero_id,
-        'cliente',    t.nombre,
-        'entregas',      COALESCE(entregas_agg.entregas, '[]'::jsonb)
-    )
-    INTO v_result
-    FROM mes.partida p
-    JOIN tercero t ON t.id = p.tercero_id
-    LEFT JOIN LATERAL (
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'entrega_tipo_id',     grt.id,
-                'entrega_tipo_codigo', grt.codigo,
-                'entrega_tipo_nombre', grt.nombre,
-                'tercero_id',                p.tercero_id,
-                'rolls',                     lotes_agg.roll_count,
-                'kg_total',                  ROUND(lotes_agg.kg_total::NUMERIC, 2),
-                'items',                     lotes_agg.items
-            )
-            ORDER BY grt.codigo  -- deterministic: DESPACHO_CLIENTE before VENTA_EGRESO
-        ) AS entregas
-        FROM (
-            SELECT
-                CASE WHEN l.propietario_id = 1
-                     THEN 'VENTA_EGRESO'
-                     ELSE 'DESPACHO_CLIENTE'
-                END                             AS tipo_codigo,
-                COUNT(*)                        AS roll_count,
-                SUM(sa.cantidad_disponible)     AS kg_total,
-                jsonb_agg(
-                    jsonb_build_object(
-                        'item_id',        l.item_id,
-                        'lote_id',        l.id,
-                        'ubicacion_id',   sa.ubicacion_id,
-                        'cantidad',       ROUND(sa.cantidad_disponible::NUMERIC, 2),
-                        'propietario_id', l.propietario_id
-                    )
-                    ORDER BY l.id
-                )                               AS items
-            FROM mes.partida_paso pp
-            JOIN mes.partida_paso_ejecucion pe  ON pe.partida_paso_id = pp.id
-                                                AND pe.estado = 'COMPLETADO'
-            JOIN inventario.lote l
-                ON  l.documento_tipo = 'partida_paso_ejecucion'
-                AND l.documento_id   = pe.id
-            JOIN inventario.lote_rollo_detalle lrd
-                ON  lrd.lote_id    = l.id
-                AND lrd.flg_tenido = true
-            JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
-            WHERE pp.partida_id = p.id
-            GROUP BY
-                CASE WHEN l.propietario_id = 1 THEN 'VENTA_EGRESO' ELSE 'DESPACHO_CLIENTE' END
-        ) lotes_agg
-        JOIN doc.entrega_tipo grt ON grt.codigo = lotes_agg.tipo_codigo
-    ) entregas_agg ON true
-    WHERE p.id = p_partida_id;
+    SELECT COUNT(DISTINCT p.tercero_id)
+    INTO   v_n_terceros
+    FROM   mes.partida p
+    WHERE  p.id = ANY(p_partida_ids);
 
-    IF v_result IS NULL THEN
-        RAISE EXCEPTION
-            'Partida % no encontrada o sin stock de rollos teñidos pendiente de despacho',
-            p_partida_id;
+    IF v_n_terceros = 0 THEN
+        RAISE EXCEPTION 'No se encontraron las partidas indicadas';
+    END IF;
+    IF v_n_terceros > 1 THEN
+        RAISE EXCEPTION 'Las partidas seleccionadas pertenecen a distintos clientes';
+    END IF;
+
+    SELECT p.tercero_id, t.nombre
+    INTO   v_tercero_id, v_cliente
+    FROM   mes.partida p
+    JOIN   tercero t ON t.id = p.tercero_id
+    WHERE  p.id = ANY(p_partida_ids)
+    LIMIT  1;
+
+    SELECT jsonb_build_object(
+        'tercero_id', v_tercero_id,
+        'cliente',    v_cliente,
+        'partidas',   (
+            SELECT jsonb_agg(
+                EXTRACT(YEAR FROM fyh_cre)::TEXT || '-' || LPAD(numero::TEXT, 4, '0')
+                ORDER BY fyh_cre
+            )
+            FROM mes.partida WHERE id = ANY(p_partida_ids)
+        ),
+        'entregas', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'entrega_tipo_id',     grt.id,
+                    'entrega_tipo_codigo', grt.codigo,
+                    'entrega_tipo_nombre', grt.nombre,
+                    'tercero_id',          v_tercero_id,
+                    'rolls',               lotes_agg.roll_count,
+                    'kg_total',            ROUND(lotes_agg.kg_total::NUMERIC, 2),
+                    'items',               lotes_agg.items
+                )
+                ORDER BY grt.codigo
+            )
+            FROM (
+                SELECT
+                    CASE WHEN l.propietario_id = 1
+                         THEN 'VENTA_EGRESO'
+                         ELSE 'DESPACHO_CLIENTE'
+                    END                         AS tipo_codigo,
+                    COUNT(*)                    AS roll_count,
+                    SUM(sa.cantidad_disponible) AS kg_total,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'item_id',              l.item_id,
+                            'lote_id',              l.id,
+                            'ubicacion_id',         sa.ubicacion_id,
+                            'cantidad',             ROUND(sa.cantidad_disponible::NUMERIC, 2),
+                            'propietario_id',       l.propietario_id,
+                            'color_x_cliente_id',   lrd.color_x_cliente_id,
+                            'color',                vc.color,
+                            'tono',                 vc.tono,
+                            'color_hex',            vc.color_x_cliente_hex,
+                            'ancho',                lrd.ancho,
+                            'articulo_id',          ird.articulo_id,
+                            'articulo_nombre',      art.nombre,
+                            'entrega_serie',        ent.serie,
+                            'entrega_correlativo',  ent.correlativo
+                        )
+                        ORDER BY l.id
+                    ) AS items
+                FROM mes.partida_paso pp
+                JOIN mes.partida_paso_ejecucion pe  ON pe.partida_paso_id = pp.id
+                                                    AND pe.estado = 'COMPLETADO'
+                JOIN inventario.lote l
+                    ON  l.documento_tipo = 'partida_paso_ejecucion'
+                    AND l.documento_id   = pe.id
+                JOIN inventario.lote_rollo_detalle lrd
+                    ON  lrd.lote_id    = l.id
+                    AND lrd.flg_tenido = true
+                LEFT JOIN vw_colores vc             ON vc.color_x_cliente_id = lrd.color_x_cliente_id
+                LEFT JOIN inventario.item_rollo_detalle ird ON ird.item_id   = l.item_id
+                LEFT JOIN articulo art              ON art.id                = ird.articulo_id
+                LEFT JOIN doc.entrega ent           ON ent.id               = lrd.entrega_id
+                JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
+                WHERE pp.partida_id = ANY(p_partida_ids)
+                  AND l.estado_calidad = 'APROBADO'
+                GROUP BY
+                    CASE WHEN l.propietario_id = 1 THEN 'VENTA_EGRESO' ELSE 'DESPACHO_CLIENTE' END
+            ) lotes_agg
+            JOIN doc.entrega_tipo grt ON grt.codigo = lotes_agg.tipo_codigo
+        ), '[]'::jsonb)
+    )
+    INTO v_result;
+
+    IF (v_result->>'entregas') = '[]' THEN
+        RAISE EXCEPTION 'Las partidas seleccionadas no tienen rollos teñidos con stock disponible para despachar';
     END IF;
 
     RETURN v_result;
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
         v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
-    RAISE LOG 'Error in get_despacho_partida - User: %, partida: %, Error: %',
-        v_usr_id, p_partida_id, v_message;
+    RAISE LOG 'Error in get_despacho_partida - User: %, partidas: %, Error: %',
+        v_usr_id, p_partida_ids, v_message;
     RAISE;
 END;
 $$;
+
+GRANT EXECUTE ON FUNCTION doc.get_despacho_partida(bigint[]) TO authenticated;
 
 
 -- ── doc.get_entrega ─────────────────────────────────────
@@ -496,7 +526,7 @@ GROUP BY gr.id, gr.entrega_tipo_id, grt.codigo, grt.nombre, grt.flg_emitida,
 GRANT SELECT ON doc.vw_entregas_sin_numerar TO authenticated;
 
 
-GRANT EXECUTE ON FUNCTION doc.get_despacho_partida(bigint)  TO authenticated;
+-- GRANT for get_despacho_partida(bigint[]) is above the function definition
 -- doc.get_entrega grant is in core.sql
 GRANT EXECUTE ON FUNCTION doc.anular_entrega(bigint)  TO authenticated;
 GRANT EXECUTE ON FUNCTION doc.registrar_numero_entrega(bigint, text, text) TO authenticated;

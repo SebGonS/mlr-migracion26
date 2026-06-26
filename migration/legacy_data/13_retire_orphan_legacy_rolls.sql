@@ -77,6 +77,14 @@ WHERE l.fyh_elm IS NULL
   AND l.fyh_cre <= '2026-05-25 15:27:52+00'::timestamptz;
 
 
+SELECT * FROm mes.partida_paso WHERE partida_id IN (6182,6183)
+
+SELECT * FROm mes.partida_paso_ejecucion WHERE partida_paso_id IN (
+  SELECT id FROm mes.partida_paso WHERE partida_id IN (6182,6183)
+)
+
+
+SELECT * FROM mes.maquina
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- SECTION 1 — RETIRAR (una transacción). Editar el cutoff si hace falta.
 -- ═══════════════════════════════════════════════════════════════════════════════

@@ -411,9 +411,10 @@ $function$;
 -- Optional payload fields:
 --   pasos[]      — steps; can be added later via actualizar_pasos_partida while
 --                  order is in CREADA/PENDIENTE state.
---     each paso: { secuencia, operacion_id, maquina_planificada_id?, receta_id?,
+--     each paso: { secuencia, operacion_id, receta_id?,
 --                  ph_objetivo?, temperatura_objetivo?, tiempo_estandar?,
 --                  relacion_bano_objetivo? }
+--     (machine is NOT set here — it is assigned on the scheduling board, mes.programacion)
 --   componentes[] — roll reservations; can be supplied now or later via
 --                   actualizar_componentes_partida.
 --     each componente: { lote_id, cantidad }
@@ -548,23 +549,22 @@ BEGIN
 
     -- ── Steps (optional at creation; add later via actualizar_pasos_partida) ──
     IF p_partida->'pasos' IS NOT NULL AND jsonb_array_length(p_partida->'pasos') > 0 THEN
+        -- Machine is assigned later on the scheduling board (mes.programacion), not here.
+        -- Bath ratio lives on programacion (machine-coupled), not on paso.
         INSERT INTO mes.partida_paso(
             partida_id, secuencia, operacion_id,
-            maquina_planificada_id, receta_id,
-            ph_objetivo, temperatura_objetivo, tiempo_estandar, relacion_bano_objetivo
+            receta_id,
+            ph_objetivo, temperatura_objetivo, tiempo_estandar
         )
         SELECT
             v_partida_id,
             (p->>'secuencia')::smallint,
             (p->>'operacion_id')::smallint,
-            (p->>'maquina_planificada_id')::int,
             (p->>'receta_id')::int,
             (p->>'ph_objetivo')::numeric,
             (p->>'temperatura_objetivo')::numeric,
-            (p->>'tiempo_estandar')::int,
-            COALESCE((p->>'relacion_bano_objetivo')::numeric, m.relacion_bano)
-        FROM jsonb_array_elements(p_partida->'pasos') p
-        LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_planificada_id')::int;
+            (p->>'tiempo_estandar')::int
+        FROM jsonb_array_elements(p_partida->'pasos') p;
     END IF;
 
     -- ── Roll reservations (optional at creation; validated above if present) ──
@@ -818,40 +818,37 @@ BEGIN
       );
 
     -- Bulk upsert: update existing, insert new (planning columns only)
+    -- Machine is assigned on the scheduling board (mes.programacion), not on the step.
+    -- Bath ratio lives on programacion (machine-coupled), not on paso.
     WITH datos AS (
         SELECT
             (p->>'id')::BIGINT                AS id,
             (p->>'secuencia')::SMALLINT       AS secuencia,
             (p->>'operacion_id')::SMALLINT    AS operacion_id,
-            (p->>'maquina_planificada_id')::INT AS maquina_planificada_id,
             (p->>'receta_id')::INT            AS receta_id,
-            (p->>'ph_objetivo')::NUMERIC               AS ph_objetivo,
-            (p->>'temperatura_objetivo')::NUMERIC      AS temperatura_objetivo,
-            (p->>'tiempo_estandar')::INT      AS tiempo_estandar,
-            COALESCE((p->>'relacion_bano_objetivo')::NUMERIC, m.relacion_bano) AS relacion_bano_objetivo
+            (p->>'ph_objetivo')::NUMERIC      AS ph_objetivo,
+            (p->>'temperatura_objetivo')::NUMERIC AS temperatura_objetivo,
+            (p->>'tiempo_estandar')::INT      AS tiempo_estandar
         FROM jsonb_array_elements(p_pasos) p
-        LEFT JOIN mes.maquina m ON m.id = (p->>'maquina_planificada_id')::INT
     )
     INSERT INTO mes.partida_paso(
         partida_id, secuencia, operacion_id,
-        maquina_planificada_id, receta_id,
-        ph_objetivo, temperatura_objetivo, tiempo_estandar, relacion_bano_objetivo,
+        receta_id,
+        ph_objetivo, temperatura_objetivo, tiempo_estandar,
         usr_cre
     )
     SELECT p_partida_id, d.secuencia, d.operacion_id,
-           d.maquina_planificada_id, d.receta_id,
-           d.ph_objetivo, d.temperatura_objetivo, d.tiempo_estandar, d.relacion_bano_objetivo,
+           d.receta_id,
+           d.ph_objetivo, d.temperatura_objetivo, d.tiempo_estandar,
            v_usr_id
     FROM datos d
     ON CONFLICT (partida_id, secuencia)
     DO UPDATE SET
         operacion_id            = EXCLUDED.operacion_id,
-        maquina_planificada_id  = EXCLUDED.maquina_planificada_id,
         receta_id               = EXCLUDED.receta_id,
         ph_objetivo             = EXCLUDED.ph_objetivo,
         temperatura_objetivo    = EXCLUDED.temperatura_objetivo,
         tiempo_estandar         = EXCLUDED.tiempo_estandar,
-        relacion_bano_objetivo  = EXCLUDED.relacion_bano_objetivo,
         usr_mod                 = v_usr_id,
         fyh_mod                 = NOW()
         WHERE NOT EXISTS (
@@ -1207,11 +1204,10 @@ BEGIN
      RAISE EXCEPTION 'Tipo de guía con id % no existe', (p_entrega->>'entrega_tipo_id');
  END IF;
 
- -- COMPRA_INGRESO must always be tied to a compra — ensures precio_unitario is available
- -- and stock is traceable to a PO. Use doc.ingresar_compra when no entrega is in hand.
- IF v_entrega_tipo.codigo = 'COMPRA_INGRESO' AND (p_entrega->>'compra_id') IS NULL THEN
-     RAISE EXCEPTION 'Guía tipo COMPRA_INGRESO requiere compra_id'
-         USING HINT = 'Si no tiene guía física aún, use doc.ingresar_compra en su lugar.';
+ -- COMPRA_INGRESO is handled by doc.registrar_entrega_compra (dedicated supplier flow).
+ IF v_entrega_tipo.codigo = 'COMPRA_INGRESO' THEN
+     RAISE EXCEPTION 'Use doc.registrar_entrega_compra para entregas de proveedor (COMPRA_INGRESO).'
+         USING HINT = 'crear_entrega handles client flows only (SERVICIO_INGRESO, despacho, devolucion).';
  END IF;
 
  -- Movement timestamp: for incoming entregas use fecha_recepcion (allows backdating), for outgoing use now()
@@ -1304,24 +1300,6 @@ END IF;
         END
     )
     RETURNING id INTO v_entrega_id;
-
--- COMPRA_INGRESO: static document registration only.
--- Movements are always posted separately via doc.ingresar_compra.
--- Returning early here prevents any possibility of double-posting.
-IF v_entrega_tipo.codigo = 'COMPRA_INGRESO' THEN
-    INSERT INTO doc.compra_entrega (compra_id, entrega_id)
-    VALUES ((p_entrega->>'compra_id')::BIGINT, v_entrega_id)
-    ON CONFLICT DO NOTHING;
-
-    INSERT INTO doc.entrega_detalle (entrega_id, linea, item_id, cantidad, n_rollos)
-    SELECT v_entrega_id,
-           COALESCE((item->>'linea')::SMALLINT, (row_number() OVER ())::SMALLINT),
-           (item->>'item_id')::INT, (item->>'cantidad')::NUMERIC,
-           (item->>'cantidad_rollos')::INT
-    FROM jsonb_array_elements(p_entrega->'items') AS item;
-
-    RETURN format('Guía de remisión con ID %s registrada (documento SUNAT — sin movimientos).', v_entrega_id);
-END IF;
 
 IF v_entrega_tipo.flg_emitida THEN
     
@@ -1456,617 +1434,189 @@ $function$;
 GRANT USAGE ON SCHEMA mes to authenticated;
 
 -- ═══════════════════════════════════════════════════════════════
--- ORDEN DE SERVICIO — order / receipt / reversal (compra-style split)
+-- INGRESO INTERNO — one-shot MLR roll ingress (replaces orden_servicio)
 -- ───────────────────────────────────────────────────────────────
--- The OS document (header + lines) is ORDERED intent and posts no stock.
--- Receiving is a separate, additive ledger event (ingresar_orden_servicio)
--- that posts SERV_ING — mirrors doc.compra / doc.ingresar_compra.
---   orden_servicio_detalle.cantidad           = ordered roll count (intent)
---   orden_servicio_detalle.cantidad_recibida  = received so far (bumped by receipt)
--- Corrections never delete: more rolls = another receipt; fewer rolls =
--- revertir_recepcion_orden_servicio (posts SERV_ING_REV, append-only).
+-- MLR-confected rolls (propietario_id=NULL) arrive with a thread-supplier
+-- invoice reference. crear_ingreso_interno creates a headless-or-numbered
+-- INGRESO_INTERNO entrega, N roll lotes, SERV_ING movements, and
+-- entrega_detalle lines atomically.
+--
+-- Reversal: anular_entrega (same as every other inbound entrega).
+-- Read:     get_entrega (same as every other entrega).
 -- ═══════════════════════════════════════════════════════════════
 
 -- ═══════════════════════════════════════════════════════════════
--- doc.ingresar_orden_servicio  (goods receipt — WRITES THE LEDGER)
--- Posts SERV_ING for rolls physically received against existing OS lines.
--- Additive: call once per arrival (first batch and every later one).
+-- doc.crear_ingreso_interno
+-- One-shot ingress of MLR-confected rolls (INGRESO_INTERNO entrega).
+-- Creates the entrega, N lotes, SERV_ING movements, and entrega_detalle
+-- lines atomically. Reversal via anular_entrega.
 --
 -- p_datos:
 -- {
---   "orden_servicio_id": 6,
---   "ubicacion_id":      8,        -- optional, defaults to ALM_CRU
---   "fecha_recepcion":   null,     -- optional, defaults now()
---   "lineas": [
---     { "detalle_id": 18, "cantidad_rollos": 3,
---       "peso_total": null,        -- optional; split evenly, else 0.1/roll sentinel
---       "factura_hilo": null }     -- optional; else inherits the line's existing value
---   ]
--- }
--- Returns the doc_movimiento_id of the receipt.
--- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION doc.ingresar_orden_servicio(p_datos jsonb)
-RETURNS bigint
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'iam', 'notification', 'public', 'doc', 'inventario'
-AS $function$
-DECLARE
-    v_usr_id            INT    := get_user_id();
-    v_os_id             BIGINT := (p_datos->>'orden_servicio_id')::BIGINT;
-    v_os                RECORD;
-    v_serv_ing_tipo_id  SMALLINT;
-    v_doc_mov_id        BIGINT;
-    v_ubicacion_id      INT;
-    v_fecha_mov         TIMESTAMPTZ;
-    v_linea             jsonb;
-    v_detalle_id        BIGINT;
-    v_extra             INT;
-    v_item_id           INT;
-    v_malla             TEXT;
-    v_factura_hilo      TEXT;
-    v_peso_por_rollo    NUMERIC;
-    v_new_lote_id       INT;
-    v_recibida          INT;
-    v_ordenada          INT;
-    i                   INT;
-BEGIN
-    IF NOT jwt_has_permission('comercial.crear') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('ingresar_orden_servicio', v_usr_id, p_datos);
-
-    SELECT * INTO v_os FROM doc.orden_servicio
-    WHERE id = v_os_id AND flg_elm = false;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'orden_servicio % no existe o fue eliminada.', v_os_id;
-    END IF;
-
-    SELECT id INTO STRICT v_serv_ing_tipo_id
-    FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_ING';
-
-    IF (p_datos->>'ubicacion_id') IS NOT NULL THEN
-        v_ubicacion_id := (p_datos->>'ubicacion_id')::INT;
-    ELSE
-        SELECT ub.id INTO STRICT v_ubicacion_id
-        FROM inventario.ubicacion ub
-        JOIN inventario.almacen alm ON alm.id = ub.almacen_id
-        WHERE alm.codigo = 'ALM_CRU' LIMIT 1;
-    END IF;
-
-    v_fecha_mov  := COALESCE((p_datos->>'fecha_recepcion')::TIMESTAMPTZ, now());
-    v_doc_mov_id := nextval('inventario.mov_doc_seq');
-
-    FOR v_linea IN SELECT jsonb_array_elements(p_datos->'lineas')
-    LOOP
-        v_detalle_id := (v_linea->>'detalle_id')::BIGINT;
-        v_extra      := (v_linea->>'cantidad_rollos')::INT;
-
-        IF v_extra IS NULL OR v_extra <= 0 THEN
-            RAISE EXCEPTION 'Línea %: cantidad_rollos debe ser > 0.', v_detalle_id;
-        END IF;
-
-        SELECT osd.item_id, osd.malla
-        INTO v_item_id, v_malla
-        FROM doc.orden_servicio_detalle osd
-        JOIN item it_      ON it_.id = osd.item_id
-        JOIN item_tipo itp ON itp.id = it_.item_tipo_id
-        WHERE osd.id = v_detalle_id
-          AND osd.orden_servicio_id = v_os_id
-          AND itp.codigo = 'ROLLO';
-        IF NOT FOUND THEN
-            RAISE EXCEPTION 'detalle % no es una línea ROLLO de la orden_servicio %.', v_detalle_id, v_os_id;
-        END IF;
-
-        -- peso_total optional; 0.1 kg/roll sentinel until weighing corrects it
-        v_peso_por_rollo := COALESCE(
-            (v_linea->>'peso_total')::NUMERIC / NULLIF(v_extra, 0),
-            0.1
-        );
-
-        -- factura_hilo line-level fallback (used when no grupos)
-        v_factura_hilo := v_linea->>'factura_hilo';
-        IF v_factura_hilo IS NULL THEN
-            SELECT lrd.factura_hilo INTO v_factura_hilo
-            FROM inventario.lote_rollo_detalle lrd
-            JOIN inventario.item_movimientos im ON im.lote_id = lrd.lote_id
-            WHERE im.documento_tipo     = 'orden_servicio'
-              AND im.documento_id       = v_os_id
-              AND im.documento_linea_id = v_detalle_id
-            LIMIT 1;
-        END IF;
-
-        -- Build normalised groups: [{cantidad_rollos, factura_hilo}, ...]
-        -- If caller supplies "grupos" array, validate its sum; otherwise treat
-        -- the whole line as one group using the line-level factura_hilo.
-        DECLARE
-            v_grupos       JSONB;
-            v_grupo        JSONB;
-            v_grupo_cant   INT;
-            v_grupo_fac    TEXT;
-            v_grupos_sum   INT := 0;
-        BEGIN
-            v_grupos := v_linea->'grupos';
-
-            IF v_grupos IS NOT NULL AND jsonb_array_length(v_grupos) > 0 THEN
-                -- validate sum matches cantidad_rollos
-                SELECT SUM((g->>'cantidad_rollos')::INT)
-                INTO v_grupos_sum
-                FROM jsonb_array_elements(v_grupos) g;
-
-                IF v_grupos_sum <> v_extra THEN
-                    RAISE EXCEPTION
-                        'Línea %: suma de grupos (%) ≠ cantidad_rollos (%).',
-                        v_detalle_id, v_grupos_sum, v_extra;
-                END IF;
-            ELSE
-                -- synthesise a single group from line-level fields
-                v_grupos := jsonb_build_array(
-                    jsonb_build_object(
-                        'cantidad_rollos', v_extra,
-                        'factura_hilo',    v_factura_hilo
-                    )
-                );
-            END IF;
-
-            FOR v_grupo IN SELECT jsonb_array_elements(v_grupos)
-            LOOP
-                v_grupo_cant := (v_grupo->>'cantidad_rollos')::INT;
-                v_grupo_fac  := v_grupo->>'factura_hilo';
-
-                FOR i IN 1 .. v_grupo_cant
-                LOOP
-                    INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre)
-                    VALUES (v_item_id, 'orden_servicio', v_os_id, v_peso_por_rollo, NULL, v_usr_id)
-                    RETURNING id INTO v_new_lote_id;
-
-                    INSERT INTO inventario.lote_rollo_detalle (
-                        lote_id, orden_servicio_id, ancho, malla, rendimiento,
-                        flg_tenido, flg_antipilling, factura_hilo
-                    ) VALUES (
-                        v_new_lote_id, v_os_id, v_os.ancho, v_malla, v_os.rendimiento,
-                        false, COALESCE(v_os.flg_antipilling, false), v_grupo_fac
-                    );
-
-                    INSERT INTO inventario.item_movimientos (
-                        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-                        destino_ubicacion_id, cantidad, fecha_hora,
-                        documento_tipo, documento_id, documento_linea_id, usr_cre
-                    ) VALUES (
-                        v_doc_mov_id, v_item_id, v_new_lote_id, v_serv_ing_tipo_id,
-                        v_ubicacion_id, v_peso_por_rollo, v_fecha_mov,
-                        'orden_servicio', v_os_id, v_detalle_id, v_usr_id
-                    );
-                END LOOP;
-            END LOOP;
-        END;
-
-        UPDATE doc.orden_servicio_detalle
-        SET cantidad_recibida = cantidad_recibida + v_extra
-        WHERE id = v_detalle_id
-        RETURNING cantidad_recibida, cantidad INTO v_recibida, v_ordenada;
-
-        IF v_recibida > v_ordenada THEN
-            RAISE NOTICE 'detalle %: recibido % supera lo ordenado % (over-receipt).',
-                         v_detalle_id, v_recibida, v_ordenada;
-        END IF;
-    END LOOP;
-
-    RETURN v_doc_mov_id;
-EXCEPTION
-    WHEN OTHERS THEN
-        RAISE LOG 'Error in ingresar_orden_servicio - User: %, Params: %, Error: %',
-                  v_usr_id, p_datos::TEXT, SQLERRM;
-        RAISE;
-END;
-$function$;
-
-GRANT EXECUTE ON FUNCTION doc.ingresar_orden_servicio(jsonb) TO authenticated;
-
-
--- ═══════════════════════════════════════════════════════════════
--- doc.crear_orden_servicio  (the ORDER — posts no stock by itself)
--- Inserts the header + ordered lines. If destino_ubicacion_id is given
--- (rolls arrived with the order), delegates the first receipt to
--- ingresar_orden_servicio; otherwise the OS is order-only and rolls are
--- received later. Receipt logic lives in one place.
---
--- Input JSON shape:
--- {
---   "tercero_id":          5,
---   "serie":               "OS",
---   "correlativo":         1,
---   "fecha_entrega":       "2026-06-20",   -- optional
---   "rendimiento":         "1.25",          -- optional, applies to all rolls
---   "ancho":               "160",           -- optional
---   "flg_antipilling":     false,
---   "flg_urgente":         false,
---   "observacion":         null,
---   "factura":             null,
---   "destino_ubicacion_id": 1,              -- present => post first receipt
+--   "serie":         "F",          -- optional; hilo invoice series
+--   "correlativo":   "201",        -- optional; hilo invoice number (NULL → headless entrega)
+--   "fecha_emision": "2026-06-25", -- optional, defaults to today
+--   "ubicacion_id":  8,            -- optional, defaults to ALM_CRU
+--   "observacion":   null,
+--   "rendimiento":   "3.90",       -- applied to all rolls (lrd.rendimiento)
+--   "ancho":         "90",         -- applied to all rolls (lrd.ancho)
+--   "flg_antipilling": false,
 --   "lineas": [
 --     {
---       "linea":              1,
---       "item_id":            42,
---       "malla":              "28",
---       "factura_hilo":       "H-123",         -- optional; thread invoice (line default)
---       "cantidad_rollos":    5,                -- ordered count
---       "peso_total":         null,             -- optional; for the first receipt
---       "grupos": [                             -- optional; per-invoice roll groups
---         { "cantidad_rollos": 3, "factura_hilo": "H-123" },
---         { "cantidad_rollos": 2, "factura_hilo": "H-456" }
---       ],                                      -- sum must equal cantidad_rollos
---       "color_x_cliente_id": 10,
---       "tenido_id":          3,
---       "flg_doble_bolsa":    false
+--       "item_id":            253,
+--       "malla":              "2.60",
+--       "cantidad_rollos":    12,
+--       "peso_total":         null,   -- optional; split evenly; 0.1 kg sentinel if absent
+--       "color_x_cliente_id": 125     -- optional; stamps lrd for dispatch grouping
 --     }
 --   ]
 -- }
+-- Returns the new entrega_id (BIGINT).
 -- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION doc.crear_orden_servicio(p_orden jsonb)
-RETURNS text
+CREATE OR REPLACE FUNCTION doc.crear_ingreso_interno(p_datos jsonb)
+RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO 'iam', 'notification', 'public', 'doc', 'inventario'
 AS $function$
 DECLARE
-    v_usr_id        INT := get_user_id();
-    v_os_id         BIGINT;
-    v_linea         jsonb;
-    v_detalle_id    BIGINT;
-    v_recibir       jsonb := '[]'::jsonb;   -- accumulated first-receipt lines
+    v_usr_id         INT      := get_user_id();
+    v_ent_tipo_id    SMALLINT;
+    v_serv_ing_tipo  SMALLINT;
+    v_ent_id         BIGINT;
+    v_doc_mov_id     BIGINT;
+    v_ubicacion_id   INT;
+    v_fecha_mov      TIMESTAMPTZ;
+    v_linea_json     JSONB;
+    v_det_linea      SMALLINT := 1;
+    v_det_id         BIGINT;
+    v_new_lote_id    BIGINT;
+    v_peso_por_rollo NUMERIC;
+    v_item_id        INT;
+    v_cant_rollos    INT;
+    v_i              INT;
 BEGIN
     IF NOT jwt_has_permission('comercial.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
-    IF (p_orden->>'tercero_id') IS NULL THEN
-        RAISE EXCEPTION 'crear_orden_servicio: se requiere tercero_id';
-    END IF;
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('crear_ingreso_interno', v_usr_id, p_datos);
 
-    INSERT INTO doc.orden_servicio (
-        tercero_id, serie, correlativo,
-        fecha_entrega, rendimiento, ancho,
-        flg_antipilling, flg_urgente,
-        observacion, factura, usr_cre
+    SELECT id INTO STRICT v_ent_tipo_id
+    FROM doc.entrega_tipo WHERE codigo = 'INGRESO_INTERNO';
+
+    SELECT id INTO STRICT v_serv_ing_tipo
+    FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_ING';
+
+    v_ubicacion_id := COALESCE(
+        (p_datos->>'ubicacion_id')::INT,
+        (SELECT ub.id
+         FROM   inventario.ubicacion ub
+         JOIN   inventario.almacen alm ON alm.id = ub.almacen_id
+         WHERE  alm.codigo = 'ALM_CRU'
+         LIMIT  1)
+    );
+    v_fecha_mov := COALESCE((p_datos->>'fecha_emision')::DATE::TIMESTAMPTZ, now());
+
+    -- ── Entrega header ───────────────────────────────────────────
+    INSERT INTO doc.entrega (
+        entrega_tipo_id, tercero_id,
+        serie,                  correlativo,
+        fecha_emision, observacion, usr_cre
     ) VALUES (
-        (p_orden->>'tercero_id')::INT,
-        p_orden->>'serie',
-        (p_orden->>'correlativo')::INT,
-        (p_orden->>'fecha_entrega')::DATE,
-        p_orden->>'rendimiento',
-        p_orden->>'ancho',
-        COALESCE((p_orden->>'flg_antipilling')::BOOLEAN, false),
-        COALESCE((p_orden->>'flg_urgente')::BOOLEAN, false),
-        p_orden->>'observacion',
-        p_orden->>'factura',
+        v_ent_tipo_id,
+        1,  -- MLR self; INGRESO_INTERNO has no external counterparty
+        p_datos->>'serie',       -- e.g. 'F'; NULL → headless
+        p_datos->>'correlativo', -- e.g. '201' or '201 / 2024'
+        COALESCE((p_datos->>'fecha_emision')::DATE, CURRENT_DATE),
+        p_datos->>'observacion',
         v_usr_id
     )
-    RETURNING id INTO v_os_id;
+    RETURNING id INTO v_ent_id;
 
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('crear_orden_servicio', v_usr_id, p_orden);
-
-    -- Ordered lines (intent only — no stock posted here)
-    FOR v_linea IN SELECT value FROM jsonb_array_elements(p_orden->'lineas')
-    LOOP
-        INSERT INTO doc.orden_servicio_detalle (
-            orden_servicio_id, linea, item_id, malla,
-            cantidad, color_x_cliente_id, tenido_id, flg_doble_bolsa
-        ) VALUES (
-            v_os_id,
-            COALESCE((v_linea->>'linea')::SMALLINT, 1),
-            (v_linea->>'item_id')::INT,
-            v_linea->>'malla',
-            (v_linea->>'cantidad_rollos')::INT,
-            (v_linea->>'color_x_cliente_id')::INT,
-            (v_linea->>'tenido_id')::INT,
-            COALESCE((v_linea->>'flg_doble_bolsa')::BOOLEAN, false)
-        )
-        RETURNING id INTO v_detalle_id;
-
-        v_recibir := v_recibir || jsonb_build_object(
-            'detalle_id',     v_detalle_id,
-            'cantidad_rollos', (v_linea->>'cantidad_rollos')::INT,
-            'peso_total',      (v_linea->>'peso_total'),
-            'factura_hilo',    (v_linea->>'factura_hilo')
-        );
-    END LOOP;
-
-    -- First receipt: only when a destination is given (rolls arrived with the order)
-    IF (p_orden->>'destino_ubicacion_id') IS NOT NULL THEN
-        PERFORM doc.ingresar_orden_servicio(jsonb_build_object(
-            'orden_servicio_id', v_os_id,
-            'ubicacion_id',      (p_orden->>'destino_ubicacion_id')::INT,
-            'lineas',            v_recibir
-        ));
-    END IF;
-
-    INSERT INTO notification.notifications (user_id, title, body, tipo, payload)
-    SELECT ur.user_id,
-           'Nueva Orden de Servicio',
-           COALESCE((SELECT COALESCE(nombre, 'Usuario desconocido') || ' ' || apellido FROM usuario WHERE id = v_usr_id), 'sistema')
-               || ' creó la orden de servicio ' || (p_orden->>'serie') || '-' || (p_orden->>'correlativo'),
-           'info',
-           jsonb_build_object('objeto_tipo', 'orden_servicio', 'orden_servicio_id', v_os_id)
-    FROM iam.user_rol ur
-    LEFT JOIN iam.rol r ON ur.rol_id = r.id
-    WHERE r.code IN ('jefe_planta', 'compras', 'inventario')
-      AND v_usr_id <> ur.user_id;
-
-    RETURN format('Orden de servicio %s creada con ID %s.', (p_orden->>'serie') || '-' || (p_orden->>'correlativo'), v_os_id);
-EXCEPTION
-    WHEN OTHERS THEN
-        RAISE LOG 'Error in crear_orden_servicio - User: %, Params: %, Error: %',
-                  v_usr_id, p_orden::TEXT, SQLERRM;
-        RAISE;
-END;
-$function$;
-
-GRANT EXECUTE ON FUNCTION doc.crear_orden_servicio(jsonb) TO authenticated;
-
-
--- ═══════════════════════════════════════════════════════════════
--- doc.revertir_recepcion_orden_servicio  (append-only un-receive)
--- Reverses received rolls: posts SERV_ING_REV (egress, nets stock to
--- zero via lote_saldo trigger), soft-deletes the roll lote, decrements
--- cantidad_recibida. The original SERV_ING stays — the ledger only grows.
--- Refuses rolls reserved by an active partida or with downstream movements.
---
--- p_datos:
--- {
---   "orden_servicio_id": 6,
---   "lote_ids": [101, 102],
---   "motivo": "conteo corregido"   -- optional
--- }
--- Returns the doc_movimiento_id of the reversal.
--- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION doc.revertir_recepcion_orden_servicio(p_datos jsonb)
-RETURNS bigint
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'iam', 'notification', 'public', 'doc', 'mes', 'inventario'
-AS $function$
-DECLARE
-    v_usr_id         INT    := get_user_id();
-    v_os_id          BIGINT := (p_datos->>'orden_servicio_id')::BIGINT;
-    v_rev_tipo_id    SMALLINT;
-    v_serv_ing_id    SMALLINT;
-    v_doc_mov_id     BIGINT;
-    v_motivo         TEXT   := p_datos->>'motivo';
-    v_lote           RECORD;
-    v_ubic           INT;
-    v_detalle_id     BIGINT;
-BEGIN
-    -- reversal/anular is an editar-tier action (per the entrega convention)
-    IF NOT jwt_has_permission('comercial.editar') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('revertir_recepcion_orden_servicio', v_usr_id, p_datos);
-
-    IF NOT EXISTS (SELECT 1 FROM doc.orden_servicio WHERE id = v_os_id AND flg_elm = false) THEN
-        RAISE EXCEPTION 'orden_servicio % no existe o fue eliminada.', v_os_id;
-    END IF;
-
-    SELECT id INTO STRICT v_rev_tipo_id FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_ING_REV';
-    SELECT id INTO STRICT v_serv_ing_id FROM inventario.item_movimiento_tipo WHERE codigo = 'SERV_ING';
     v_doc_mov_id := nextval('inventario.mov_doc_seq');
 
-    FOR v_lote IN
-        SELECT l.id, l.item_id, l.cantidad
-        FROM inventario.lote l
-        WHERE l.id IN (SELECT (jsonb_array_elements_text(p_datos->'lote_ids'))::INT)
-          AND l.documento_tipo = 'orden_servicio'
-          AND l.documento_id   = v_os_id
-          AND l.fyh_elm IS NULL
+    -- ── Roll lines ───────────────────────────────────────────────
+    FOR v_linea_json IN SELECT jsonb_array_elements(p_datos->'lineas')
     LOOP
-        -- reserved by an active partida → block
-        IF EXISTS (
-            SELECT 1 FROM mes.partida_componente pc
-            JOIN mes.partida p ON p.id = pc.partida_id
-            WHERE pc.lote_id = v_lote.id
-              AND p.estado_produccion NOT IN ('CANCELADA','TECO','CERRADA')
-        ) THEN
-            RAISE EXCEPTION 'Rollo % está reservado en una partida activa; no se puede revertir.', v_lote.id;
+        v_item_id     := (v_linea_json->>'item_id')::INT;
+        v_cant_rollos := (v_linea_json->>'cantidad_rollos')::INT;
+
+        IF v_cant_rollos IS NULL OR v_cant_rollos <= 0 THEN
+            RAISE EXCEPTION 'crear_ingreso_interno: cada línea requiere cantidad_rollos > 0';
         END IF;
 
-        -- any movement other than its SERV_ING ingress → already in play, block
-        IF EXISTS (
-            SELECT 1 FROM inventario.item_movimientos im
-            WHERE im.lote_id = v_lote.id
-              AND im.item_movimiento_tipo_id <> v_serv_ing_id
-        ) THEN
-            RAISE EXCEPTION 'Rollo % tiene movimientos posteriores; no se puede revertir.', v_lote.id;
-        END IF;
-
-        -- locate current location + the line from the ingress movement
-        SELECT im.destino_ubicacion_id, im.documento_linea_id
-        INTO v_ubic, v_detalle_id
-        FROM inventario.item_movimientos im
-        WHERE im.lote_id = v_lote.id
-          AND im.documento_tipo = 'orden_servicio'
-          AND im.documento_id   = v_os_id
-        ORDER BY im.id LIMIT 1;
-
-        INSERT INTO inventario.item_movimientos (
-            doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-            origen_ubicacion_id, cantidad, fecha_hora,
-            documento_tipo, documento_id, documento_linea_id, observacion, usr_cre
-        ) VALUES (
-            v_doc_mov_id, v_lote.item_id, v_lote.id, v_rev_tipo_id,
-            v_ubic, v_lote.cantidad, now(),
-            'orden_servicio', v_os_id, v_detalle_id, v_motivo, v_usr_id
+        v_peso_por_rollo := COALESCE(
+            (v_linea_json->>'peso_total')::NUMERIC / NULLIF(v_cant_rollos, 0),
+            0.1   -- sentinel; corrected at weighing gate
         );
 
-        UPDATE inventario.lote SET fyh_elm = now(), usr_elm = v_usr_id WHERE id = v_lote.id;
+        FOR v_i IN 1 .. v_cant_rollos
+        LOOP
+            -- lote (propietario_id=NULL → MLR-owned)
+            INSERT INTO inventario.lote (
+                item_id, documento_tipo, documento_id,
+                cantidad, propietario_id, usr_cre
+            ) VALUES (
+                v_item_id, 'entrega', v_ent_id,
+                v_peso_por_rollo, NULL, v_usr_id
+            )
+            RETURNING id INTO v_new_lote_id;
 
-        UPDATE doc.orden_servicio_detalle
-        SET cantidad_recibida = GREATEST(cantidad_recibida - 1, 0)
-        WHERE id = v_detalle_id;
+            -- lrd (entrega_id is NOT NULL after patch 35)
+            INSERT INTO inventario.lote_rollo_detalle (
+                lote_id,       entrega_id,
+                ancho,         malla,
+                rendimiento,   color_x_cliente_id,
+                flg_tenido,    flg_antipilling
+            ) VALUES (
+                v_new_lote_id, v_ent_id,
+                p_datos->>'ancho',
+                v_linea_json->>'malla',
+                p_datos->>'rendimiento',
+                (v_linea_json->>'color_x_cliente_id')::INT,
+                false,
+                COALESCE((p_datos->>'flg_antipilling')::BOOLEAN, false)
+            );
+
+            -- entrega_detalle
+            INSERT INTO doc.entrega_detalle (
+                entrega_id, linea, lote_id, item_id, cantidad, ubicacion_id
+            ) VALUES (
+                v_ent_id, v_det_linea, v_new_lote_id, v_item_id,
+                v_peso_por_rollo, v_ubicacion_id
+            )
+            RETURNING id INTO v_det_id;
+
+            -- SERV_ING movement
+            INSERT INTO inventario.item_movimientos (
+                doc_movimiento_id, item_id, lote_id,
+                item_movimiento_tipo_id,
+                destino_ubicacion_id, cantidad, fecha_hora,
+                documento_tipo, documento_id, documento_linea_id, usr_cre
+            ) VALUES (
+                v_doc_mov_id, v_item_id, v_new_lote_id,
+                v_serv_ing_tipo,
+                v_ubicacion_id, v_peso_por_rollo, v_fecha_mov,
+                'entrega', v_ent_id, v_det_id, v_usr_id
+            );
+
+            v_det_linea := v_det_linea + 1;
+        END LOOP;
     END LOOP;
 
-    RETURN v_doc_mov_id;
+    RETURN v_ent_id;
 EXCEPTION
     WHEN OTHERS THEN
-        RAISE LOG 'Error in revertir_recepcion_orden_servicio - User: %, Params: %, Error: %',
+        RAISE LOG 'Error in crear_ingreso_interno - User: %, Params: %, Error: %',
                   v_usr_id, p_datos::TEXT, SQLERRM;
         RAISE;
 END;
 $function$;
 
-GRANT EXECUTE ON FUNCTION doc.revertir_recepcion_orden_servicio(jsonb) TO authenticated;
-
-
--- ═══════════════════════════════════════════════════════════════
--- doc.actualizar_orden_servicio  (edit the ORDER — header + lines)
--- Edits intent only; never touches the ledger. Roll quantities arrive/
--- leave the ledger via ingresar_orden_servicio / revertir_recepcion_*.
--- Ordered (cantidad) and received (cantidad_recibida) are independent
--- axes coupled by one invariant: cantidad >= cantidad_recibida.
--- Exists so the direct INSERT/UPDATE grants on the tables can be revoked.
---
--- p_orden: header fields (NOT NULL cols keep value when omitted via COALESCE;
---   nullable cols touched only when the key is present). Optional 'lineas'
---   reconciles the ordered lines against the current set:
---     • line with "id"        → update (guarded)
---     • line without "id"      → insert (new ordered line)
---     • existing line omitted  → delete (blocked if it has received rolls)
---   Guards on received lines (cantidad_recibida > 0):
---     • cantidad cannot drop below cantidad_recibida
---     • item_id / color_x_cliente_id / tenido_id cannot change
---     • the line cannot be deleted (revert receipts first)
--- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION doc.actualizar_orden_servicio(p_os_id BIGINT, p_orden jsonb)
-RETURNS text
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'iam', 'public', 'doc'
-AS $function$
-DECLARE
-    v_usr_id     INT := get_user_id();
-    v_existing   RECORD;
-    v_linea      jsonb;
-    v_recibida   INT;
-    v_cur_item   INT;
-    v_cur_color  INT;
-    v_cur_tenido INT;
-BEGIN
-    IF NOT jwt_has_permission('comercial.editar') THEN
-        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
-            USING ERRCODE = 'insufficient_privilege';
-    END IF;
-
-    INSERT INTO logs_api(function_name, user_id, params)
-    VALUES ('actualizar_orden_servicio', v_usr_id,
-            jsonb_build_object('os_id', p_os_id, 'orden', p_orden));
-
-    IF NOT EXISTS (SELECT 1 FROM doc.orden_servicio WHERE id = p_os_id AND flg_elm = false) THEN
-        RAISE EXCEPTION 'orden_servicio % no existe o fue eliminada.', p_os_id;
-    END IF;
-
-    -- ── Header ───────────────────────────────────────────────────
-    UPDATE doc.orden_servicio SET
-        tercero_id      = COALESCE((p_orden->>'tercero_id')::INT, tercero_id),
-        serie           = COALESCE(p_orden->>'serie', serie),
-        correlativo     = COALESCE((p_orden->>'correlativo')::INT, correlativo),
-        flg_antipilling = COALESCE((p_orden->>'flg_antipilling')::BOOLEAN, flg_antipilling),
-        flg_urgente     = COALESCE((p_orden->>'flg_urgente')::BOOLEAN, flg_urgente),
-        fecha_entrega   = CASE WHEN p_orden ? 'fecha_entrega' THEN (p_orden->>'fecha_entrega')::DATE ELSE fecha_entrega END,
-        rendimiento     = CASE WHEN p_orden ? 'rendimiento'   THEN p_orden->>'rendimiento'           ELSE rendimiento   END,
-        ancho           = CASE WHEN p_orden ? 'ancho'         THEN p_orden->>'ancho'                 ELSE ancho         END,
-        observacion     = CASE WHEN p_orden ? 'observacion'   THEN p_orden->>'observacion'           ELSE observacion   END,
-        factura         = CASE WHEN p_orden ? 'factura'       THEN p_orden->>'factura'               ELSE factura       END
-    WHERE id = p_os_id;
-
-    -- ── Lines (optional reconcile) ───────────────────────────────
-    IF p_orden ? 'lineas' THEN
-        -- Deletions: existing lines absent from the payload.
-        FOR v_existing IN
-            SELECT id, cantidad_recibida
-            FROM doc.orden_servicio_detalle
-            WHERE orden_servicio_id = p_os_id
-        LOOP
-            IF NOT EXISTS (
-                SELECT 1 FROM jsonb_array_elements(p_orden->'lineas') l
-                WHERE (l->>'id')::BIGINT = v_existing.id
-            ) THEN
-                IF v_existing.cantidad_recibida > 0 THEN
-                    RAISE EXCEPTION 'No se puede eliminar la línea %: tiene % rollos recibidos. Revierta la recepción primero.',
-                        v_existing.id, v_existing.cantidad_recibida;
-                END IF;
-                DELETE FROM doc.orden_servicio_detalle WHERE id = v_existing.id;
-            END IF;
-        END LOOP;
-
-        -- Upserts
-        FOR v_linea IN SELECT jsonb_array_elements(p_orden->'lineas')
-        LOOP
-            IF (v_linea ? 'id') AND (v_linea->>'id') IS NOT NULL THEN
-                SELECT cantidad_recibida, item_id, color_x_cliente_id, tenido_id
-                INTO v_recibida, v_cur_item, v_cur_color, v_cur_tenido
-                FROM doc.orden_servicio_detalle
-                WHERE id = (v_linea->>'id')::BIGINT AND orden_servicio_id = p_os_id;
-                IF NOT FOUND THEN
-                    RAISE EXCEPTION 'La línea % no pertenece a la orden_servicio %.', (v_linea->>'id'), p_os_id;
-                END IF;
-
-                IF (v_linea->>'cantidad')::INT < v_recibida THEN
-                    RAISE EXCEPTION 'Línea %: la cantidad ordenada (%) no puede ser menor a la recibida (%).',
-                        (v_linea->>'id'), (v_linea->>'cantidad')::INT, v_recibida;
-                END IF;
-
-                IF v_recibida > 0 AND (
-                       (v_linea->>'item_id')::INT            IS DISTINCT FROM v_cur_item
-                    OR (v_linea->>'color_x_cliente_id')::INT IS DISTINCT FROM v_cur_color
-                    OR (v_linea->>'tenido_id')::INT          IS DISTINCT FROM v_cur_tenido
-                ) THEN
-                    RAISE EXCEPTION 'Línea %: no se puede cambiar item/color/teñido con rollos ya recibidos.', (v_linea->>'id');
-                END IF;
-
-                UPDATE doc.orden_servicio_detalle SET
-                    linea              = COALESCE((v_linea->>'linea')::SMALLINT, linea),
-                    item_id            = (v_linea->>'item_id')::INT,
-                    malla              = v_linea->>'malla',
-                    cantidad           = (v_linea->>'cantidad')::INT,
-                    color_x_cliente_id = (v_linea->>'color_x_cliente_id')::INT,
-                    tenido_id          = (v_linea->>'tenido_id')::INT,
-                    flg_doble_bolsa    = COALESCE((v_linea->>'flg_doble_bolsa')::BOOLEAN, false)
-                WHERE id = (v_linea->>'id')::BIGINT;
-            ELSE
-                INSERT INTO doc.orden_servicio_detalle (
-                    orden_servicio_id, linea, item_id, malla,
-                    cantidad, color_x_cliente_id, tenido_id, flg_doble_bolsa
-                ) VALUES (
-                    p_os_id,
-                    COALESCE((v_linea->>'linea')::SMALLINT, 1),
-                    (v_linea->>'item_id')::INT,
-                    v_linea->>'malla',
-                    (v_linea->>'cantidad')::INT,
-                    (v_linea->>'color_x_cliente_id')::INT,
-                    (v_linea->>'tenido_id')::INT,
-                    COALESCE((v_linea->>'flg_doble_bolsa')::BOOLEAN, false)
-                );
-            END IF;
-        END LOOP;
-    END IF;
-
-    RETURN format('Orden de servicio %s actualizada.', p_os_id);
-EXCEPTION
-    WHEN OTHERS THEN
-        RAISE LOG 'Error in actualizar_orden_servicio - User: %, os: %, Error: %',
-                  v_usr_id, p_os_id, SQLERRM;
-        RAISE;
-END;
-$function$;
-
-GRANT EXECUTE ON FUNCTION doc.actualizar_orden_servicio(BIGINT, jsonb) TO authenticated;
+GRANT EXECUTE ON FUNCTION doc.crear_ingreso_interno(jsonb) TO authenticated;
 
 
 
@@ -2150,114 +1700,3 @@ GRANT EXECUTE ON FUNCTION mes.actualizar_partida(int, jsonb)                  TO
 GRANT EXECUTE ON FUNCTION mes.actualizar_pasos_partida(bigint, jsonb)         TO authenticated;
 GRANT EXECUTE ON FUNCTION mes.actualizar_componentes_partida(bigint, jsonb)   TO authenticated;
 
--- ═══════════════════════════════════════════════════════════════
--- doc.get_orden_servicio — single order detail
--- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION doc.get_orden_servicio(p_os_id BIGINT)
-RETURNS JSONB
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path TO 'iam', 'public', 'doc', 'inventario'
-AS $$
-SELECT jsonb_build_object(
-    'id',               os.id,
-    'tercero_id',       os.tercero_id,
-    'tercero_nombre',   t.nombre,
-    'tercero_ruc',      t.ruc,
-    'serie',            os.serie,
-    'correlativo',      os.correlativo,
-    'fecha_emision',    os.fecha_emision,
-    'fecha_entrega',    os.fecha_entrega,
-    'rendimiento',      os.rendimiento,
-    'ancho',            os.ancho,
-    'flg_antipilling',  os.flg_antipilling,
-    'flg_urgente',      os.flg_urgente,
-    'observacion',      os.observacion,
-    'factura',          os.factura,
-    'fyh_cre',          os.fyh_cre,
-    'lineas', (
-        SELECT COALESCE(jsonb_agg(
-            jsonb_build_object(
-                'id',                   osd.id,
-                'linea',                osd.linea,
-                'articulo_id',          ird.articulo_id,
-                'articulo_nombre',      a.nombre,
-                'malla',                osd.malla,
-                'cantidad',             osd.cantidad,
-                'cantidad_recibida',    osd.cantidad_recibida,
-                'color_x_cliente_id',   osd.color_x_cliente_id,
-                'color',                vc.color,
-                'tono',                 vc.tono,
-                'color_hex',            vc.color_x_cliente_hex,
-                'tenido_id',            osd.tenido_id,
-                'tenido',               ten.tenido,
-                'flg_doble_bolsa',      osd.flg_doble_bolsa
-            ) ORDER BY osd.linea
-        ), '[]'::jsonb)
-        FROM doc.orden_servicio_detalle osd
-        LEFT JOIN item_rollo_detalle ird ON ird.item_id = osd.item_id
-        LEFT JOIN articulo          a   ON a.id   = ird.articulo_id
-        LEFT JOIN vw_colores        vc  ON vc.color_x_cliente_id = osd.color_x_cliente_id
-        LEFT JOIN tenido            ten ON ten.id  = osd.tenido_id
-        WHERE osd.orden_servicio_id = os.id
-    ),
-    'rollos', (
-        SELECT COALESCE(jsonb_agg(
-            jsonb_build_object(
-                'lote_id',          l.id,
-                'codigo',           EXTRACT(YEAR FROM l.fyh_cre)::int % 100
-                                    || '-' || LPAD(l.secuencia::text, 5, '0'),
-                'cantidad',         l.cantidad,
-                'flg_pesado',       EXISTS (
-                                        SELECT 1 FROM inventario.pesaje p
-                                        WHERE p.lote_id = l.id
-                                    ),
-                'item_id',          l.item_id,
-                'detalle_id',       im.documento_linea_id,
-                'factura_hilo',     lrd.factura_hilo
-            ) ORDER BY l.id
-        ), '[]'::jsonb)
-        FROM inventario.lote_rollo_detalle lrd
-        JOIN inventario.lote l ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
-        JOIN inventario.item_movimientos im
-            ON im.lote_id          = l.id
-           AND im.documento_tipo   = 'orden_servicio'
-           AND im.documento_id     = os.id
-        WHERE lrd.orden_servicio_id = os.id
-    )
-)
-FROM doc.orden_servicio os
-LEFT JOIN tercero t ON t.id = os.tercero_id
-WHERE os.id = p_os_id
-  AND os.flg_elm = false;
-$$;
-
-GRANT EXECUTE ON FUNCTION doc.get_orden_servicio(BIGINT) TO authenticated;
-
--- Writes go through the functions (crear / ingresar / revertir / actualizar);
--- only SELECT is exposed on the tables so the frontend cannot bypass the gates.
-GRANT SELECT ON doc.orden_servicio         TO authenticated;
-GRANT SELECT ON doc.orden_servicio_detalle TO authenticated;
-REVOKE INSERT, UPDATE, DELETE ON doc.orden_servicio         FROM authenticated;
-REVOKE INSERT, UPDATE, DELETE ON doc.orden_servicio_detalle FROM authenticated;
-
-
-
--- SELECT
---     osd.id          AS detalle_id,
---     osd.linea,
---     osd.cantidad    AS rollos_esperados,
---     i.nombre        AS item,
---     COUNT(DISTINCT l.id) AS lotes_existentes
--- FROM doc.orden_servicio_detalle osd
--- JOIN item i ON i.id = osd.item_id
--- LEFT JOIN inventario.item_movimientos im
---     ON im.documento_tipo     = 'orden_servicio'
---    AND im.documento_id       = osd.orden_servicio_id
---    AND im.documento_linea_id = osd.id
--- LEFT JOIN inventario.lote l
---     ON l.id = im.lote_id AND l.fyh_elm IS NULL
--- WHERE osd.orden_servicio_id = 2
--- GROUP BY osd.id, osd.linea, osd.cantidad, i.nombre
--- ORDER BY osd.linea;

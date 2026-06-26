@@ -72,11 +72,10 @@ GRANT SELECT ON inventario.vw_stock_lotes_ubicacion TO anon, authenticated;
 
 -- ── inventario.vw_lotes_rollos_stock ─────────────────────────
 -- Shows all rolls currently in stock (dyed and undyed).
--- Batch attributes come from partida for both dyed and undyed rolls —
--- this shows "expected" specs for undyed rolls (useful for operators).
--- For dyed rolls the same values are also on lote_rollo_detalle.
--- lote_rollo_detalle is joined for: entrega_id, flg_tenido.
--- DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock;
+-- lrd.entrega_id is the unified origin for all roll types:
+--   client-supplied rolls → guia-type entrega
+--   MLR-confectioned rolls → INGRESO_INTERNO entrega (post patch-35)
+DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock CASCADE;
 CREATE OR REPLACE VIEW inventario.vw_lotes_rollos_stock AS
 SELECT
     sa.lote_id,
@@ -95,7 +94,6 @@ SELECT
     art.articulo_tipo_id,
     ird.flg_rib,
     art.fibra,
-    -- All batch attributes from lrd — NULL for undyed rolls (not yet set)
     lrd.flg_tenido,
     lrd.flg_antipilling,
     lrd.color_x_cliente_id,
@@ -112,31 +110,23 @@ SELECT
     lrd.rendimiento,
     l.propietario_id,
     t.nombre                        AS propietario,
-    -- Ingress entrega — billing anchor (client-supplied rolls)
     lrd.entrega_id,
     gr.serie                        AS entrega_serie,
-    gr.correlativo                  AS entrega_correlativo,
-    -- Ingress orden_servicio — anchor for MLR-confectioned rolls
-    lrd.orden_servicio_id,
-    os.serie                        AS os_serie,
-    os.correlativo                  AS os_correlativo,
-    -- Thread (hilo) supplier invoice — search key for confectioned rolls
-    lrd.factura_hilo
+    gr.correlativo                  AS entrega_correlativo
 FROM inventario.vw_stock_lotes_ubicacion sa
-JOIN inventario.lote l                  ON l.id = sa.lote_id
-JOIN item i                             ON i.id = sa.item_id
-JOIN item_tipo it                       ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
-JOIN item_rollo_detalle ird             ON ird.item_id = i.id
-JOIN articulo art                       ON art.id = ird.articulo_id
-JOIN unidad un                          ON un.id = i.unidad_id
-LEFT JOIN inventario.ubicacion u         ON u.id = sa.ubicacion_id
-LEFT JOIN inventario.almacen a           ON a.id = u.almacen_id
+JOIN inventario.lote l                      ON l.id = sa.lote_id
+JOIN item i                                 ON i.id = sa.item_id
+JOIN item_tipo it                           ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+JOIN item_rollo_detalle ird                 ON ird.item_id = i.id
+JOIN articulo art                           ON art.id = ird.articulo_id
+JOIN unidad un                              ON un.id = i.unidad_id
+LEFT JOIN inventario.ubicacion u            ON u.id = sa.ubicacion_id
+LEFT JOIN inventario.almacen a              ON a.id = u.almacen_id
 LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = sa.lote_id
-LEFT JOIN doc.entrega gr          ON gr.id = lrd.entrega_id
-LEFT JOIN doc.orden_servicio os         ON os.id = lrd.orden_servicio_id
-LEFT JOIN tercero t                     ON t.id = l.propietario_id
-LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_cliente_id
-LEFT JOIN tenido tn                     ON tn.id = lrd.tenido_id;
+LEFT JOIN doc.entrega gr                    ON gr.id = lrd.entrega_id
+LEFT JOIN tercero t                         ON t.id = l.propietario_id
+LEFT JOIN vw_colores vc                     ON vc.color_x_cliente_id = lrd.color_x_cliente_id
+LEFT JOIN tenido tn                         ON tn.id = lrd.tenido_id;
 
 -- ── inventario.vw_lotes_rollos_disponibles ────────────────────
 -- Available rolls only: physical stock minus rolls reserved by active partidas.
@@ -404,7 +394,8 @@ GRANT SELECT ON mes.vw_partida_familia TO anon, authenticated;
 -- ── doc.vw_compras ────────────────────────────────────────────
 -- List view for purchase orders.
 -- estado_ingreso: derived from compra_detalle.cantidad_recibida
---   (maintained by doc.ingresar_compra — entrega linkage has no effect on it).
+--   (synced by ingresar_compra and vincular_entregas_compra via
+--   fn_refresh_compra_detalle_qtys — covers both PO-first and orderless flows).
 --   'sin_lineas'  → compra header only, no detail lines
 --   'pendiente'   → nothing received yet
 --   'parcial'     → some items partially received
@@ -738,6 +729,7 @@ LEFT JOIN doc.letra l          ON l.id = lf.letra_id;
 GRANT SELECT ON doc.vw_cuentas_por_pagar TO authenticated;
 
 -- ── doc.vw_compras_recepcion ───────────────────────────────────
+DROP VIEW IF EXISTS doc.vw_compras_recepcion;
 -- Receipt tracking: per (compra, item) shows ordered qty vs qty
 -- received via linked entregas, and the remaining open qty.
 --
@@ -750,6 +742,9 @@ GRANT SELECT ON doc.vw_cuentas_por_pagar TO authenticated;
 -- Rows exist for every compra_detalle line including those with
 -- zero receipt (qty_pendiente = cantidad_ordenada).  Use WHERE
 -- qty_pendiente > 0 to filter open lines.
+-- cantidad_recibida reads from the denormalized compra_detalle.cantidad_recibida,
+-- which fn_refresh_compra_detalle_qtys keeps correct across all ingress paths
+-- (documento_tipo='compra' direct movements AND documento_tipo='entrega' via compra_entrega).
 CREATE OR REPLACE VIEW doc.vw_compras_recepcion AS
 SELECT
     c.id                                                              AS compra_id,
@@ -762,30 +757,22 @@ SELECT
     i.nombre                                                          AS item_nombre,
     un.codigo                                                         AS unidad_codigo,
     cd.cantidad                                                       AS cantidad_ordenada,
-    COALESCE(rec.cantidad_recibida, 0)                                AS cantidad_recibida,
-    cd.cantidad - COALESCE(rec.cantidad_recibida, 0)                  AS cantidad_pendiente,
+    cd.cantidad_recibida                                              AS cantidad_recibida,
+    cd.cantidad - cd.cantidad_recibida                                AS cantidad_pendiente,
     cd.precio_unitario,
     cd.cantidad * cd.precio_unitario                                  AS valor_linea,
     -- Per-line receipt status
     CASE
-        WHEN COALESCE(rec.cantidad_recibida, 0) = 0               THEN 'pendiente'
-        WHEN COALESCE(rec.cantidad_recibida, 0) >= cd.cantidad    THEN 'completo'
-        ELSE                                                            'parcial'
+        WHEN cd.cantidad_recibida = 0               THEN 'pendiente'
+        WHEN cd.cantidad_recibida >= cd.cantidad    THEN 'completo'
+        ELSE                                             'parcial'
     END                                                               AS estado_linea,
     c.fyh_elm
 FROM doc.compra c
-JOIN tercero t          ON t.id  = c.tercero_id
+JOIN tercero t             ON t.id  = c.tercero_id
 JOIN doc.compra_detalle cd ON cd.compra_id = c.id
-JOIN item i             ON i.id  = cd.item_id
-JOIN unidad un          ON un.id = i.unidad_id
-LEFT JOIN LATERAL (
-    SELECT SUM(grd.cantidad) AS cantidad_recibida
-    FROM doc.compra_entrega cgr
-    JOIN doc.entrega_detalle grd
-        ON grd.entrega_id = cgr.entrega_id
-       AND grd.item_id = cd.item_id
-    WHERE cgr.compra_id = c.id
-) rec ON true;
+JOIN item i                ON i.id  = cd.item_id
+JOIN unidad un             ON un.id = i.unidad_id;
 
 GRANT SELECT ON doc.vw_compras_recepcion TO authenticated;
 
@@ -976,6 +963,58 @@ GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre,
          vi.item_tipo_id, vi.item_tipo_codigo,
          vi.unidad_id, vi.unidad_codigo,
          iv.precio_promedio, iv.stock_valorado;
+
+-- ── inventario.vw_stock_x_proveedor ──────────────────────────
+-- Current stock grouped by (item, supplier), valued at item MAP price.
+-- Supplier resolved via lote origin document:
+--   Path A: lote.documento_tipo='compra'  → doc.compra directly
+--   Path B: lote.documento_tipo='entrega' → doc.compra_entrega → doc.compra
+-- Items with no purchase origin (e.g. production output lotes) appear with
+-- proveedor_id / proveedor_nombre NULL.
+-- precio_promedio is item-level MAP — same across all supplier rows for the
+-- same item. stock_valorado = per-supplier quantity × item MAP.
+-- SELECT * FROM inventario.vw_stock_x_proveedor WHERE proveedor_id IS nOT NULL;
+CREATE OR REPLACE VIEW inventario.vw_stock_x_proveedor AS
+WITH lote_proveedor AS (
+    -- Path A: direct compra receipt
+    SELECT l.id AS lote_id, c.tercero_id AS proveedor_id
+    FROM inventario.lote l
+    JOIN doc.compra c ON c.id = l.documento_id
+    WHERE l.documento_tipo = 'compra'
+    UNION
+    -- Path B: orderless entrega receipt (DISTINCT prevents fanout when one
+    -- entrega maps to multiple compras from the same supplier)
+    SELECT DISTINCT l.id, c.tercero_id
+    FROM inventario.lote l
+    JOIN doc.compra_entrega ce ON ce.entrega_id = l.documento_id
+    JOIN doc.compra c          ON c.id = ce.compra_id
+    WHERE l.documento_tipo = 'entrega'
+)
+SELECT
+    vi.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+    vi.item_tipo_id,
+    vi.item_tipo_codigo,
+    vi.unidad_id,
+    vi.unidad_codigo,
+    t.id                                                         AS proveedor_id,
+    t.nombre                                                     AS proveedor_nombre,
+    SUM(ls.cantidad_actual)                                      AS cantidad_total,
+    iv.precio_promedio,
+    ROUND((SUM(ls.cantidad_actual) * COALESCE(iv.precio_promedio, 0))::numeric, 4)::NUMERIC(16,4)
+                                                                 AS stock_valorado
+FROM inventario.lote_saldo ls
+JOIN inventario.lote l          ON l.id = ls.lote_id AND l.fyh_elm IS NULL
+JOIN vw_items vi                ON vi.item_id = l.item_id
+LEFT JOIN lote_proveedor lp     ON lp.lote_id = l.id
+LEFT JOIN tercero t             ON t.id = lp.proveedor_id
+LEFT JOIN inventario.item_valoracion iv ON iv.item_id = l.item_id
+WHERE ls.cantidad_actual > 0
+GROUP BY vi.item_id, vi.item_codigo, vi.item_nombre,
+         vi.item_tipo_id, vi.item_tipo_codigo,
+         vi.unidad_id, vi.unidad_codigo,
+         t.id, t.nombre, iv.precio_promedio;
 
 -- ── inventario.vw_stock_rollos ────────────────────────────────
 -- Kept as combined base view in case any function needs a single roll stock source.
@@ -1501,7 +1540,8 @@ WHERE e.activo = true;
 -- ── mes.vw_pasos ──────────────────────────────────────────────
 -- Execution columns (estado, fyh_inicio/fin, maquina, empleado) come from the
 -- latest partida_paso_ejecucion row — they were removed from partida_paso in step 04.
--- maquina_planificada_id replaces the dropped maquina_asignada_id on partida_paso.
+-- Machine resolution: actual (latest ejecucion) → scheduled (programacion). The routing
+-- step (partida_paso) carries no machine; maquina_programada_id surfaces the board's choice.
 DROP VIEW IF EXISTS mes.vw_pasos;
 CREATE OR REPLACE VIEW mes.vw_pasos AS
 SELECT
@@ -1520,14 +1560,13 @@ SELECT
     o.nombre                                                               AS operacion_nombre,
     o.requiere_receta,
     o.requiere_maquina,
-    pp.maquina_planificada_id,
     pp.receta_id,
     -- Planning targets
     pp.ph_objetivo,
     pp.temperatura_objetivo,
-    pp.relacion_bano_objetivo,
+    prog.relacion_bano                                                     AS relacion_bano_objetivo,
     pp.tiempo_estandar,
-    -- Active machine: actual (from ejecucion) falls back to planned
+    -- Active machine: actual (from ejecucion) falls back to the scheduled machine
     m.id                                                                   AS maquina_id,
     m.codigo                                                               AS maquina_codigo,
     m.nombre                                                               AS maquina_nombre,
@@ -1560,6 +1599,7 @@ SELECT
     pt.galga,
     -- Scheduling context
     prog.id                                                                AS programacion_id,
+    prog.maquina_id                                                        AS maquina_programada_id,
     prog.fecha                                                             AS fecha_programada,
     prog.secuencia                                                         AS secuencia_programada,
     -- Derived execution state: PENDIENTE when no ejecucion rows exist
@@ -1591,10 +1631,15 @@ LEFT JOIN LATERAL (
     ORDER BY fyh_inicio DESC NULLS LAST
     LIMIT 1
 ) pe ON true
-LEFT JOIN mes.maquina m ON m.id = COALESCE(pe.maquina_id, pp.maquina_planificada_id)
-LEFT JOIN mes.partida_paso_ejecucion_termofijado pt ON pt.ejecucion_id = pe.id
-LEFT JOIN mes.programacion prog ON prog.actividad_tipo = 'partida_paso'
-                                AND prog.actividad_id  = pp.id;
+LEFT JOIN LATERAL (
+    SELECT id, maquina_id, fecha, secuencia, relacion_bano
+    FROM mes.programacion
+    WHERE actividad_tipo = 'partida_paso' AND actividad_id = pp.id
+    ORDER BY fyh_cre DESC
+    LIMIT 1
+) prog ON true
+LEFT JOIN mes.maquina m ON m.id = COALESCE(pe.maquina_id, prog.maquina_id)
+LEFT JOIN mes.partida_paso_ejecucion_termofijado pt ON pt.ejecucion_id = pe.id;
 
 -- ── mes.vw_cola_estacion ──────────────────────────────────────
 -- FCFS work queue for the NON-scheduled finishing stations (preparado, secado,
@@ -2052,6 +2097,7 @@ GRANT SELECT ON inventario.vw_stock_rollos_tenidos         TO anon, authenticate
 GRANT SELECT ON inventario.vw_stock_items                  TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_items_ubicacion        TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_items_valorado         TO authenticated;
+GRANT SELECT ON inventario.vw_stock_x_proveedor            TO authenticated;
 GRANT SELECT ON inventario.vw_stock_insumos                TO anon, authenticated;
 GRANT SELECT ON inventario.vw_lotes_disponibles            TO anon, authenticated;
 GRANT SELECT ON inventario.vw_lotes_rollos_despachados     TO anon, authenticated;
@@ -2118,6 +2164,7 @@ DROP VIEW IF EXISTS inventario.vw_lotes_rollos_stock       CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_rollos_tenidos     CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_rollos_crudos      CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_items_valorado     CASCADE;
+DROP VIEW IF EXISTS inventario.vw_stock_x_proveedor        CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_items_ubicacion    CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_items              CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_insumos            CASCADE;
@@ -2155,121 +2202,54 @@ REVOKE USAGE ON SCHEMA calidad    FROM authenticated;
 
 
 
--- ═══════════════════════════════════════════════════════════════
--- doc.vw_ordenes_servicio — index list view
--- ═══════════════════════════════════════════════════════════════
-CREATE OR REPLACE VIEW doc.vw_ordenes_servicio AS
-SELECT
-    os.id,
-    os.tercero_id,
-    t.nombre                        AS tercero_nombre,
-    os.serie,
-    os.correlativo,
-    os.fecha_emision,
-    os.fecha_entrega,
-    os.flg_urgente,
-    os.flg_antipilling,
-    os.observacion,
-    os.fyh_cre,
-    COALESCE(lineas.total, 0)       AS total_rollos_pedidos,
-    COALESCE(lotes.total, 0)        AS total_rollos_ingresados
-FROM doc.orden_servicio os
-LEFT JOIN tercero t ON t.id = os.tercero_id
-LEFT JOIN LATERAL (
-    SELECT SUM(osd.cantidad) AS total
-    FROM doc.orden_servicio_detalle osd
-    WHERE osd.orden_servicio_id = os.id
-) lineas ON true
-LEFT JOIN LATERAL (
-    SELECT COUNT(*) AS total
-    FROM inventario.lote_rollo_detalle lrd
-    JOIN inventario.lote l ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
-    WHERE lrd.orden_servicio_id = os.id
-) lotes ON true
-WHERE os.flg_elm = false;
-
-GRANT SELECT ON doc.vw_ordenes_servicio TO authenticated;
+-- doc.vw_ordenes_servicio — retired in patch-35 (collapsed into entrega INGRESO_INTERNO)
+DROP VIEW IF EXISTS doc.vw_ordenes_servicio;
 
 -- ── doc.vw_pendientes_proceso ─────────────────────────────────
--- Reporte "Pendientes de Proceso": por cada (guía de remisión / orden de
--- servicio × artículo), cuántos rollos siguen en planta esperando proceso.
--- Conteos agregados — NO devuelve lotes individuales.
---
--- Grano: (documento × articulo). articulo_tipo / fibra viajan como columnas
--- (dependen de articulo), así el frontend hace roll-up a cualquier eje:
---   por documento     → sumar filas del documento
---   por tipo artículo → sumar por articulo_tipo
---   por artículo      → la fila tal cual
---
--- Acotado a rollos EN STOCK (INNER JOIN vw_stock_lotes): un rollo sale del
--- reporte al consumirse en producción (saldo → 0).
---
--- Pendiente de PROCESO, no de despacho: registrar_produccion crea un lote de
--- salida NUEVO (origen_lote_id = lote de entrada) que también queda en stock
--- entre PROD_ING y el despacho, arrastrando la misma guía. Para no contar esos
--- productos terminados como "pendientes", solo se incluyen:
---   • rollos de ingreso originales  (origen_lote_id IS NULL), o
---   • rollos producidos que estén en una partida ACTIVA (reproceso → asignado).
---
--- Asignación: un rollo cuenta como ASIGNADO solo si está reservado por una
--- partida ACTIVA (estado_produccion NOT IN TECO/CERRADA/CANCELADA — TECO ya
--- terminó producción). Rollos reservados por partidas terminadas/canceladas
--- vuelven a contar como sin asignar.
+-- Reporte "Pendientes de Proceso": por cada (entrega × artículo), cuántos
+-- rollos siguen en planta esperando proceso.
+-- Acotado a rollos EN STOCK; excluye productos terminados esperando despacho
+-- (origen_lote_id IS NULL OR asignado a partida activa).
 DROP VIEW IF EXISTS doc.vw_rollos_estado;
 CREATE OR REPLACE VIEW doc.vw_pendientes_proceso AS
 WITH rollos AS (
     SELECT
-        CASE WHEN lrd.entrega_id IS NOT NULL THEN 'entrega' ELSE 'OS' END AS doc_tipo,
         lrd.entrega_id,
-        lrd.orden_servicio_id,
-        COALESCE(
-            gr.serie || '-' || COALESCE(gr.correlativo, gr.id::text),
-            os.serie || '-' || os.correlativo::text
-        )                                                   AS documento,
-        COALESCE(gr.fecha_emision::date, os.fecha_emision)  AS fecha_emision,
-        COALESCE(tg.id,  tos.id)                            AS tercero_id,
-        COALESCE(tg.nombre, tos.nombre)                     AS cliente,
+        gr.serie || '-' || COALESCE(gr.correlativo, gr.id::text) AS documento,
+        gr.fecha_emision::date                                    AS fecha_emision,
+        gr.tercero_id,
+        tg.nombre                                                 AS cliente,
         ird.articulo_id,
-        art.nombre                                          AS articulo,
+        art.nombre                                                AS articulo,
         art.articulo_tipo_id,
-        at.nombre                                           AS articulo_tipo,
+        at.nombre                                                 AS articulo_tipo,
         art.fibra,
-        l.cantidad                                          AS peso_kg,
+        l.cantidad                                                AS peso_kg,
         lrd.flg_tenido,
         lrd.origen_lote_id,
-        -- reservado por una partida activa = asignado a producción
         EXISTS (
             SELECT 1
             FROM mes.partida_componente pc
             JOIN mes.partida p ON p.id = pc.partida_id
             WHERE pc.lote_id = l.id
               AND pc.item_id IS NULL
-              -- TECO excluido: producción terminada, ya no procesará el rollo
               AND p.estado_produccion NOT IN ('TECO', 'CERRADA', 'CANCELADA')
               AND p.fyh_elm IS NULL
-        )                                                   AS asignado
+        )                                                         AS asignado
     FROM inventario.lote l
     JOIN inventario.lote_rollo_detalle lrd  ON lrd.lote_id = l.id
-    JOIN inventario.vw_stock_lotes sl       ON sl.lote_id = l.id   -- scope: solo en stock
+    JOIN inventario.vw_stock_lotes sl       ON sl.lote_id = l.id
     LEFT JOIN item_rollo_detalle ird        ON ird.item_id = l.item_id
     LEFT JOIN articulo art                  ON art.id = ird.articulo_id
     LEFT JOIN articulo_tipo at              ON at.id = art.articulo_tipo_id
-    LEFT JOIN doc.entrega gr          ON gr.id = lrd.entrega_id
+    LEFT JOIN doc.entrega gr                ON gr.id = lrd.entrega_id
     LEFT JOIN tercero tg                    ON tg.id = gr.tercero_id
-    LEFT JOIN doc.orden_servicio os         ON os.id = lrd.orden_servicio_id
-    LEFT JOIN tercero tos                   ON tos.id = os.tercero_id
     WHERE l.fyh_elm IS NULL
-      AND (gr.fyh_elm IS NULL)            -- excluir guías anuladas (NULL pasa si no hay guía)
-      AND (os.flg_elm IS NOT TRUE)        -- excluir OS anuladas
-      -- solo rollos con documento de origen (guía u OS). Excluye rollos
-      -- legacy huérfanos sin origen — pertenecen a un saneamiento de datos,
-      -- no a este reporte de guías/OS.
-      AND (lrd.entrega_id IS NOT NULL OR lrd.orden_servicio_id IS NOT NULL)
+      AND gr.fyh_elm IS NULL
+      AND lrd.entrega_id IS NOT NULL
 )
 SELECT
-    doc_tipo,
     entrega_id,
-    orden_servicio_id,
     documento,
     fecha_emision,
     tercero_id,
@@ -2279,20 +2259,16 @@ SELECT
     articulo_tipo_id,
     articulo_tipo,
     fibra,
-    COUNT(*)                                             AS rollos_en_stock,
-    COUNT(*) FILTER (WHERE NOT asignado)                 AS rollos_sin_asignar,
-    COUNT(*) FILTER (WHERE asignado)                     AS rollos_asignados_pendientes,
-    COUNT(*) FILTER (WHERE NOT flg_tenido)               AS rollos_sin_tenir,
-    ROUND(SUM(peso_kg)::numeric, 2)                      AS kg_en_stock
+    COUNT(*)                                 AS rollos_en_stock,
+    COUNT(*) FILTER (WHERE NOT asignado)     AS rollos_sin_asignar,
+    COUNT(*) FILTER (WHERE asignado)         AS rollos_asignados_pendientes,
+    COUNT(*) FILTER (WHERE NOT flg_tenido)   AS rollos_sin_tenir,
+    ROUND(SUM(peso_kg)::numeric, 2)          AS kg_en_stock
 FROM rollos
--- Pendiente de PROCESO, no de despacho: incluye rollos de ingreso originales
--- (origen_lote_id IS NULL) y rollos producidos que estén en una partida activa
--- (reproceso). Excluye rollos producidos en stock esperando despacho.
 WHERE origen_lote_id IS NULL
    OR asignado
 GROUP BY
-    doc_tipo, entrega_id, orden_servicio_id,
-    documento, fecha_emision, tercero_id, cliente,
+    entrega_id, documento, fecha_emision, tercero_id, cliente,
     articulo_id, articulo, articulo_tipo_id, articulo_tipo, fibra;
 
 GRANT SELECT ON doc.vw_pendientes_proceso TO authenticated;
