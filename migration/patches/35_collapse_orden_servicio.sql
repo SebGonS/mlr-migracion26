@@ -470,3 +470,12 @@ SELECT COUNT(*) FROM inventario.lote_rollo_detalle WHERE entrega_id IS NULL;
 SELECT column_name FROM information_schema.columns
 WHERE table_schema = 'inventario' AND table_name = 'lote_rollo_detalle'
   AND column_name IN ('orden_servicio_id', 'factura_hilo');
+
+
+
+SELECT * FROM inventario.vw_lotes_rollos_despachados WHERE entrega_id IS NOT NULL
+
+
+
+
+SELECT * FROM doc.entrega_tipo

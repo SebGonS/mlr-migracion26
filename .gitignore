@@ -1,1 +1,13 @@
 .claude/settings.local.json
+
+# Data dumps & DB backups — contain real production PII and are huge. Keep local only, never commit.
+prod_backup_*
+*.dump
+*.backup
+
+# Restore / import logs
+restore*.log
+*.log
+
+# Claude Code session transcripts
+.claude/*.jsonl

@@ -20,6 +20,7 @@
 
 
 -- ───────────────────────────────────────
+
 -- crear_tenido
 -- Creates a new dyeing recipe in EN_DESARROLLO state.
 -- Returns the new receta.tenido.id.
@@ -27,8 +28,14 @@
 -- receta.tenido_paso / receta.tenido_paso_insumo (guarded by estado check).
 -- ───────────────────────────────────────
 
--- p_data keys: color_x_cliente_id, articulo_tipo_id, fibra, tenido_id,
+-- p_data keys: color_x_cliente_id, grupo_articulo_id, fibra, tenido_id,
 --              flg_antipilling (default false), tipo_receta_id (required)
+--
+-- CLEAN BREAK (migration 31): grupo_articulo_id replaces articulo_tipo_id as the
+-- substrate key. articulo_tipo_id is neither accepted nor written here — the
+-- trigger trg_bi_tenido_derive_articulo_tipo (migration 32) derives it from the
+-- grupo for consumers that haven't moved yet (fn_precio_info, upsert_catalogo_precio).
+-- For a MIX grupo the origen is NULL — correct; a mix has no single articulo_tipo.
 CREATE OR REPLACE FUNCTION receta.crear_tenido(p_data JSONB)
 RETURNS INT
 LANGUAGE plpgsql
@@ -39,17 +46,23 @@ DECLARE
     v_id        INT;
     v_estado_id SMALLINT;
     v_usr_id    INT := get_user_id();
+    v_grupo     INT := (p_data->>'grupo_articulo_id')::INT;
 BEGIN
     IF NOT jwt_has_permission('produccion.configurar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.configurar'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
 
+    IF v_grupo IS NULL THEN
+        RAISE EXCEPTION 'grupo_articulo_id es requerido'
+            USING ERRCODE = 'not_null_violation';
+    END IF;
+
     SELECT id INTO v_estado_id FROM estado_desarrollo_color WHERE codigo = 'EN_DESARROLLO';
 
     INSERT INTO receta.tenido (
         color_x_cliente_id,
-        articulo_tipo_id,
+        grupo_articulo_id,
         fibra,
         tenido_id,
         flg_antipilling,
@@ -59,7 +72,7 @@ BEGIN
         fyh_cre
     ) VALUES (
         (p_data->>'color_x_cliente_id')::INT,
-        (p_data->>'articulo_tipo_id')::SMALLINT,
+        v_grupo,
         (p_data->>'fibra')::SMALLINT,
         (p_data->>'tenido_id')::INT,
         COALESCE((p_data->>'flg_antipilling')::BOOLEAN, false),
@@ -161,13 +174,16 @@ BEGIN
 
     -- On approval: supersede any existing approved recipe for the same spec.
     -- flg_produccion = true identifies the current APROBADO (trigger-maintained).
+    -- Keyed on grupo_articulo_id to mirror uq_receta_tenido_aprobada_grupo exactly
+    -- (migration 31). Plain '=' not IS NOT DISTINCT FROM: the unique index treats
+    -- NULLs as distinct, so NULL-grupo wildcard rows must not supersede each other.
     IF p_estado_id = v_aprobado_id THEN
         UPDATE receta.tenido
         SET estado_id = v_historico_id,
             usr_mod   = v_usr_id,
             fyh_mod   = now()
         WHERE color_x_cliente_id = v_receta.color_x_cliente_id
-          AND articulo_tipo_id   = v_receta.articulo_tipo_id
+          AND grupo_articulo_id  = v_receta.grupo_articulo_id
           AND fibra              = v_receta.fibra
           AND tenido_id          = v_receta.tenido_id
           AND flg_antipilling    = v_receta.flg_antipilling
@@ -206,8 +222,8 @@ AS $$
         'tercero_nombre',      vc.cliente,
         'tercero_id',          vc.tercero_id,
         'color_hex',          vc.color_x_cliente_hex,
-        'articulo_tipo_id',   t.articulo_tipo_id,
-        'articulo_nombre',    at.nombre,
+        'grupo_articulo_id',  t.grupo_articulo_id,
+        'articulo_nombre',    ga.nombre,
         'fibra',              t.fibra,
         'tenido_id',          t.tenido_id,
         'tenido_nombre',      td.tenido,
@@ -281,7 +297,7 @@ AS $$
     FROM receta.tenido t
     JOIN  estado_desarrollo_color e  ON e.id  = t.estado_id
     LEFT JOIN vw_colores          vc ON vc.color_x_cliente_id = t.color_x_cliente_id
-    LEFT JOIN articulo_tipo        at ON at.id = t.articulo_tipo_id
+    LEFT JOIN grupo_articulo        ga ON ga.id = t.grupo_articulo_id
     LEFT JOIN public.tenido        td ON td.id = t.tenido_id
     LEFT JOIN tipo_receta          tr ON tr.id = t.tipo_receta_id
     WHERE t.id = p_receta_id;
@@ -299,8 +315,10 @@ $$;
 -- ───────────────────────────────────────
 
 -- p_data keys (all optional except receta_id):
---   color_x_cliente_id, articulo_tipo_id, fibra, tenido_id,
+--   color_x_cliente_id, grupo_articulo_id, fibra, tenido_id,
 --   tipo_receta_id, pasos (array — replaces all if present)
+-- articulo_tipo_id is NOT accepted — supply grupo_articulo_id; the legacy column
+-- is re-derived from the grupo's origen so unmigrated readers stay correct.
 -- NOTE: flg_antipilling is NOT accepted here — it is derived automatically from
 --       the presence of a paso with operacion.codigo = 'ANTIPILLING'.
 CREATE OR REPLACE FUNCTION receta.actualizar_tenido(p_receta_id INT, p_data JSONB)
@@ -332,7 +350,8 @@ BEGIN
 
     UPDATE receta.tenido SET
         color_x_cliente_id = COALESCE((p_data->>'color_x_cliente_id')::INT,     color_x_cliente_id),
-        articulo_tipo_id   = COALESCE((p_data->>'articulo_tipo_id')::SMALLINT,   articulo_tipo_id),
+        -- articulo_tipo_id lo deriva trg_bi_tenido_derive_articulo_tipo; nunca aquí.
+        grupo_articulo_id  = COALESCE((p_data->>'grupo_articulo_id')::INT,       grupo_articulo_id),
         fibra              = COALESCE((p_data->>'fibra')::SMALLINT,              fibra),
         tenido_id          = COALESCE((p_data->>'tenido_id')::INT,               tenido_id),
         tipo_receta_id     = COALESCE((p_data->>'tipo_receta_id')::SMALLINT,     tipo_receta_id),
@@ -675,23 +694,19 @@ SET search_path TO 'iam', 'public', 'receta', 'doc'
 AS $$
 DECLARE
     v_receta_id    INT;
-    v_combos       INT;
     v_flg_antipill BOOLEAN;
     v_op_tipo      partida_tipo_enum;
 BEGIN
-    -- Guard: all items in a dyeing partida must share one articulo_tipo + fibra
-    SELECT COUNT(DISTINCT (a.articulo_tipo_id, a.fibra)) INTO v_combos
-    FROM mes.partida_detalle pd
-    JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
-    JOIN articulo a ON a.id = ird.articulo_id
-    WHERE pd.partida_id = p_partida_id;
-
-    IF v_combos > 1 THEN
-        RAISE EXCEPTION
-            'Partida % tiene múltiples combinaciones articulo_tipo/fibra — no se puede resolver la receta de forma unívoca.',
-            p_partida_id;
-    END IF;
-
+    -- MIGRACIÓN 32 — muro de lotes mezclados ELIMINADO.
+    -- Antes esta función contaba COUNT(DISTINCT (articulo_tipo_id, fibra)) sobre los
+    -- rollos y lanzaba excepción si había más de una combinación. Ese muro es la
+    -- razón por la que existían los artículos forjados ('J 30/1- Gam 50/1') y el
+    -- flg_rib: la única forma de meter dos telas en un baño era disfrazarlas de una.
+    --
+    -- Ya no hace falta. La receta se resuelve por el grupo_articulo_id DECLARADO en
+    -- la partida, no infiriéndolo de los rollos — y la composición la valida
+    -- crear_partida contra grupo_articulo_miembro. Una partida mezclada resuelve la
+    -- receta de su mezcla; una pura, la suya. Sin ambigüedad y sin muro.
     SELECT flg_antipilling INTO v_flg_antipill FROM mes.partida WHERE id = p_partida_id;
 
     -- REPROCESO: antipilling already applied on first dyeing — always match false
@@ -702,18 +717,25 @@ BEGIN
         END IF;
     END IF;
 
+    -- Match sobre lo DECLARADO en la partida (grupo + fibra ejecutada), sin pasar
+    -- por los rollos. fibra viene de la partida, no del artículo: es el número de
+    -- sistemas que se corren, y puede ser menor al que la tela requiere (jaspeados).
+    --
+    -- LIMIT 1 es seguro porque uq_receta_tenido_aprobada es único sobre
+    -- (color, grupo, fibra, tenido, antipilling, tipo_receta) WHERE flg_produccion.
+    -- OJO: tipo_receta_id es parte de esa clave — existen ~50 specs con una receta
+    -- aprobada por tipo (teñido / reproceso / desmontado). Sin ese filtro el LIMIT 1
+    -- elegiría arbitrariamente entre ellas.
     SELECT rt.id INTO v_receta_id
     FROM mes.partida p
-    JOIN mes.partida_detalle pd ON pd.partida_id = p.id
-    JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
-    JOIN articulo a ON a.id = ird.articulo_id
     JOIN receta.tenido rt
         ON  rt.color_x_cliente_id = p.color_x_cliente_id
         AND rt.tenido_id          = p.tenido_id
         AND rt.flg_antipilling    = v_flg_antipill
-        AND rt.articulo_tipo_id   = a.articulo_tipo_id
-        AND rt.fibra              = a.fibra
-        AND rt.flg_produccion     = true   -- unique partial index: at most one row
+        AND rt.grupo_articulo_id  = p.grupo_articulo_id
+        AND rt.fibra              = p.fibra
+        AND rt.flg_produccion     = true
+        AND (p_tipo_receta_id IS NULL OR rt.tipo_receta_id = p_tipo_receta_id)
     WHERE p.id = p_partida_id
     LIMIT 1;
 
@@ -760,42 +782,35 @@ SET search_path TO 'iam', 'public', 'receta', 'doc'
 AS $$
 DECLARE
     v_receta_id INT;
-    v_combos    INT;
     v_estado_id SMALLINT;
     v_usr_id    INT := get_user_id();
     v_key       RECORD;
 BEGIN
-    -- Only proceed if all detalle items resolve to exactly one articulo_tipo + fibra
-    SELECT COUNT(DISTINCT (a.articulo_tipo_id, a.fibra)) INTO v_combos
-    FROM mes.partida_detalle pd
-    JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
-    JOIN articulo a ON a.id = ird.articulo_id
-    WHERE pd.partida_id = p_partida_id;
-
-    IF COALESCE(v_combos, 0) != 1 THEN
-        RETURN NULL;
-    END IF;
-
+    -- MIGRACIÓN 32: la spec se toma de la partida (grupo + fibra declarados); ya no
+    -- se infiere desde los rollos. Desaparece el chequeo de "una sola combinación
+    -- articulo_tipo/fibra" — gemelo del muro eliminado en resolver_tenido_id, y por
+    -- el mismo motivo: una partida mezclada tiene una spec perfectamente definida,
+    -- la de su grupo.
     SELECT
         p.color_x_cliente_id,
-        a.articulo_tipo_id,
-        a.fibra,
+        p.grupo_articulo_id,
+        p.fibra,
         p.tenido_id,
         p.flg_antipilling
     INTO v_key
     FROM mes.partida p
-    JOIN mes.partida_detalle pd ON pd.partida_id = p.id
-    JOIN item_rollo_detalle ird ON ird.item_id = pd.item_id
-    JOIN articulo a ON a.id = ird.articulo_id
-    WHERE p.id = p_partida_id
-    LIMIT 1;
+    WHERE p.id = p_partida_id;
+
+    IF NOT FOUND OR v_key.grupo_articulo_id IS NULL THEN
+        RETURN NULL;
+    END IF;
 
     -- Serialize concurrent calls for the same spec key to prevent duplicate INGRESADO rows.
     -- Advisory lock is transaction-scoped — auto-released on commit/rollback.
     PERFORM pg_advisory_xact_lock(
         hashtext('receta.solicitar_si_ausente'),
         hashtext(format('%s|%s|%s|%s|%s',
-            v_key.color_x_cliente_id, v_key.articulo_tipo_id,
+            v_key.color_x_cliente_id, v_key.grupo_articulo_id,
             v_key.fibra, v_key.tenido_id, v_key.flg_antipilling))
     );
 
@@ -804,7 +819,7 @@ BEGIN
         SELECT 1 FROM receta.tenido t
         JOIN estado_desarrollo_color e ON e.id = t.estado_id
         WHERE t.color_x_cliente_id = v_key.color_x_cliente_id
-          AND t.articulo_tipo_id   = v_key.articulo_tipo_id
+          AND t.grupo_articulo_id  = v_key.grupo_articulo_id
           AND t.fibra              = v_key.fibra
           AND t.tenido_id          = v_key.tenido_id
           AND t.flg_antipilling    = v_key.flg_antipilling
@@ -815,11 +830,14 @@ BEGIN
 
     SELECT id INTO v_estado_id FROM estado_desarrollo_color WHERE codigo = 'INGRESADO';
 
+    -- articulo_tipo_id lo deriva trg_bi_tenido_derive_articulo_tipo (NULL en mezclas).
     INSERT INTO receta.tenido (
-        color_x_cliente_id, articulo_tipo_id, fibra, tenido_id,
+        color_x_cliente_id, grupo_articulo_id, fibra, tenido_id,
         flg_antipilling, estado_id, usr_cre, fyh_cre
     ) VALUES (
-        v_key.color_x_cliente_id, v_key.articulo_tipo_id, v_key.fibra, v_key.tenido_id,
+        v_key.color_x_cliente_id,
+        v_key.grupo_articulo_id,
+        v_key.fibra, v_key.tenido_id,
         v_key.flg_antipilling, v_estado_id, v_usr_id, now()
     )
     RETURNING id INTO v_receta_id;
@@ -842,8 +860,8 @@ SELECT
     t.color_x_cliente_id,
     vc.color                  AS color_nombre,
     vc.color_x_cliente_hex    AS color_hex,
-    t.articulo_tipo_id,
-    at.nombre                 AS articulo_nombre,
+    t.grupo_articulo_id,
+    ga.nombre                 AS articulo_nombre,
     t.fibra,
     t.tenido_id,
     td.tenido                 AS tenido_nombre,
@@ -860,7 +878,7 @@ SELECT
 FROM receta.tenido t
 JOIN  public.estado_desarrollo_color e  ON e.id  = t.estado_id
 LEFT JOIN public.vw_colores          vc ON vc.color_x_cliente_id = t.color_x_cliente_id
-LEFT JOIN public.articulo_tipo        at ON at.id = t.articulo_tipo_id
+LEFT JOIN grupo_articulo               ga ON ga.id = t.grupo_articulo_id
 LEFT JOIN public.tenido              td ON td.id = t.tenido_id
 LEFT JOIN public.tipo_receta         tr ON tr.id = t.tipo_receta_id;
 
@@ -868,9 +886,17 @@ LEFT JOIN public.tipo_receta         tr ON tr.id = t.tipo_receta_id;
 -- ───────────────────────────────────────
 -- get_tenido_versiones
 -- Returns all recipes that share the same spec
--- (color_x_cliente_id, articulo_tipo_id, fibra, tenido_id, flg_antipilling)
+-- (color_x_cliente_id, grupo_articulo_id, fibra, tenido_id, flg_antipilling)
 -- as the given recipe, ordered newest first.
 -- Used to browse the version history and to populate a version picker for diff.
+--
+-- ⚠ FUNCTIONAL, NOT DISPLAY — matches on the whole spec tuple by ROW comparison.
+-- Before this rekey it compared on articulo_tipo_id, which migration 32 derives
+-- to NULL for every MIXED grupo (a mix has no single articulo_tipo) — a NULL
+-- anywhere in a row comparison makes the whole comparison evaluate to NULL, so
+-- this silently returned an EMPTY version history for every mixed-grupo recipe.
+-- grupo_articulo_id is NOT NULL on receta.tenido (clean break, migration 31), so
+-- re-keying onto it does not just rename the bug away — it actually fixes it.
 -- ───────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION receta.get_tenido_versiones(p_receta_id INT)
@@ -892,8 +918,8 @@ AS $$
         ) ORDER BY v.fyh_cre DESC
     ), '[]'::jsonb)
     FROM receta.vw_tenido v
-    WHERE (v.color_x_cliente_id, v.articulo_tipo_id, v.fibra, v.tenido_id, v.flg_antipilling) = (
-        SELECT t.color_x_cliente_id, t.articulo_tipo_id, t.fibra, t.tenido_id, t.flg_antipilling
+    WHERE (v.color_x_cliente_id, v.grupo_articulo_id, v.fibra, v.tenido_id, v.flg_antipilling) = (
+        SELECT t.color_x_cliente_id, t.grupo_articulo_id, t.fibra, t.tenido_id, t.flg_antipilling
         FROM receta.tenido t
         WHERE t.id = p_receta_id
     );
@@ -903,8 +929,38 @@ $$;
 -- ───────────────────────────────────────
 -- Immutability trigger functions
 -- Fix: RETURN NEW is NULL in DELETE triggers, which silently cancels deletions.
--- Both functions handle UPDATE and DELETE events, so must return OLD for DELETE.
+-- The paso/insumo functions handle UPDATE and DELETE, so must return OLD for DELETE.
+--
+-- BLOCKING STATES — 'EN_PROCESO' as well as 'COMPLETADO'. A run that is currently
+-- on the machine is following this recipe right now; editing it mid-run is at
+-- least as damaging as editing it after the fact, since the operator's printed
+-- sheet and the stored recipe would silently diverge.
+-- 'OMITIDO' deliberately does NOT block: a skipped run never consumed the recipe.
+-- (paso_ejecucion_estado_enum = EN_PROCESO | COMPLETADO | OMITIDO.)
+--
+-- fn_trg_tenido_immutable was previously defined only in migration/06 while its
+-- two siblings lived here; it is now colocated so all three guards change together.
+-- The trigger binding stays in migration/06 (and is re-created with an extended
+-- column list in migration/31).
 -- ───────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION receta.fn_trg_tenido_immutable()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_paso pp
+        JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
+        WHERE pp.receta_id = OLD.id
+          AND pe.estado IN ('EN_PROCESO', 'COMPLETADO')
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede modificar receta.tenido id=%: tiene ejecuciones en proceso o completadas.',
+            OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION receta.fn_trg_tenido_paso_immutable()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
@@ -915,10 +971,10 @@ BEGIN
         FROM mes.partida_paso pp
         JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
         WHERE pp.receta_id = v_receta_id
-          AND pe.estado = 'COMPLETADO'
+          AND pe.estado IN ('EN_PROCESO', 'COMPLETADO')
     ) THEN
         RAISE EXCEPTION
-            'receta.tenido_paso id=% cannot be modified: its recipe has completed executions',
+            'No se puede modificar receta.tenido_paso id=%: su receta tiene ejecuciones en proceso o completadas.',
             OLD.id;
     END IF;
     IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
@@ -938,10 +994,10 @@ BEGIN
         FROM mes.partida_paso pp
         JOIN mes.partida_paso_ejecucion pe ON pe.partida_paso_id = pp.id
         WHERE pp.receta_id = v_receta_id
-          AND pe.estado = 'COMPLETADO'
+          AND pe.estado IN ('EN_PROCESO', 'COMPLETADO')
     ) THEN
         RAISE EXCEPTION
-            'receta.tenido_paso_insumo id=% cannot be modified: its recipe has completed executions',
+            'No se puede modificar receta.tenido_paso_insumo id=%: su receta tiene ejecuciones en proceso o completadas.',
             OLD.id;
     END IF;
     IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;

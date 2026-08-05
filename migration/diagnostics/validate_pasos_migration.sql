@@ -2,8 +2,27 @@
 -- Validates migration of legacy execution events (produccion_tenido + perchado
 -- + compactado + termofijado) into mes.partida_paso + mes.partida_paso_ejecucion.
 --
--- For the deep pxr ↔ produccion_tenido join investigation that backs the join
--- choices below, see diagnostics/debug_pxr_produccion_tenido_join.sql.
+-- PREREQUISITES:
+--   · migration/patches/31_fix_reproceso_matizado_operacion.sql must be applied
+--     (sets tipo_receta.operacion_id for 'Reproceso Matizado', was NULL due to
+--     migration-11 line 892 typo). Without it, ~78 pt rows are invisible to §2.
+--
+-- JOIN LOGIC (produccion_tenido branch) — see debug_pxr_produccion_tenido_join.sql:
+--   · pt → pxr on (partida_id, fecha, maquina_id): 1:1 pin, same machine same date
+--   · pxr → tipo_receta on tipo_receta = pt.tipo: resolves operacion_id
+--   · DISTINCT ON (pt.id): 9 pt rows fan out to multiple pxr (exact dupes or
+--     compound multi-recipe runs). All share the same operacion_id — confirmed.
+--     Tiebreaker: prefer pxr where rollos match pt, then newest pxr.id.
+--   · COALESCE(p.partida_origen_id, p.id): rework partidas roll up to legacy root.
+--
+-- KNOWN GAPS (not counted in §2 legacy base):
+--   · ~109 pt rows with no pxr entry at all (1_NO_PARTIDA_IN_PXR) — plan-less
+--     executions, invisible to §2. §1 catches them as a count gap.
+--   · ~39 client-discussion rows: recipe-less reprocesos + 1 missing partida.
+--
+-- BASE COUNTS (after patch 31, verified 2026-06-22):
+--   produccion_tenido: 4272 → ~4350 post-patch  |  perchado: 849
+--   compactado: 6027                             |  termofijado: 420
 --
 -- STATUS values (§2):
 --   MATCHED            → paso + ejecucion found, weight/rolls within tolerance
@@ -14,12 +33,13 @@
 --
 -- §1 — totals comparison (legacy vs new schema per root partida)
 -- §2 — row-level detail with status per execution event
--- §3 — summary by operation + status
+-- §3 — summary by operation + status (template, wrap §2 as subquery)
 
 
 -- ── §1 Totals: legacy vs new per root partida (reworks rolled up) ─────────────
+-- Shows only mismatching partidas (legacy_n ≠ new_n).
 -- new_counts groups by COALESCE(partida_origen_id, id) so rework partidas
--- created by mes.crear_reproceso count against their original legacy partida_id.
+-- count against their original legacy partida_id.
 WITH legacy_counts AS (
     SELECT partida_id, COUNT(*) AS n
     FROM (
@@ -51,37 +71,43 @@ WHERE COALESCE(l.n, 0) != COALESCE(n.n, 0)
 ORDER BY diff DESC;
 
 
--- ── §2 Row-level detail: one row per legacy execution event, with status ─────
+-- ── §2 Row-level detail: one row per legacy execution event, with status ──────
 WITH legacy AS (
 
-    -- ── produccion_tenido: routes through pxr → tipo_receta for operacion_id ──
-    SELECT
-        'produccion_tenido'::text       AS source_table,
-        pt.id                           AS legacy_id,
-        pt.partida_id,
-        tr.operacion_id,
-        op.codigo                       AS operacion_codigo,
-        pt.fecha,
-        pt.maquina                      AS legacy_maquina,
-        pt.rollos::int                  AS legacy_rollos,
-        pt.kilos                        AS legacy_kilos,
-        pt.hora_inicio,
-        pt.hora_fin
-    FROM produccion_tenido pt
-    JOIN partida_x_recetas pxr
-        ON  pxr.partida_id     = pt.partida_id
-        AND pxr.fecha          = pt.fecha
-        AND pxr.flg_elm        = false
-        AND pxr.tipo_receta_id IS NOT NULL
-    JOIN tipo_receta tr
-        ON  tr.id              = pxr.tipo_receta_id
-        AND tr.tipo_receta     = pt.tipo
-    JOIN mes.operacion op ON op.id = tr.operacion_id
-    WHERE pt.maquina = pxr.maquina_id   -- 1:1 pin: same machine on same date
+    -- produccion_tenido: routes through pxr → tipo_receta for operacion_id.
+    -- Wrapped in subquery so DISTINCT ON ORDER BY doesn't conflict with UNION ALL.
+    SELECT * FROM (
+        SELECT DISTINCT ON (pt.id)
+            'produccion_tenido'::text       AS source_table,
+            pt.id                           AS legacy_id,
+            pt.partida_id,
+            tr.operacion_id,
+            op.codigo                       AS operacion_codigo,
+            pt.fecha,
+            pt.maquina                      AS legacy_maquina,
+            ROUND(pt.rollos)::int           AS legacy_rollos,
+            pt.kilos                        AS legacy_kilos,
+            pt.hora_inicio,
+            pt.hora_fin
+        FROM produccion_tenido pt
+        JOIN partida_x_recetas pxr
+            ON  pxr.partida_id     = pt.partida_id
+            AND pxr.fecha          = pt.fecha
+            AND pxr.flg_elm        = false
+            AND pxr.tipo_receta_id IS NOT NULL
+            AND pxr.maquina_id     = pt.maquina
+        JOIN tipo_receta tr
+            ON  tr.id          = pxr.tipo_receta_id
+            AND tr.tipo_receta = pt.tipo
+        JOIN mes.operacion op ON op.id = tr.operacion_id
+        ORDER BY pt.id,
+                 (pxr.rollos = pt.rollos::numeric) DESC,
+                 pxr.id DESC
+    ) pt_deduped
 
     UNION ALL
 
-    -- ── perchado ─────────────────────────────────────────────────────────────
+    -- perchado
     SELECT
         'perchado', pe.id, pe.partida_id, op.id, op.codigo,
         pe.fecha, NULL, pe.rollos, NULL, pe.hora_inicio, pe.hora_fin
@@ -90,7 +116,7 @@ WITH legacy AS (
 
     UNION ALL
 
-    -- ── compactado ───────────────────────────────────────────────────────────
+    -- compactado
     SELECT
         'compactado', c.id, c.partida_id, op.id, op.codigo,
         c.fecha, c.maquina_id, c.rollos, NULL, c.hora_inicio, c.hora_fin
@@ -99,7 +125,7 @@ WITH legacy AS (
 
     UNION ALL
 
-    -- ── termofijado ──────────────────────────────────────────────────────────
+    -- termofijado
     SELECT
         'termofijado', t.id, t.partida_id, op.id, op.codigo,
         t.fecha, NULL, t.rollos, NULL, t.hora_inicio, t.hora_fin
@@ -137,7 +163,6 @@ SELECT
     legacy_kilos,
     hora_inicio,
     hora_fin,
-
     new_paso_id,
     new_secuencia,
     new_ejecucion_id,
@@ -146,7 +171,6 @@ SELECT
     new_fyh_fin,
     new_peso_kg,
     new_rollos,
-
     CASE
         WHEN new_paso_id      IS NULL THEN 'MISSING_PASO'
         WHEN new_ejecucion_id IS NULL THEN 'MISSING_EJECUCION'
@@ -159,14 +183,15 @@ SELECT
                                       THEN 'ROLL_DRIFT'
         ELSE 'MATCHED'
     END                               AS status
-
 FROM joined
 ORDER BY partida_id, operacion_codigo, fecha;
 
 
--- ── §3 Summary by operation + status ─────────────────────────────────────────
--- Wrap §2 (the legacy + joined CTEs and final SELECT) as a subquery `v` and:
+-- ── §3 Summary by source + operation + status ────────────────────────────────
+-- Run by wrapping §2's CTEs + SELECT as a subquery named v:
+--
+-- WITH legacy AS (...), joined AS (...) -- paste §2 CTEs here --
 -- SELECT source_table, operacion_codigo, status, COUNT(*) AS n
--- FROM v
+-- FROM ( -- paste §2 SELECT here -- ) v
 -- GROUP BY 1, 2, 3
 -- ORDER BY 1, 2, 3;

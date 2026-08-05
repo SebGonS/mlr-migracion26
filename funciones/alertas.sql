@@ -203,7 +203,9 @@ BEGIN
     ),
     stock_actual AS (
         SELECT item_id, COALESCE(cantidad_total, 0) AS cantidad
-        FROM inventario.vw_stock_insumos
+        -- vw_stock_items (quantity fact, no attribute/valuation joins): this
+        -- flow only needs item_id + cantidad_total, and self-scopes to INSUMO.
+        FROM inventario.vw_stock_items
     ),
     items_bajo AS (
         SELECT
@@ -274,7 +276,9 @@ BEGIN
           ),
           stock_actual AS (
               SELECT item_id, COALESCE(cantidad_total, 0) AS cantidad
-              FROM inventario.vw_stock_insumos
+              -- vw_stock_items (quantity fact, no attribute/valuation joins): this
+              -- flow only needs item_id + cantidad_total, and self-scopes to INSUMO.
+              FROM inventario.vw_stock_items
           )
           SELECT 1
           FROM item i
@@ -331,7 +335,9 @@ BEGIN
     ),
     stock_disponible AS (
         SELECT item_id, COALESCE(cantidad_total, 0) AS cantidad
-        FROM inventario.vw_stock_insumos
+        -- vw_stock_items (quantity fact, no attribute/valuation joins): this
+        -- flow only needs item_id + cantidad_total, and self-scopes to INSUMO.
+        FROM inventario.vw_stock_items
     ),
     deficit AS (
         SELECT
@@ -412,7 +418,9 @@ BEGIN
           ),
           stock_disponible AS (
               SELECT item_id, COALESCE(cantidad_total, 0) AS cantidad
-              FROM inventario.vw_stock_insumos
+              -- vw_stock_items (quantity fact, no attribute/valuation joins): this
+              -- flow only needs item_id + cantidad_total, and self-scopes to INSUMO.
+              FROM inventario.vw_stock_items
           )
           SELECT 1
           FROM paso_demanda pd

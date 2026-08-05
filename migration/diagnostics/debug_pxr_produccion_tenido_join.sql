@@ -14,6 +14,27 @@
 --   Vocabularies are the same domain (§0d): 15 shared labels, 4 PT_ONLY
 --   (Lavado, Reproceso Antiguo/Desmontado/Otros), zero whitespace/case drift.
 --   Real client-discussion edge cases ≈ 39 (recipe-less reprocesos + 1 lost partida).
+--
+-- Fan-out findings (§0c4, run date 2026-06-22):
+--   9 pt rows join to multiple pxr rows; all share the same operacion_id (safe).
+--   No pxr_id is shared between multiple pt rows (other_pt_rows=0 for all).
+--   Three sub-patterns:
+--     a) Exact pxr dupes (same receta_id, same rollos): pt 6125, 7386, 7206 — bad
+--        legacy inserts. Tiebreaker: newest pxr.id.
+--     b) Multi-recipe compound runs (different receta_ids, rollos match):
+--        pt 6034, 6126, 6831, 7350 — one physical run, multiple recipe variants
+--        planned (e.g. Desmontado+Reteñido). Tiebreaker: newest pxr.id.
+--     c) Rollos-drift (no pxr.rollos matches pt.rollos):
+--        pt 6125 (pt=15, pxr=20), pt 6859 (pt=1, pxr=20/2) — legacy data
+--        inconsistency between what was planned and what was executed.
+--   Fix in §2: DISTINCT ON (pt.id) ORDER BY rollos_match DESC, pxr.id DESC.
+--
+-- Known structural gap — Reproceso Matizado:
+--   tipo_receta id=10 has operacion_id=NULL (migration-11 line 892 typo:
+--   'Repartida Matizado' instead of 'Reproceso Matizado'). These pt rows join
+--   to tipo_receta fine but fail the JOIN to mes.operacion → invisible in §2.
+--   Affected pt rows include 5784, 5818, 5964, 6038 and others.
+--   Fix: UPDATE tipo_receta SET operacion_id = (TENIDO id) WHERE id = 10.
 
 -- ── §0a: pt rows with NO matching pxr (orphaned executions) ──────────────────
 SELECT pt.id, pt.partida_id, pt.fecha, pt.tipo, pt.maquina, pt.kilos, pt.rollos
@@ -247,3 +268,89 @@ LEFT JOIN mes.partida p ON p.id = pt.partida_id
 WHERE p.id IS NULL
 
 ORDER BY reason, partida_id, fecha;
+
+-- ── §0c4: fan-out distribution — how many pxr rows does each pt row match? ───
+-- n=1 → clean. n>1 → fan-out. Results (2026-06-22): 4263×1, 5×2, 2×3, 1×4, 1×5.
+SELECT n, COUNT(*) AS pt_rows
+FROM (
+    SELECT pt.id, COUNT(*) AS n
+    FROM produccion_tenido pt
+    JOIN partida_x_recetas pxr
+        ON  pxr.partida_id = pt.partida_id AND pxr.fecha = pt.fecha
+        AND pxr.flg_elm = false AND pxr.tipo_receta_id IS NOT NULL
+        AND pxr.maquina_id = pt.maquina
+    JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id AND tr.tipo_receta = pt.tipo
+    JOIN mes.operacion op ON op.id = tr.operacion_id
+    GROUP BY pt.id
+) t
+GROUP BY n ORDER BY n;
+
+-- ── §0c5: fan-out detail — operacion ambiguity check ─────────────────────────
+-- distinct_ops=1 for all → operacion_id is unambiguous in every case.
+SELECT pt.id AS pt_id, pt.partida_id, pt.fecha, pt.tipo,
+       COUNT(*) AS n,
+       COUNT(DISTINCT tr.operacion_id) AS distinct_ops,
+       array_agg(DISTINCT op.codigo)   AS op_codigos,
+       array_agg(DISTINCT pxr.receta_id) AS receta_ids
+FROM produccion_tenido pt
+JOIN partida_x_recetas pxr
+    ON  pxr.partida_id = pt.partida_id AND pxr.fecha = pt.fecha
+    AND pxr.flg_elm = false AND pxr.tipo_receta_id IS NOT NULL
+    AND pxr.maquina_id = pt.maquina
+JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id AND tr.tipo_receta = pt.tipo
+JOIN mes.operacion op ON op.id = tr.operacion_id
+GROUP BY pt.id, pt.partida_id, pt.fecha, pt.tipo
+HAVING COUNT(*) > 1
+ORDER BY n DESC;
+
+-- ── §0c6: fan-out rollos match — which pxr row is the canonical one? ─────────
+-- rollos_match=true → that pxr.rollos matches pt.rollos (preferred tiebreaker).
+-- Findings: 6 cases all-True (exact dupes), 4 mixed (some bad rollos),
+-- 2 all-False (6125, 6859 — legacy data inconsistency, no pxr matches pt.rollos).
+SELECT pt.id AS pt_id, pt.partida_id, pt.fecha, pt.tipo,
+       pt.rollos AS pt_rollos,
+       pxr.id AS pxr_id, pxr.receta_id, pxr.rollos AS pxr_rollos,
+       pxr.rollos = pt.rollos::numeric AS rollos_match
+FROM produccion_tenido pt
+JOIN partida_x_recetas pxr
+    ON  pxr.partida_id = pt.partida_id AND pxr.fecha = pt.fecha
+    AND pxr.maquina_id = pt.maquina AND pxr.flg_elm = false
+    AND pxr.tipo_receta_id IS NOT NULL
+JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id AND tr.tipo_receta = pt.tipo
+WHERE pt.id IN (
+    SELECT pt2.id
+    FROM produccion_tenido pt2
+    JOIN partida_x_recetas pxr2
+        ON  pxr2.partida_id = pt2.partida_id AND pxr2.fecha = pt2.fecha
+        AND pxr2.maquina_id = pt2.maquina AND pxr2.flg_elm = false
+        AND pxr2.tipo_receta_id IS NOT NULL
+    JOIN tipo_receta tr2 ON tr2.id = pxr2.tipo_receta_id AND tr2.tipo_receta = pt2.tipo
+    GROUP BY pt2.id HAVING COUNT(*) > 1
+)
+ORDER BY pt.id, rollos_match DESC, pxr.id;
+
+-- ── §0base: verify legacy CTE produces clean counts (no duplicates) ───────────
+-- Run after applying patch 31 (Reproceso Matizado fix).
+-- Expected: duplicates_remaining=0 for all source_tables.
+SELECT source_table,
+       COUNT(*)                                  AS total_rows,
+       COUNT(DISTINCT legacy_id)                 AS distinct_ids,
+       COUNT(*) - COUNT(DISTINCT legacy_id)      AS duplicates_remaining
+FROM (
+    SELECT * FROM (
+        SELECT DISTINCT ON (pt.id)
+            'produccion_tenido'::text AS source_table, pt.id AS legacy_id
+        FROM produccion_tenido pt
+        JOIN partida_x_recetas pxr
+            ON  pxr.partida_id = pt.partida_id AND pxr.fecha = pt.fecha
+            AND pxr.flg_elm = false AND pxr.tipo_receta_id IS NOT NULL
+            AND pxr.maquina_id = pt.maquina
+        JOIN tipo_receta tr ON tr.id = pxr.tipo_receta_id AND tr.tipo_receta = pt.tipo
+        JOIN mes.operacion op ON op.id = tr.operacion_id
+        ORDER BY pt.id, (pxr.rollos = pt.rollos::numeric) DESC, pxr.id DESC
+    ) x
+    UNION ALL SELECT 'perchado',    pe.id FROM perchado pe
+    UNION ALL SELECT 'compactado',  c.id  FROM compactado c
+    UNION ALL SELECT 'termofijado', t.id  FROM termofijado t
+) legacy
+GROUP BY source_table ORDER BY source_table;

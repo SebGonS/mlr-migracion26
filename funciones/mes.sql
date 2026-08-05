@@ -57,6 +57,7 @@ FROM (
         'actividad_tipo',            prog.actividad_tipo,
         -- Production paso fields (null when actividad_tipo = 'LAVADO_MAQUINA')
         'paso_id',                   pp.id,
+        'operacion_id',              o.id,
         'operacion',                 o.nombre,
         'operacion_codigo',          o.codigo,
         'receta_tenido_id',          pp.receta_id,
@@ -66,7 +67,7 @@ FROM (
         'partida_origen_id',         p.partida_origen_id,
         'partida_codigo',            EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
         'cliente',                   c.nombre,
-        'articulo_tipo_id',          p.articulo_tipo_id,
+        'grupo_articulo_id',         p.grupo_articulo_id,
         'color',                     vc.color,
         'color_hex',                 vc.color_hex,
         'valor',                     vclr.valor,
@@ -74,7 +75,7 @@ FROM (
         'ancho',                     p.ancho,
         'malla',                     p.malla,
         'rendimiento',               p.rendimiento,
-        'articulo',                  at.nombre,
+        'articulo',                  ga.nombre,
         'fibra',                     p.fibra,
         'flg_antipilling',           p.flg_antipilling,
         'flg_doble_bolsa',           p.flg_doble_bolsa,
@@ -109,7 +110,7 @@ FROM (
     LEFT JOIN vw_colores vc               ON vc.color_x_cliente_id = p.color_x_cliente_id
     LEFT JOIN color_x_cliente cxc         ON cxc.id = p.color_x_cliente_id
     LEFT JOIN public.valor vclr           ON vclr.id = cxc.valor_id
-    LEFT JOIN articulo_tipo at            ON at.id         = p.articulo_tipo_id
+    LEFT JOIN grupo_articulo ga            ON ga.id         = p.grupo_articulo_id
     LEFT JOIN rollos_partida rp           ON rp.partida_id = p.id
     LEFT JOIN entregas_partida gp            ON gp.partida_id = p.id
     LEFT JOIN mes.lavado_maquina lm       ON prog.actividad_tipo = 'LAVADO_MAQUINA' AND lm.id = prog.actividad_id
@@ -199,8 +200,8 @@ FROM (
             'operacion',          o.nombre,
             'operacion_codigo',   o.codigo,
             'partida_codigo',     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0'),
-            'articulo_tipo_id',   p.articulo_tipo_id,
-            'articulo_tipo',           at.nombre,
+            'grupo_articulo_id',  p.grupo_articulo_id,
+            'grupo_articulo',           ga.nombre,
             'cliente',            c.nombre,
             'color',              vc.color,
             'color_hex',          vc.color_hex,
@@ -224,7 +225,7 @@ FROM (
     JOIN mes.partida p           ON p.id  = pp.partida_id
     LEFT JOIN receta.tenido rt      ON rt.id  = pp.receta_id
     LEFT JOIN tipo_receta tr        ON tr.id  = rt.tipo_receta_id
-    LEFT JOIN articulo_tipo at      ON at.id  = p.articulo_tipo_id
+    LEFT JOIN grupo_articulo ga      ON ga.id  = p.grupo_articulo_id
     LEFT JOIN tenido t              ON t.id   = p.tenido_id
     LEFT JOIN tercero c             ON c.id   = p.tercero_id
     LEFT JOIN vw_colores vc         ON vc.color_x_cliente_id = p.color_x_cliente_id
@@ -281,6 +282,17 @@ BEGIN
     IF NOT jwt_has_permission('produccion.programar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.programar'
             USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- 1b. Validate every element carries a non-null actividad_id (stale client
+    -- state / a slot never bound to a real paso/lavado would otherwise surface
+    -- as an opaque NOT NULL constraint violation on mes.programacion).
+    IF EXISTS (
+        SELECT 1 FROM jsonb_array_elements(p_programaciones) elem
+        WHERE elem->>'actividad_id' IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'Se recibió una actividad sin actividad_id (estado local corrupto). Recargue el tablero e intente de nuevo.';
     END IF;
 
     -- 2. Validate lavados: must not be COMPLETADO
@@ -408,11 +420,13 @@ DECLARE
     v_usr_id           int := get_user_id();
     v_partida_id         bigint;
     v_op_nombre        text;
+    v_stock_error      jsonb;
     v_message          text;
     v_detail           text;
     v_hint             text;
     v_context          text;
     v_sqlstate         text;
+    v_completado       boolean;
 BEGIN
     IF NOT jwt_has_permission('produccion.editar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.editar'
@@ -520,8 +534,8 @@ BEGIN
         'flg_antipilling',   p.flg_antipilling,
         'cliente',           cli.nombre,
         'tipo_receta',       tr.tipo_receta,
-        'articulo_tipo_id',  r.articulo_tipo_id,
-        'articulo_tipo',     at.nombre,
+        'grupo_articulo_id', r.grupo_articulo_id,
+        'grupo_articulo',     ga.nombre,
         'fibra',             r.fibra,
         'peso',              v_peso,
         'cantidad',          v_cantidad,
@@ -595,7 +609,7 @@ BEGIN
     JOIN receta.tenido r     ON r.id   = pp.receta_id
     JOIN mes.partida p       ON p.id   = pp.partida_id
     LEFT JOIN tipo_receta tr ON tr.id  = r.tipo_receta_id
-    JOIN articulo_tipo at    ON at.id  = r.articulo_tipo_id
+    JOIN grupo_articulo ga    ON ga.id  = r.grupo_articulo_id
     LEFT JOIN tercero cli    ON cli.id = p.tercero_id
     WHERE pp.id = p_paso_id;
 
@@ -605,25 +619,97 @@ BEGIN
         RETURN v_receta;
     END IF;
 
-    -- Write scaled chemical reservations into partida_componente (RESB chemical rows)
-    DELETE FROM mes.partida_componente
-    WHERE partida_paso_id = p_paso_id AND item_id IS NOT NULL;
+    -- Stock gate: only for pasos not yet completed (historical reprints skip this).
+    -- Checks each insumo's scaled requirement against current stock; raises if any deficit.
+    --
+    -- TEMPORARILY DISABLED (2026-07-10): a physical insumo ingress was missed in the
+    -- system, so system stock reads short while stock exists on the floor. Recipes need
+    -- to print ASAP; the ledger already tolerates negatives. Re-enable once the missing
+    -- ingress is registered. See partida_componente reservation + variance-alert backstop.
+    SELECT (estado = 'COMPLETADO') INTO v_completado
+    FROM mes.partida_paso WHERE id = p_paso_id;
 
-    INSERT INTO mes.partida_componente (partida_id, item_id, partida_paso_id, cantidad_reservada, usr_cre)
-    SELECT v_partida_id,
-           rtpi.item_id,
-           p_paso_id,
-           -- ÷1000: g/L×L and %×kg×10 yield GRAMS; reserved qty is stored in kg (stock unit). 7 dp = 4 gram-decimals.
-           ROUND(CASE
-               WHEN iid.medida = 'g/L' THEN SUM(rtpi.cantidad) * v_volumen * iid.factor_stock / 1000
-               WHEN iid.medida = '%'   THEN SUM(rtpi.cantidad) * v_peso    * 10 * iid.factor_stock / 1000
-           END, 7),
-           v_usr_id
-    FROM receta.tenido_paso rtp
-    JOIN receta.tenido_paso_insumo rtpi ON rtpi.paso_id  = rtp.id
-    JOIN item_insumo_detalle iid        ON iid.item_id   = rtpi.item_id
-    WHERE rtp.receta_id = v_receta_id
-    GROUP BY rtpi.item_id, iid.medida, iid.factor_stock;
+    -- reservado_otros check below is commented out (2026-07-20): stale reservations
+    -- from stalled/abandoned partidas (e.g. partida 6135) were never getting cleared,
+    -- causing false "stock insuficiente" on unrelated items. Re-enable once
+    -- stale-reservation cleanup is in place. Stock gate itself remains active.
+    IF NOT v_completado THEN
+        WITH required AS (
+            SELECT rtpi.item_id,
+                   ROUND(SUM(CASE
+                       WHEN iid.medida = 'g/L' THEN rtpi.cantidad * v_volumen * iid.factor_stock / 1000
+                       WHEN iid.medida = '%'   THEN rtpi.cantidad * v_peso * 10 * iid.factor_stock / 1000
+                   END), 7) AS cantidad_requerida
+            FROM receta.tenido_paso rtp
+            JOIN receta.tenido_paso_insumo rtpi ON rtpi.paso_id = rtp.id
+            JOIN item_insumo_detalle iid ON iid.item_id = rtpi.item_id
+            WHERE rtp.receta_id = v_receta_id
+            GROUP BY rtpi.item_id
+        ),
+        -- COMMENTED OUT (2026-07-20): reservado_otros competed for stock against OTHER
+        -- still-open pasos, but stale reservations from stalled/abandoned partidas
+        -- (e.g. partida 6135) were never getting cleared, causing false "stock
+        -- insuficiente" on unrelated items. Re-enable once stale-reservation cleanup
+        -- is in place. Mirrors the active-paso filter used for roll availability
+        -- (vw_lotes_rollos_disponibles) and get_actividades_sin_programar.
+        -- reservado_otros AS (
+        --     SELECT pc.item_id, SUM(pc.cantidad_reservada) AS cantidad_reservada
+        --     FROM mes.partida_componente pc
+        --     JOIN mes.partida_paso pp2 ON pp2.id = pc.partida_paso_id
+        --     JOIN mes.partida p2       ON p2.id = pc.partida_id
+        --     WHERE pc.item_id IS NOT NULL
+        --       AND pc.partida_paso_id <> p_paso_id
+        --       AND p2.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
+        --       AND p2.fyh_elm IS NULL
+        --       AND pp2.estado NOT IN ('COMPLETADO', 'OMITIDO')
+        --     GROUP BY pc.item_id
+        -- ),
+        deficit AS (
+            SELECT r.item_id, i.nombre AS item_nombre,
+                   r.cantidad_requerida,
+                   COALESCE(s.cantidad_total, 0) AS stock_disponible
+            FROM required r
+            JOIN item i ON i.id = r.item_id
+            LEFT JOIN inventario.vw_stock_items s ON s.item_id = r.item_id
+            WHERE COALESCE(s.cantidad_total, 0) < r.cantidad_requerida
+        )
+        SELECT jsonb_agg(jsonb_build_object(
+            'item_id', item_id, 'item_nombre', item_nombre,
+            'stock_disponible', stock_disponible,
+            'cantidad_requerida', cantidad_requerida
+        ))
+        INTO v_stock_error FROM deficit;
+    
+        IF v_stock_error IS NOT NULL THEN
+            RAISE EXCEPTION 'Stock insuficiente para generar la receta'
+                USING DETAIL = v_stock_error::text, ERRCODE = 'P0001';
+        END IF;
+    END IF;
+
+    -- Write scaled chemical reservations into partida_componente (RESB chemical rows).
+    -- Skipped for completed pasos: a historical reprint must not overwrite the
+    -- cantidad_reservada baseline that finalizar_paso's variance alert already used,
+    -- and re-inserting it here would be a stale row with no stock effect anyway.
+    IF NOT v_completado THEN
+        DELETE FROM mes.partida_componente
+        WHERE partida_paso_id = p_paso_id AND item_id IS NOT NULL;
+
+        INSERT INTO mes.partida_componente (partida_id, item_id, partida_paso_id, cantidad_reservada, usr_cre)
+        SELECT v_partida_id,
+               rtpi.item_id,
+               p_paso_id,
+               -- ÷1000: g/L×L and %×kg×10 yield GRAMS; reserved qty is stored in kg (stock unit). 7 dp = 4 gram-decimals.
+               ROUND(CASE
+                   WHEN iid.medida = 'g/L' THEN SUM(rtpi.cantidad) * v_volumen * iid.factor_stock / 1000
+                   WHEN iid.medida = '%'   THEN SUM(rtpi.cantidad) * v_peso    * 10 * iid.factor_stock / 1000
+               END, 7),
+               v_usr_id
+        FROM receta.tenido_paso rtp
+        JOIN receta.tenido_paso_insumo rtpi ON rtpi.paso_id  = rtp.id
+        JOIN item_insumo_detalle iid        ON iid.item_id   = rtpi.item_id
+        WHERE rtp.receta_id = v_receta_id
+        GROUP BY rtpi.item_id, iid.medida, iid.factor_stock;
+    END IF;
 
     INSERT INTO notification.notifications(user_id, title, body, tipo, payload)
     SELECT ur.user_id, 'Receta Generada',
@@ -824,24 +910,57 @@ BEGIN
     SELECT id INTO v_egr_tipo_id
     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO';
 
+    -- Convert physical recipe amounts → stock SKU quantities using factor_stock.
+    -- The recipe displays diluted/physical amounts; the actual stock unit may differ
+    -- (e.g. a 10% solution: factor_stock=10, so 1 kg physical → 10 kg SKU deducted).
+    SELECT jsonb_agg(
+        jsonb_set(i, '{cantidad}', to_jsonb(
+            ((i->>'cantidad')::numeric * COALESCE(iid.factor_stock, 1))
+        ))
+    )
+    INTO p_consumos
+    FROM jsonb_array_elements(p_consumos) i
+    LEFT JOIN item_insumo_detalle iid ON iid.item_id = (i->>'item_id')::int;
+
     -- Stock check: fungible items bypass (may go negative)
+    -- Excludes chemical reservations held by OTHER still-open pasos from availability
+    -- (this paso's own reservation is what's being fulfilled here, not competing demand).
+    -- Same active-paso filter as generar_receta's stock gate.
     WITH consumos AS (
         SELECT (i->>'item_id')::int AS item_id, SUM((i->>'cantidad')::numeric) AS cantidad
         FROM jsonb_array_elements(p_consumos) i
         GROUP BY 1
     ),
+    reservado_otros AS (
+        SELECT pc.item_id, SUM(pc.cantidad_reservada) AS cantidad_reservada
+        FROM mes.partida_componente pc
+        JOIN mes.partida_paso pp2 ON pp2.id = pc.partida_paso_id
+        JOIN mes.partida p2       ON p2.id = pc.partida_id
+        WHERE pc.item_id IS NOT NULL
+          AND pc.partida_paso_id <> p_paso_id
+          AND p2.estado_produccion NOT IN ('CERRADA', 'CANCELADA', 'TECO')
+          AND p2.fyh_elm IS NULL
+          AND pp2.estado NOT IN ('COMPLETADO', 'OMITIDO')
+        GROUP BY pc.item_id
+    ),
     errores AS (
         SELECT c.item_id, it.nombre AS item_nombre, c.cantidad,
-               COALESCE(sg.cantidad_total, 0) AS cantidad_disponible
+               COALESCE(sg.cantidad_total, 0) AS cantidad_disponible,
+               COALESCE(ro.cantidad_reservada, 0) AS reservado_otros_pasos,
+               COALESCE(sg.cantidad_total, 0) - COALESCE(ro.cantidad_reservada, 0) AS stock_neto
         FROM consumos c
         LEFT JOIN inventario.vw_stock_items sg ON sg.item_id = c.item_id
+        LEFT JOIN reservado_otros ro ON ro.item_id = c.item_id
         JOIN item it ON it.id = c.item_id
-        WHERE COALESCE(sg.cantidad_total, 0) < c.cantidad
+        WHERE COALESCE(sg.cantidad_total, 0) - COALESCE(ro.cantidad_reservada, 0) < c.cantidad
           AND it.flg_fungible = FALSE
     )
     SELECT jsonb_agg(jsonb_build_object(
         'item_id', item_id, 'item_nombre', item_nombre,
-        'saldo_disponible', cantidad_disponible, 'cantidad_requerida', cantidad
+        'saldo_disponible', cantidad_disponible,
+        'reservado_otros_pasos', reservado_otros_pasos,
+        'stock_neto', stock_neto,
+        'cantidad_requerida', cantidad
     ))
     INTO v_error_payload FROM errores;
 
@@ -1134,7 +1253,8 @@ BEGIN
     -- 4. Reverse all existing MATIZADO consumos for this execution
     INSERT INTO inventario.item_movimientos(
         doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-        destino_ubicacion_id, cantidad, documento_tipo, documento_id, motivo_id
+        destino_ubicacion_id, cantidad, documento_tipo, documento_id, motivo_id,
+        reversion_movimiento_id
     )
     SELECT
         v_doc_movimiento_id,
@@ -1145,7 +1265,8 @@ BEGIN
         m.cantidad,
         'partida_paso_ejecucion',
         p_ejecucion_id,
-        v_matizado_motivo_id
+        v_matizado_motivo_id,
+        m.id
     FROM inventario.item_movimientos m
     WHERE m.documento_tipo          = 'partida_paso_ejecucion'
       AND m.documento_id            = p_ejecucion_id
@@ -1539,6 +1660,10 @@ BEGIN
     v_peso_rollos  := (p_datos->>'peso_rollos')::NUMERIC;
     v_peso_rib     := (p_datos->>'peso_rib')::NUMERIC;
 
+    IF v_ubicacion_id IS NULL THEN
+        RAISE EXCEPTION 'p_datos.ubicacion_id es obligatorio (destino de los rollos de salida).';
+    END IF;
+
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('registrar_produccion', v_usr_id, p_datos || jsonb_build_object('ejecucion_id', p_ejecucion_id));
 
@@ -1776,6 +1901,7 @@ DECLARE
     v_prod_result       text;
     v_variance_payload  jsonb;
     v_peso_kg           numeric;
+    v_flg_ultimo        boolean;
 BEGIN
     IF NOT jwt_has_permission('produccion.ejecutar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
@@ -1792,6 +1918,35 @@ BEGIN
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Paso #% no encontrado o sin ejecución EN_PROCESO.', p_paso_id;
+    END IF;
+
+    -- flg_ultimo: true when no other non-omitted paso of this partida has a higher secuencia.
+    -- Mirrors the derivation in get_partida_detalle (mes.sql ~3705) — kept in sync manually,
+    -- there is no stored column for this.
+    SELECT NOT EXISTS (
+        SELECT 1
+        FROM mes.partida_paso pp3
+        WHERE pp3.partida_id = v_partida_id
+          AND pp3.secuencia > (SELECT pp4.secuencia FROM mes.partida_paso pp4 WHERE pp4.id = p_paso_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM mes.partida_paso_ejecucion pe3
+              WHERE pe3.partida_paso_id = pp3.id AND pe3.estado = 'OMITIDO'
+          )
+    ) INTO v_flg_ultimo;
+
+    -- Guard: the last step of a partida must not close rolls as processed without producing
+    -- output for them. Silently skipping registrar_produccion here (e.g. a frontend bug that
+    -- omits ubicacion_id) previously let rolls get marked COMPLETADO with no output lote and
+    -- no backflush — kg vanished from the pipeline with no error raised anywhere.
+    -- Fully-scrapped runs are exempt: cantidad_scrap covering the whole submitted quantity
+    -- legitimately produces zero output.
+    IF v_flg_ultimo
+       AND (p_datos->>'cantidad_rollos') IS NOT NULL
+       AND (p_datos->>'cantidad_rollos')::NUMERIC > COALESCE((p_datos->>'cantidad_scrap')::NUMERIC, 0)
+       AND COALESCE(jsonb_array_length(p_datos->'produccion'->'output'), 0) = 0
+    THEN
+        RAISE EXCEPTION 'Paso #% es el último de la partida: debe registrar producción (output) para los rollos no descartados por scrap.', p_paso_id
+            USING ERRCODE = 'check_violation';
     END IF;
 
     -- Cantidad guard: existing COMPLETADO runs + this submission must not exceed assigned rolls.
@@ -2156,6 +2311,17 @@ BEGIN
             v_op_nombre;
     END IF;
 
+    -- Guard: no QC inspection references this run (crear_inspeccion stamps
+    -- partida_paso_ejecucion_id on every inspection, input or output roll) —
+    -- the hard DELETE below would otherwise fail on inspeccion_partida_paso_ejecucion_id_fkey.
+    IF EXISTS (
+        SELECT 1 FROM calidad.inspeccion WHERE partida_paso_ejecucion_id = v_ejecucion_id
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede deshacer el inicio del paso %: tiene inspecciones de calidad registradas. Anule esas inspecciones primero (calidad.anular_inspeccion).',
+            v_op_nombre;
+    END IF;
+
     -- iniciar_paso only inserted the run row — safe to DELETE
     DELETE FROM mes.partida_paso_ejecucion WHERE id = v_ejecucion_id;
 
@@ -2453,21 +2619,32 @@ GRANT EXECUTE ON FUNCTION mes.registrar_ejecucion_partida(JSONB) TO authenticate
 -- ── mes.vw_proyeccion_tenido ──────────────────────────────────
 -- Machine schedule projection for any date (filter by fecha as needed).
 --
+-- Scheduling window: 07:00 → 07:00 next day (24 h from shift start).
+--   produccion_dia   = kg completed before shift_start + 12 h (≈ 19:00)
+--   produccion_total = kg completed before shift_start + 24 h (≈ 07:00 next day)
+--
+-- Exclusions applied here (not left to the frontend):
+--   • rework partidas (partida_origen_id IS NOT NULL)
+--   • TERMOFIJADO steps (already scheduled separately; not a dyeing batch)
+--
+-- Weight normalisation: if a partida has < 5 kg of assigned rolls it is
+-- treated as 1 roll = 20 kg for projection purposes only (kilos_raw still
+-- held in the output so callers can see the raw value).
+--
 -- Outputs offsets from each machine's shift start, NOT absolute wall-clock
 -- times. The frontend adds its own hora_inicio per machine to get actual times:
 --   wall_clock_start = hora_inicio_maquina + offset_inicio
 --   wall_clock_end   = hora_inicio_maquina + offset_fin
 --
 -- A 20-minute break between consecutive batches is included in the offsets.
--- peso_produccion is computed relative to a 24-h window from shift start,
--- so it is also independent of hora_inicio.
 --
 -- EN_PROCESO items use now() for remaining time — only meaningful for today.
 --
 -- Duration source : mes.tiempos_estandar_tenido via assigned recipe
 --                   (lookup key: valor × tenido × flg_antipilling)
 -- Wash duration   : mes.tiempos_estandar_lavado via receta.lavado_maquina.tipo_lavado_mq_id
-CREATE OR REPLACE VIEW mes.vw_proyeccion_tenido AS
+DROP VIEW IF EXISTS mes.vw_proyeccion_tenido;
+CREATE VIEW mes.vw_proyeccion_tenido AS
 WITH pasos AS (
     SELECT
         p.fecha,
@@ -2479,12 +2656,9 @@ WITH pasos AS (
         te.tenido,
         val.valor,
         rt.flg_antipilling,
-        COALESCE((
-            SELECT SUM(l.cantidad)
-            FROM mes.partida_componente opi
-            JOIN inventario.lote        l   ON l.id = opi.lote_id
-            WHERE opi.partida_id = pp.partida_id
-        ), 0)::numeric                                      AS kilos,
+        w.kilos_raw                                         AS kilos_raw,
+        CASE WHEN w.kilos_raw < 5 THEN 20 ELSE w.kilos_raw END
+                                                            AS kilos,
         CASE
             WHEN pe.estado = 'EN_PROCESO' THEN
                 GREATEST(interval '0',
@@ -2495,6 +2669,14 @@ WITH pasos AS (
         pe.fyh_inicio
     FROM mes.programacion                 p
     JOIN mes.partida_paso        pp    ON pp.id  = p.actividad_id
+    JOIN mes.partida             ptd   ON ptd.id = pp.partida_id
+    JOIN mes.operacion           op    ON op.id  = pp.operacion_id
+    CROSS JOIN LATERAL (
+        SELECT COALESCE(SUM(l.cantidad), 0)::numeric AS kilos_raw
+        FROM mes.partida_componente opi
+        JOIN inventario.lote        l ON l.id = opi.lote_id
+        WHERE opi.partida_id = pp.partida_id
+    ) w
     LEFT JOIN mes.partida_paso_ejecucion pe
            ON pe.partida_paso_id = pp.id AND pe.estado = 'EN_PROCESO'
     LEFT JOIN receta.tenido               rt     ON rt.id   = pp.receta_id
@@ -2507,7 +2689,9 @@ WITH pasos AS (
           AND te_std.tenido_id       = rt.tenido_id
           AND te_std.flg_antipilling = rt.flg_antipilling
           AND te_std.flg_activo      = true
-    WHERE p.actividad_tipo  = 'partida_paso'
+    WHERE p.actividad_tipo         = 'partida_paso'
+      AND ptd.partida_origen_id    IS NULL          -- exclude reworks
+      AND op.codigo                <> 'TERMOFIJADO' -- exclude scheduled termofijado
       AND NOT EXISTS (
           SELECT 1 FROM mes.partida_paso_ejecucion pe2
           WHERE pe2.partida_paso_id = pp.id AND pe2.estado = 'COMPLETADO'
@@ -2524,6 +2708,7 @@ lavados AS (
         NULL::text      AS tenido,
         NULL::text      AS valor,
         NULL::boolean   AS flg_antipilling,
+        NULL::numeric   AS kilos_raw,
         NULL::numeric   AS kilos,
         CASE
             WHEN lm.estado = 'EN_PROCESO' THEN
@@ -2600,6 +2785,7 @@ GRANT SELECT ON mes.vw_proyeccion_tenido TO authenticated;
 -- They may exceed 24h for items running into the next day.
 --
 -- produccion_dia / produccion_total come unchanged from the view.
+DROP FUNCTION IF EXISTS mes.get_proyeccion_tenido(date, jsonb);
 CREATE OR REPLACE FUNCTION mes.get_proyeccion_tenido(
     p_fecha date,
     p_horas jsonb DEFAULT '{}'
@@ -2614,6 +2800,7 @@ RETURNS TABLE(
     tenido           text,
     valor            text,
     flg_antipilling  boolean,
+    kilos_raw        numeric,
     kilos            numeric,
     duracion         interval,
     fyh_inicio       timestamptz,
@@ -2634,6 +2821,7 @@ $$
         v.tenido,
         v.valor,
         v.flg_antipilling,
+        v.kilos_raw,
         v.kilos,
         v.duracion,
         v.fyh_inicio,
@@ -2869,6 +3057,7 @@ DECLARE
     v_consumo_rev_id    smallint;
     v_doc_movimiento_id bigint;
     v_output_count      int;
+    v_prod_ing_id       smallint;
 BEGIN
     IF NOT jwt_has_permission('produccion.ejecutar') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere produccion.ejecutar'
@@ -2905,6 +3094,24 @@ BEGIN
             p_ejecucion_id;
     END IF;
 
+    -- 2b. Guard: no live QC inspection on the output lotes. crear_inspeccion writes no
+    -- item_movimientos row when the result isn't a rejection, so the guard above alone
+    -- would miss it — letting this function soft-delete a lote a live inspeccion still
+    -- points at, orphaning it (calidad.anular_inspeccion then can't recover it, since the
+    -- lote wasn't soft-deleted via PROD_SCRAP).
+    IF EXISTS (
+        SELECT 1
+        FROM inventario.lote l
+        JOIN calidad.inspeccion ci ON ci.lote_id = l.id
+        WHERE l.documento_tipo = 'partida_paso_ejecucion'
+          AND l.documento_id   = p_ejecucion_id
+          AND l.fyh_elm        IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede anular la ejecución #%: uno o más lotes de salida tienen una inspección de calidad registrada. Anule esa inspección primero (calidad.anular_inspeccion).',
+            p_ejecucion_id;
+    END IF;
+
     -- 3. Lock rows
     PERFORM 1 FROM inventario.lote
     WHERE documento_tipo = 'partida_paso_ejecucion' AND documento_id = p_ejecucion_id
@@ -2915,13 +3122,17 @@ BEGIN
     -- 4. Fetch reversal movement type IDs
     SELECT id INTO v_ing_rev_id     FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING_REV';
     SELECT id INTO v_consumo_rev_id FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO_REV';
+    SELECT id INTO v_prod_ing_id    FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_ING';
 
     SELECT nextval('inventario.mov_doc_seq') INTO v_doc_movimiento_id;
 
-    -- 5. PROD_ING_REV: reverse ingress of output lotes
+    -- 5. PROD_ING_REV: reverse ingress of output lotes. Each output lote has
+    -- exactly one PROD_ING row (documento_tipo/id + lote_id), so the link is
+    -- unambiguous — join straight to it instead of inferring by proximity.
     INSERT INTO inventario.item_movimientos(
         doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-        origen_ubicacion_id, cantidad, documento_tipo, documento_id
+        origen_ubicacion_id, cantidad, documento_tipo, documento_id,
+        reversion_movimiento_id
     )
     SELECT
         v_doc_movimiento_id,
@@ -2931,9 +3142,12 @@ BEGIN
         sa.ubicacion_id,
         l.cantidad,
         'partida_paso_ejecucion',
-        p_ejecucion_id
+        p_ejecucion_id,
+        ing.id
     FROM inventario.lote l
     JOIN inventario.vw_stock_lotes_ubicacion sa ON sa.lote_id = l.id
+    JOIN inventario.item_movimientos ing ON ing.lote_id               = l.id
+                                         AND ing.item_movimiento_tipo_id = v_prod_ing_id
     WHERE l.documento_tipo = 'partida_paso_ejecucion'
       AND l.documento_id   = p_ejecucion_id
       AND l.fyh_elm        IS NULL;
@@ -2944,9 +3158,15 @@ BEGIN
     --    Nets against any prior partial reversals (e.g. corregir_matizado) so
     --    already-reversed lots are not double-credited. Only lotes with net
     --    unconsumed quantity receive a reversal row.
+    --    reversion_movimiento_id: set only when the net reversal traces to a
+    --    single original PROD_CONSUMO row (the common case — one lote consumed
+    --    once). When multiple PROD_CONSUMO rows contributed to the same
+    --    (item_id, lote_id) net, a single FK cannot represent a many-to-one
+    --    reversal, so it is left NULL rather than picking one arbitrarily.
     INSERT INTO inventario.item_movimientos(
         doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-        destino_ubicacion_id, cantidad, documento_tipo, documento_id
+        destino_ubicacion_id, cantidad, documento_tipo, documento_id,
+        reversion_movimiento_id
     )
     SELECT
         v_doc_movimiento_id,
@@ -2956,13 +3176,16 @@ BEGIN
         agg.origen_ubicacion_id,
         agg.net_cantidad,
         'partida_paso_ejecucion',
-        p_ejecucion_id
+        p_ejecucion_id,
+        CASE WHEN agg.n_originales = 1 THEN agg.single_original_id ELSE NULL END
     FROM (
         SELECT
             m.item_id,
             m.lote_id,
             m.origen_ubicacion_id,
-            SUM(CASE WHEN m.item_movimiento_tipo_id = v_consumo_rev_id THEN -m.cantidad ELSE m.cantidad END) AS net_cantidad
+            SUM(CASE WHEN m.item_movimiento_tipo_id = v_consumo_rev_id THEN -m.cantidad ELSE m.cantidad END) AS net_cantidad,
+            COUNT(*)    FILTER (WHERE m.item_movimiento_tipo_id <> v_consumo_rev_id) AS n_originales,
+            (ARRAY_AGG(m.id ORDER BY m.id) FILTER (WHERE m.item_movimiento_tipo_id <> v_consumo_rev_id))[1] AS single_original_id
         FROM inventario.item_movimientos m
         WHERE m.documento_tipo          = 'partida_paso_ejecucion'
           AND m.documento_id            = p_ejecucion_id
@@ -3280,6 +3503,105 @@ GRANT EXECUTE ON FUNCTION mes.cerrar_partida(BIGINT) TO authenticated;
 GRANT USAGE on SCHEMA mes TO authenticated;
 
 -- ═══════════════════════════════════════════════════════════════
+-- ANULAR PARTIDA
+--
+-- Cancels a partida that has NOT posted anything yet: no ejecución has
+-- ever run and no assigned roll has been weighed. This is the only case
+-- where "cancel" is the correct verb — nothing to reverse, so it just
+-- releases the roll reservations and marks the order CANCELADA.
+--
+-- Once something is posted (pesaje and/or an ejecución), this function
+-- refuses and tells the caller what to reverse first:
+--   • pesaje recorded        → inventario.anular_pesaje
+--   • ejecución exists       → mes.anular_produccion / mes.anular_reproceso
+-- Only after those layers are clean does the partida become cancellable
+-- again. Past dispatch/invoicing there is no cancellation path at all —
+-- that is a devolución, not an anulación.
+--
+-- Releases mes.partida_componente roll reservations (lote_id rows) so the
+-- rolls are free to be reserved elsewhere; chemical reservations
+-- (item_id rows) are left for historical trace, same as elsewhere in mes.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.anular_partida(p_partida_id BIGINT)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'notification', 'public', 'mes', 'inventario'
+AS $function$
+DECLARE
+    v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id  int := get_user_id();
+    v_estado  partida_estado_produccion_enum;
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    SELECT estado_produccion INTO v_estado
+    FROM mes.partida
+    WHERE id = p_partida_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Partida #% no encontrada.', p_partida_id;
+    END IF;
+
+    IF v_estado IN ('TECO', 'CERRADA', 'CANCELADA') THEN
+        RAISE EXCEPTION 'Partida #% ya está en estado %; no se puede anular.', p_partida_id, v_estado;
+    END IF;
+
+    -- Guard: no ejecución has ever run on any paso of this partida
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_paso_ejecucion pe
+        JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+        WHERE pp.partida_id = p_partida_id
+    ) THEN
+        RAISE EXCEPTION
+            'Partida #%: ya tiene ejecuciones registradas. Anule cada ejecución (mes.anular_produccion / mes.anular_reproceso) antes de anular la partida.',
+            p_partida_id;
+    END IF;
+
+    -- Guard: no assigned roll has been weighed
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_componente pc
+        JOIN inventario.pesaje ps ON ps.lote_id = pc.lote_id
+        WHERE pc.partida_id = p_partida_id
+          AND pc.lote_id IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION
+            'Partida #%: tiene rollos ya pesados. Anule el pesaje (inventario.anular_pesaje) antes de anular la partida.',
+            p_partida_id;
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('anular_partida', v_usr_id, jsonb_build_object('partida_id', p_partida_id));
+
+    -- Release roll reservations — rolls return to available stock
+    DELETE FROM mes.partida_componente
+    WHERE partida_id = p_partida_id
+      AND lote_id IS NOT NULL;
+
+    UPDATE mes.partida
+    SET estado_produccion = 'CANCELADA',
+        usr_elm = v_usr_id,
+        fyh_elm = NOW()
+    WHERE id = p_partida_id;
+
+    RETURN format('Partida #%s anulada.', p_partida_id);
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_message=MESSAGE_TEXT, v_detail=PG_EXCEPTION_DETAIL,
+        v_hint=PG_EXCEPTION_HINT, v_context=PG_EXCEPTION_CONTEXT, v_sqlstate=RETURNED_SQLSTATE;
+    RAISE LOG 'Error in anular_partida - User: %, partida: %, Error: %', v_usr_id, p_partida_id, v_message;
+    RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION mes.anular_partida(BIGINT) TO authenticated;
+
+-- ═══════════════════════════════════════════════════════════════
 -- CREAR REPROCESO
 -- Branches failing rolls into a rework child partida.
 --
@@ -3300,7 +3622,7 @@ GRANT USAGE on SCHEMA mes TO authenticated;
 --     "fecha_acordada": "2026-06-01" optional — override delivery date
 --   }
 --
--- Immutable (always inherited from root): tercero_id, articulo_tipo_id, fibra,
+-- Immutable (always inherited from root): tercero_id, grupo_articulo_id, fibra,
 --   flg_antipilling, malla, ancho, rendimiento, color_x_cliente_id, tenido_id.
 -- Billing and commercial settlement always run on the root order.
 -- ═══════════════════════════════════════════════════════════════
@@ -3385,15 +3707,29 @@ BEGIN
     END IF;
 
     -- Create rework child. Immutable specs always inherited; fecha_acordada overridable.
+    -- grupo_articulo_id se hereda del origen igual que el resto de la identidad de
+    -- sustrato (migración 32: la columna es NOT NULL, así que omitirla rompe el
+    -- reproceso). grupo_articulo_id NO se escribe: lo deriva el trigger
+    -- trg_bi_partida_derive_grupo_articulo a partir del grupo.
+    -- flg_antipilling NO se hereda: el reproceso arranca sin el flag porque la
+    -- receta correctiva normalmente no vuelve a aplicar antipilling sobre un rollo
+    -- que ya lo tiene. Se deja constancia en observacion para que el planner decida
+    -- manualmente si el reproceso debe llevarlo.
     INSERT INTO mes.partida (
         partida_origen_id, prioridad_id, tercero_id, tenido_id,
-        color_x_cliente_id, articulo_tipo_id, fibra, malla, rendimiento,
-        ancho, flg_antipilling, fecha_acordada, estado_produccion, usr_cre
+        color_x_cliente_id, grupo_articulo_id, fibra, malla, rendimiento,
+        ancho, flg_doble_bolsa, observacion,
+        fecha_acordada, estado_produccion, usr_cre
     )
     VALUES (
         v_root_id, v_origen.prioridad_id, v_origen.tercero_id, v_origen.tenido_id,
-        v_origen.color_x_cliente_id, v_origen.articulo_tipo_id, v_origen.fibra,
-        v_origen.malla, v_origen.rendimiento, v_origen.ancho, v_origen.flg_antipilling,
+        v_origen.color_x_cliente_id, v_origen.grupo_articulo_id, v_origen.fibra,
+        v_origen.malla, v_origen.rendimiento, v_origen.ancho,
+        v_origen.flg_doble_bolsa,
+        CASE WHEN v_origen.flg_antipilling
+             THEN concat_ws(' | ', v_origen.observacion, 'Origen con antipilling')
+             ELSE v_origen.observacion
+        END,
         COALESCE((p_datos->>'fecha_acordada')::date, v_origen.fecha_acordada),
         'CREADA', v_usr_id
     )
@@ -3494,6 +3830,290 @@ $function$;
 GRANT EXECUTE ON FUNCTION mes.crear_reproceso(BIGINT, JSONB) TO authenticated;
 
 -- ═══════════════════════════════════════════════════════════════
+-- SHARED GUARD — a rework child may only be reversed/edited while it has
+-- produced NOTHING: no paso ejecuciones and no inventory movements tied to its
+-- pasos. Once production starts, moving rolls out corrupts genealogy/valuation.
+-- Raises with a clear message so the frontend can surface it verbatim.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes._assert_reproceso_reversible(p_reproceso_id BIGINT)
+RETURNS mes.partida
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_child mes.partida%ROWTYPE;
+BEGIN
+    SELECT * INTO v_child
+    FROM mes.partida
+    WHERE id = p_reproceso_id AND fyh_elm IS NULL
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Reproceso % no encontrado o ya anulado.', p_reproceso_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF v_child.partida_origen_id IS NULL THEN
+        RAISE EXCEPTION 'Partida % no es un reproceso (partida_origen_id IS NULL).', p_reproceso_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Gate 1: no paso ejecuciones
+    IF EXISTS (
+        SELECT 1 FROM mes.partida_paso pp
+        JOIN mes.partida_paso_ejecucion ppe ON ppe.partida_paso_id = pp.id
+        WHERE pp.partida_id = p_reproceso_id
+    ) THEN
+        RAISE EXCEPTION 'Reproceso % ya tiene ejecuciones de paso; no puede revertirse. Anule la producción primero.', p_reproceso_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Gate 2: no movements tied to its pasos' ejecuciones (belt-and-suspenders)
+    IF EXISTS (
+        SELECT 1 FROM inventario.item_movimientos im
+        WHERE im.documento_tipo = 'partida_paso_ejecucion'
+          AND im.documento_id IN (
+              SELECT ppe.id FROM mes.partida_paso pp
+              JOIN mes.partida_paso_ejecucion ppe ON ppe.partida_paso_id = pp.id
+              WHERE pp.partida_id = p_reproceso_id
+          )
+    ) THEN
+        RAISE EXCEPTION 'Reproceso % tiene movimientos de inventario; no puede revertirse.', p_reproceso_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    RETURN v_child;
+END;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- MOVER LOTES DE REPROCESO  (partial correction)
+-- Operator over-selected rolls when creating a rework (or a wrong QC verdict
+-- pulled rolls that shouldn't rework). Move a SUBSET of the child's rolls back
+-- to the family root, without destroying the child.
+--
+-- Undoes, per moved roll, what crear_reproceso did (Case A input rolls):
+--   • partida_componente.partida_id  child → root
+--   • lote.estado_calidad restored from the last inspeccion verdict that
+--     PRECEDES the rework (the state the roll had before being pulled in);
+--     falls back to PENDIENTE if none. Overridable via p_estado_calidad.
+--   • deletes the erroneous inspeccion rows that assigned the rework verdict
+--     (only those tied to the root's pasos — the verdict that caused the pull)
+--   • recomputes partida_detalle.cantidad (roll count) on BOTH child and root
+--
+-- Guard: child must not have produced anything (see _assert_reproceso_reversible).
+-- If ALL of the child's rolls are moved out, the child is soft-deleted too
+-- (equivalent to anular_reproceso) so no empty rework lingers.
+--
+-- p_lote_ids: rolls to send back. Must all currently be components of the child.
+-- p_estado_calidad: optional override (e.g. force 'PENDIENTE' to re-inspect).
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.mover_lotes_reproceso(
+    p_reproceso_id   BIGINT,
+    p_lote_ids       INT[],
+    p_estado_calidad calidad_estado_enum DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes','inventario','calidad'
+AS $function$
+DECLARE
+    v_message  text; v_detail text; v_hint text; v_context text; v_sqlstate text;
+    v_usr_id   INT := get_user_id();
+    v_child    mes.partida%ROWTYPE;
+    v_root_id  BIGINT;
+    v_bad      INT[];
+    v_moved    INT;
+    v_remaining INT;
+    v_child_deleted BOOLEAN := false;
+BEGIN
+    IF NOT jwt_has_permission('produccion.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF p_lote_ids IS NULL OR array_length(p_lote_ids, 1) IS NULL THEN
+        RAISE EXCEPTION 'Se requiere al menos un lote para mover.';
+    END IF;
+
+    v_child   := mes._assert_reproceso_reversible(p_reproceso_id);
+    v_root_id := v_child.partida_origen_id;
+
+    -- Every supplied lote must currently be a component of THIS child.
+    SELECT ARRAY_AGG(u) INTO v_bad
+    FROM UNNEST(p_lote_ids) u
+    WHERE NOT EXISTS (
+        SELECT 1 FROM mes.partida_componente pc
+        WHERE pc.partida_id = p_reproceso_id AND pc.lote_id = u
+    );
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'Lotes % no son componentes del reproceso %.', v_bad, p_reproceso_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- 1) Move the componente rows back to the root.
+    UPDATE mes.partida_componente
+    SET partida_id = v_root_id, usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE partida_id = p_reproceso_id
+      AND lote_id = ANY(p_lote_ids);
+    GET DIAGNOSTICS v_moved = ROW_COUNT;
+
+    -- 2) Restore estado_calidad per roll: explicit override, else the verdict
+    --    immediately preceding the rework pull, else PENDIENTE.
+    UPDATE inventario.lote l
+    SET estado_calidad = COALESCE(
+            p_estado_calidad,
+            -- last NON-rework verdict (the state before it was wrongly pulled);
+            -- exclude REPROCESO/BAJA so we never restore the erroneous verdict.
+            (SELECT ci.resultado
+             FROM calidad.inspeccion ci
+             JOIN mes.partida_paso_ejecucion ppe ON ppe.id = ci.partida_paso_ejecucion_id
+             JOIN mes.partida_paso pp ON pp.id = ppe.partida_paso_id
+             WHERE ci.lote_id = l.id
+               AND pp.partida_id = v_root_id
+               AND ci.resultado NOT IN ('REPROCESO','BAJA')
+             ORDER BY ci.fyh_cre DESC
+             LIMIT 1),
+            'PENDIENTE'::calidad_estado_enum
+        ),
+        usr_mod = v_usr_id, fyh_mod = NOW()
+    WHERE l.id = ANY(p_lote_ids);
+
+    -- 3) Delete the erroneous rework verdict rows on the root's pasos for these
+    --    rolls (the REPROCESO/BAJA inspection that pulled them in). inspeccion
+    --    has no soft-delete, so hard DELETE — the verdict was itself the error.
+    DELETE FROM calidad.inspeccion ci
+    USING mes.partida_paso_ejecucion ppe, mes.partida_paso pp
+    WHERE ci.partida_paso_ejecucion_id = ppe.id
+      AND ppe.partida_paso_id = pp.id
+      AND pp.partida_id = v_root_id
+      AND ci.lote_id = ANY(p_lote_ids)
+      AND ci.resultado IN ('REPROCESO','BAJA');
+
+    -- 4) If the child now has no rolls left, soft-delete it (full undo).
+    SELECT COUNT(*) INTO v_remaining
+    FROM mes.partida_componente WHERE partida_id = p_reproceso_id AND lote_id IS NOT NULL;
+
+    IF v_remaining = 0 THEN
+        UPDATE mes.partida
+        SET estado_produccion = 'CANCELADA', fyh_elm = NOW(), usr_elm = v_usr_id
+        WHERE id = p_reproceso_id;
+        v_child_deleted := true;
+    END IF;
+
+    -- 5) Recompute partida_detalle roll-count intent on the CHILD only.
+    --    The root's partida_detalle is original demand/intent — crear_reproceso
+    --    never decremented it when the rolls left, so we must not re-derive it
+    --    from components on the way back (that would overwrite demand with a live
+    --    component count). Leave the root's detalle untouched.
+    IF NOT v_child_deleted THEN
+        PERFORM mes._recount_reproceso_detalle(p_reproceso_id);
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('mover_lotes_reproceso', v_usr_id,
+            jsonb_build_object('reproceso_id', p_reproceso_id, 'lote_ids', p_lote_ids,
+                               'estado_calidad', p_estado_calidad));
+
+    RETURN jsonb_build_object(
+        'reproceso_id',    p_reproceso_id,
+        'partida_root_id', v_root_id,
+        'lotes_movidos',   v_moved,
+        'reproceso_anulado', v_child_deleted,
+        'message', format('%s rollo(s) devuelto(s) a la partida %s%s.',
+                          v_moved, v_root_id,
+                          CASE WHEN v_child_deleted
+                               THEN format('; reproceso %s anulado (sin rollos)', p_reproceso_id)
+                               ELSE '' END)
+    );
+
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS
+            v_message = MESSAGE_TEXT, v_detail = PG_EXCEPTION_DETAIL,
+            v_hint = PG_EXCEPTION_HINT, v_context = PG_EXCEPTION_CONTEXT,
+            v_sqlstate = RETURNED_SQLSTATE;
+        RAISE LOG 'Error in mover_lotes_reproceso - User: %, Reproceso: %, Lotes: %, Error: %, Detail: %',
+                  v_usr_id, p_reproceso_id, p_lote_ids, v_message, v_detail;
+        RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION mes.mover_lotes_reproceso(BIGINT, INT[], calidad_estado_enum) TO authenticated;
+
+-- ═══════════════════════════════════════════════════════════════
+-- ANULAR REPROCESO  (full undo)
+-- Move ALL of the rework child's rolls back to the family root and soft-delete
+-- the child. Thin wrapper over mover_lotes_reproceso with the child's full roll
+-- set — so the guard, QC restore, verdict cleanup, and detalle recount are all
+-- shared and consistent.
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION mes.anular_reproceso(
+    p_reproceso_id   BIGINT,
+    p_estado_calidad calidad_estado_enum DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam','notification','public','mes','inventario','calidad'
+AS $function$
+DECLARE
+    v_usr_id  INT := get_user_id();
+    v_lotes   INT[];
+BEGIN
+    IF NOT jwt_has_permission('produccion.crear') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere produccion.crear'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Guard early (also locks the child) and confirm it's a reproceso.
+    PERFORM mes._assert_reproceso_reversible(p_reproceso_id);
+
+    SELECT ARRAY_AGG(lote_id) INTO v_lotes
+    FROM mes.partida_componente
+    WHERE partida_id = p_reproceso_id AND lote_id IS NOT NULL;
+
+    IF v_lotes IS NULL THEN
+        -- No rolls at all — just soft-delete the empty child.
+        UPDATE mes.partida
+        SET estado_produccion = 'CANCELADA', fyh_elm = NOW(), usr_elm = v_usr_id
+        WHERE id = p_reproceso_id;
+
+        INSERT INTO logs_api(function_name, user_id, params)
+        VALUES ('anular_reproceso', v_usr_id,
+                jsonb_build_object('reproceso_id', p_reproceso_id, 'lotes', '[]'::jsonb));
+
+        RETURN jsonb_build_object('reproceso_id', p_reproceso_id, 'reproceso_anulado', true,
+                                  'lotes_movidos', 0,
+                                  'message', format('Reproceso %s anulado (no tenía rollos).', p_reproceso_id));
+    END IF;
+
+    RETURN mes.mover_lotes_reproceso(p_reproceso_id, v_lotes, p_estado_calidad);
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION mes.anular_reproceso(BIGINT, calidad_estado_enum) TO authenticated;
+
+-- Recount a partida's partida_detalle.cantidad (roll-count intent) from its
+-- current lote components. One row per output item_id present in components.
+CREATE OR REPLACE FUNCTION mes._recount_reproceso_detalle(p_partida_id BIGINT)
+RETURNS void
+LANGUAGE sql
+AS $function$
+    UPDATE mes.partida_detalle pd
+    SET cantidad = GREATEST(sub.n, 1),
+        usr_mod = get_user_id(), fyh_mod = NOW()
+    FROM (
+        SELECT l.item_id, COUNT(*) AS n
+        FROM mes.partida_componente pc
+        JOIN inventario.lote l ON l.id = pc.lote_id
+        WHERE pc.partida_id = p_partida_id AND pc.lote_id IS NOT NULL
+        GROUP BY l.item_id
+    ) sub
+    WHERE pd.partida_id = p_partida_id AND pd.item_id = sub.item_id;
+$function$;
+
+-- ═══════════════════════════════════════════════════════════════
 -- GET PARTIDA  (canonical — overrides the copy in core.sql)
 -- ═══════════════════════════════════════════════════════════════
 -- Returns full production order detail: header, pasos (with flg_ultimo),
@@ -3523,8 +4143,8 @@ BEGIN
         'color_hex', vc.color_hex,
         'color_x_cliente_hex', vc.color_x_cliente_hex,
         'tono', vc.tono,
-        'articulo_tipo_id', p.articulo_tipo_id,
-        'articulo_tipo', at.nombre,
+        'grupo_articulo_id', p.grupo_articulo_id,
+        'grupo_articulo', ga.nombre,
         'flg_antipilling', p.flg_antipilling,
         'tenido_id', p.tenido_id,
         'tenido', tenido.tenido,
@@ -3691,7 +4311,9 @@ BEGIN
                                 'id',                  pe.id,
                                 'receta_id',           pe.receta_id,
                                 'maquina_id',          pe.maquina_id,
+                                'maquina_nombre',      maq_pe.nombre,
                                 'empleado_id',         pe.empleado_id,
+                                'empleado_nombre',     CONCAT(emp_pe.nombre, ' ', emp_pe.apellido),
                                 'estado',              pe.estado,
                                 'fyh_inicio',          pe.fyh_inicio,
                                 'fyh_fin',             pe.fyh_fin,
@@ -3719,34 +4341,46 @@ BEGIN
                                 ) END,
                                 'consumo', COALESCE((
                                     SELECT jsonb_agg(jsonb_build_object(
-                                        'id',                  m.id,
-                                        'item_id',             m.item_id,
-                                        'item_codigo',         vi_mov.item_codigo,
-                                        'item_nombre',         vi_mov.item_nombre,
-                                        'lote_id',             m.lote_id,
-                                        'cantidad',            m.cantidad,
-                                        'unidad',              vi_mov.unidad_codigo,
-                                        'motivo_id',           m.motivo_id,
-                                        'motivo_codigo',       mot.codigo,
-                                        'origen_ubicacion_id', m.origen_ubicacion_id,
-                                        'origen_ubicacion',    ubi.nombre,
-                                        'origen_almacen',      al.nombre
-                                    ) ORDER BY m.fyh_cre)
-                                    FROM inventario.item_movimientos m
-                                    LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
-                                    LEFT JOIN inventario.item_movimiento_motivo mot ON mot.id = m.motivo_id
-                                    LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
-                                    LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
-                                    WHERE m.documento_tipo          = 'partida_paso_ejecucion'
-                                      AND m.documento_id            = pe.id
-                                      AND m.item_movimiento_tipo_id = (
-                                          SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'PROD_CONSUMO'
-                                      )
+                                        'item_id',             sub.item_id,
+                                        'item_codigo',         sub.item_codigo,
+                                        'item_nombre',         sub.item_nombre,
+                                        'lote_id',             sub.lote_id,
+                                        'cantidad',            sub.cantidad,
+                                        'unidad',              sub.unidad,
+                                        'motivo_id',           sub.motivo_id,
+                                        'motivo_codigo',       sub.motivo_codigo,
+                                        'origen_ubicacion_id', sub.origen_ubicacion_id,
+                                        'origen_ubicacion',    sub.origen_ubicacion,
+                                        'origen_almacen',      sub.origen_almacen
+                                    ) ORDER BY sub.item_nombre)
+                                    FROM (
+                                        SELECT m.item_id, vi_mov.item_codigo, vi_mov.item_nombre, m.lote_id,
+                                               SUM(CASE WHEN mt.codigo = 'PROD_CONSUMO_REV' THEN -m.cantidad ELSE m.cantidad END) AS cantidad,
+                                               vi_mov.unidad_codigo AS unidad, m.motivo_id, mot.codigo AS motivo_codigo,
+                                               m.origen_ubicacion_id, ubi.nombre AS origen_ubicacion, al.nombre AS origen_almacen
+                                        FROM inventario.item_movimientos m
+                                        LEFT JOIN vw_items vi_mov ON vi_mov.item_id = m.item_id
+                                        LEFT JOIN inventario.item_movimiento_tipo mt ON mt.id = m.item_movimiento_tipo_id
+                                        LEFT JOIN inventario.item_movimiento_motivo mot ON mot.id = m.motivo_id
+                                        LEFT JOIN inventario.ubicacion ubi ON ubi.id = m.origen_ubicacion_id
+                                        LEFT JOIN inventario.almacen al ON al.id = ubi.almacen_id
+                                        WHERE m.documento_tipo          = 'partida_paso_ejecucion'
+                                          AND m.documento_id            = pe.id
+                                          AND m.item_movimiento_tipo_id IN (
+                                              SELECT id FROM inventario.item_movimiento_tipo WHERE codigo IN ('PROD_CONSUMO', 'PROD_CONSUMO_REV')
+                                          )
+                                        GROUP BY m.item_id, vi_mov.item_codigo, vi_mov.item_nombre, m.lote_id,
+                                                 vi_mov.unidad_codigo, m.motivo_id, mot.codigo,
+                                                 m.origen_ubicacion_id, ubi.nombre, al.nombre
+                                        HAVING SUM(CASE WHEN mt.codigo = 'PROD_CONSUMO_REV' THEN -m.cantidad ELSE m.cantidad END) > 0
+                                    ) sub
                                 ), '[]'::jsonb)
                             ) ORDER BY pe.fyh_inicio
                         )
                         FROM mes.partida_paso_ejecucion pe
                         LEFT JOIN mes.partida_paso_ejecucion_termofijado pt ON pt.ejecucion_id = pe.id
+                        LEFT JOIN mes.maquina maq_pe ON maq_pe.id = pe.maquina_id
+                        LEFT JOIN mes.empleado emp_pe ON emp_pe.id = pe.empleado_id
                         WHERE pe.partida_paso_id = opp.id
                     ), '[]'::jsonb)
                 ) ORDER BY opp.secuencia
@@ -3839,6 +4473,7 @@ BEGIN
             LEFT JOIN inventario.lote_rollo_detalle lrd_out ON lrd_out.lote_id = l.id
             LEFT JOIN doc.entrega gr_out ON gr_out.id = lrd_out.entrega_id
             WHERE l.documento_tipo = 'partida_paso_ejecucion'
+              AND l.fyh_elm        IS NULL
         ), '[]'::jsonb),
 
         -- Lotes flagged for reproceso — two sources:
@@ -3865,6 +4500,7 @@ BEGIN
                 LEFT JOIN vw_items vi ON vi.item_id = l.item_id
                 WHERE l.documento_tipo = 'partida_paso_ejecucion'
                   AND l.estado_calidad = 'REPROCESO'
+                  AND l.fyh_elm        IS NULL
                 UNION ALL
                 -- Source 2: reserved input lotes flagged before production completes
                 SELECT l.id AS lote_id,
@@ -3899,7 +4535,7 @@ BEGIN
     LEFT JOIN tercero c           ON c.id = p.tercero_id
     LEFT JOIN tenido              ON tenido.id = p.tenido_id
     LEFT JOIN vw_colores vc       ON vc.color_x_cliente_id = p.color_x_cliente_id
-    LEFT JOIN articulo_tipo at    ON at.id = p.articulo_tipo_id
+    LEFT JOIN grupo_articulo ga    ON ga.id = p.grupo_articulo_id
     WHERE p.id = p_partida_id;
 
     RETURN v_result;
@@ -3955,8 +4591,8 @@ BEGIN
                                    || '-' || LPAD(r.numero::TEXT, 4, '0'),
         'tercero_id',          r.tercero_id,
         'cliente',             c.nombre,
-        'articulo_tipo_id',    r.articulo_tipo_id,
-        'articulo_tipo',       at.nombre,
+        'grupo_articulo_id',   r.grupo_articulo_id,
+        'grupo_articulo',       ga.nombre,
         'color_x_cliente_id',  r.color_x_cliente_id,
         'color',               vc.color,
         'color_hex',           vc.color_hex,
@@ -4067,7 +4703,7 @@ BEGIN
     ) INTO v_result
     FROM mes.partida r
     LEFT JOIN tercero c        ON c.id  = r.tercero_id
-    LEFT JOIN articulo_tipo at ON at.id = r.articulo_tipo_id
+    LEFT JOIN grupo_articulo ga ON ga.id = r.grupo_articulo_id
     LEFT JOIN vw_colores vc    ON vc.color_x_cliente_id = r.color_x_cliente_id
     LEFT JOIN prioridad pri    ON pri.id = r.prioridad_id
     WHERE r.id = v_root_id;
@@ -4258,16 +4894,34 @@ BEGIN
 
     v_fyh_fin := COALESCE((p_datos->>'fyh_fin')::TIMESTAMPTZ, now());
 
-    -- Aggregate insumos across all recipe pasos, summed by item (fixed quantities, no scaling)
-    SELECT jsonb_agg(jsonb_build_object('item_id', item_id, 'cantidad', cantidad))
-    INTO v_insumos
-    FROM (
-        SELECT lmpi.item_id, SUM(lmpi.cantidad) AS cantidad
-        FROM receta.lavado_maquina_paso     lmp
-        JOIN receta.lavado_maquina_paso_insumo lmpi ON lmpi.paso_id = lmp.id
-        WHERE lmp.receta_id = v_lavado.receta_id
-        GROUP BY lmpi.item_id
-    ) agg;
+    -- Consumption source:
+    --   • If p_datos.insumos is supplied it REDEFINES what is consumed — the
+    --     operator's list is authoritative (adjusted quantities, added/removed
+    --     items, or an empty/all-zero list for "sin consumo"). Rows with
+    --     cantidad <= 0 are dropped; if none remain, v_insumos is NULL and no
+    --     movements are posted. Machine-wash recipes are theoretical and
+    --     routinely need manual adjustment before running, so this is the
+    --     normal path from the finalize UI.
+    --   • Otherwise fall back to the recipe aggregate (legacy behavior),
+    --     summed by item across all pasos (fixed quantities, no scaling).
+    IF p_datos ? 'insumos' THEN
+        SELECT jsonb_agg(jsonb_build_object(
+                   'item_id',  (e->>'item_id')::INT,
+                   'cantidad', (e->>'cantidad')::NUMERIC))
+        INTO v_insumos
+        FROM jsonb_array_elements(p_datos->'insumos') e
+        WHERE (e->>'cantidad')::NUMERIC > 0;
+    ELSE
+        SELECT jsonb_agg(jsonb_build_object('item_id', item_id, 'cantidad', cantidad))
+        INTO v_insumos
+        FROM (
+            SELECT lmpi.item_id, SUM(lmpi.cantidad) AS cantidad
+            FROM receta.lavado_maquina_paso     lmp
+            JOIN receta.lavado_maquina_paso_insumo lmpi ON lmpi.paso_id = lmp.id
+            WHERE lmp.receta_id = v_lavado.receta_id
+            GROUP BY lmpi.item_id
+        ) agg;
+    END IF;
 
     IF v_insumos IS NOT NULL THEN
         -- Stock check

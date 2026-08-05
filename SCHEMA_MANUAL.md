@@ -1835,8 +1835,7 @@ Also updates `inventario.lote.estado_calidad = resultado` and sends notification
 | `vw_lotes_rollos_disponibles` | Available rolls: `vw_lotes_rollos_stock` minus rolls reserved by non-CERRADA/CANCELADA partidas. ≈ SAP MD04. |
 | `vw_stock_rollos_crudos` | Undyed rolls in stock. Grouped by (item × propietario). |
 | `vw_stock_rollos_tenidos` | Dyed rolls in stock. Grouped by full spec identity (color + tenido + dimensions + quality). |
-| `vw_stock_insumos` | Insumo totals with tipo/colorante from `item_saldo`. |
-| `vw_precio_promedio_insumos` | Weighted avg cost per insumo. Source priority: `factura_proveedor_detalle` > `compra_detalle` (fallback for items with no invoice lines). |
+| `vw_stock_insumos` | Insumo net stock (`item_saldo`, `<> 0`) with tipo/colorante attributes + MAP valuation (`precio_promedio`, `stock_valorado` from `item_valoracion` — same carrying-value source as `vw_stock_items_valorado`). Flat single-pass; `authenticated` only (exposes cost). |
 | `vw_lotes_disponibles` | All available lots (any type) with lote code, location, quantity. |
 | `vw_item_proveedor_entrega` | Items × suppliers from inbound entregas. Purchase history lookup. |
 | `vw_lotes_rollos_despachados` | Rolls with zero stock and a non-production egress. Linked back to originating partida. |

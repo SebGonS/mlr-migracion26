@@ -102,8 +102,16 @@ CREATE TRIGGER trg_bi_receta_tenido_flg_produccion
 BEFORE INSERT OR UPDATE OF estado_id ON receta.tenido
 FOR EACH ROW EXECUTE FUNCTION fn_trg_receta_tenido_flg_produccion();
 
+-- tipo_receta_id IS part of the key: receta.tenido is shared across recipe types,
+-- so the same (color, articulo_tipo, fibra, tenido, antipilling) legitimately has
+-- one approved row per tipo_receta (TENIDO / REPROCESO / desmontado / rebaje…).
+-- ~50 such groups exist live. Corrected 2026-07-18: this definition previously
+-- omitted tipo_receta_id and did not match the live index, so a full replay would
+-- have built a narrower index that rejects those legitimate pairs.
+-- Superseded by migration/31 (articulo_tipo_id → grupo_articulo_id).
 CREATE UNIQUE INDEX uq_receta_tenido_aprobada
-    ON receta.tenido(color_x_cliente_id, articulo_tipo_id, fibra, tenido_id, flg_antipilling)
+    ON receta.tenido(color_x_cliente_id, articulo_tipo_id, fibra, tenido_id,
+                     flg_antipilling, tipo_receta_id)
     WHERE flg_produccion = true;
 
 -- ── receta.tenido_paso ────────────────────────────────────────

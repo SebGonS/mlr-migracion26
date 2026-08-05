@@ -12,6 +12,10 @@ CREATE SCHEMA IF NOT EXISTS doc;
 CREATE SCHEMA IF NOT EXISTS calidad;
 CREATE SCHEMA IF NOT EXISTS receta;
 CREATE SCHEMA IF NOT EXISTS audit;
+-- reporte: BI/reporting contract. Flat, typed views owned by postgres (so
+-- they bypass RLS for a read-only login role). NOT exposed via PostgREST/anon.
+-- Consumed by Power BI (Import mode) as `powerbi_reader`. See migration/41.
+CREATE SCHEMA IF NOT EXISTS reporte;
 
 -- Supabase storage bucket (only needed once, idempotent via ON CONFLICT)
 INSERT INTO storage.buckets (id, name, public)

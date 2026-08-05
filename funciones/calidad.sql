@@ -174,6 +174,10 @@ BEGIN
         'empleado', e.nombre,
         'fyh_inspeccion', i.fyh_inspeccion,
         'fyh_cre', i.fyh_cre,
+        'color_id', vc.color_id,
+        'color_nombre', vc.color,
+        'color_hex', vc.color_hex,
+        'color_x_cliente_hex', vc.color_x_cliente_hex,
 
         'defectos', COALESCE((
             SELECT jsonb_agg(jsonb_build_object(
@@ -203,6 +207,10 @@ BEGIN
     INTO v_result
     FROM calidad.inspeccion i
     LEFT JOIN mes.empleado e ON e.id = i.empleado_id
+    LEFT JOIN mes.partida_paso_ejecucion ppe ON ppe.id = i.partida_paso_ejecucion_id
+    LEFT JOIN mes.partida_paso           pp  ON pp.id  = ppe.partida_paso_id
+    LEFT JOIN mes.partida                p   ON p.id   = pp.partida_id
+    LEFT JOIN vw_colores                 vc  ON vc.color_x_cliente_id = p.color_x_cliente_id
     WHERE i.id = p_inspeccion_id;
 
     RETURN v_result;
@@ -210,7 +218,16 @@ END;
 $function$;
 
 
-CREATE OR REPLACE FUNCTION calidad.get_lotes_pendientes_partida(p_partida_id bigint)
+-- Adding p_solo_output changes arity; CREATE OR REPLACE won't replace the old
+-- 1-arg overload, so drop it explicitly to avoid leaving a stale duplicate.
+DROP FUNCTION IF EXISTS calidad.get_lotes_pendientes_partida(bigint);
+-- Drop the 2-arg signature too: adding flg_rib changes the RETURNS TABLE shape,
+-- which CREATE OR REPLACE cannot do in place (return-type change requires a drop).
+DROP FUNCTION IF EXISTS calidad.get_lotes_pendientes_partida(bigint, boolean);
+CREATE OR REPLACE FUNCTION calidad.get_lotes_pendientes_partida(
+    p_partida_id bigint,
+    p_solo_output boolean DEFAULT false
+)
 RETURNS TABLE (
     lote_id                   int,
     lote_codigo               text,
@@ -224,13 +241,30 @@ RETURNS TABLE (
     maquina_codigo            text,
     ancho                     text,
     peso                      numeric,
-    fecha_creacion_lote       timestamptz
+    color_id                  int,
+    color_nombre              text,
+    color_hex                 text,
+    color_x_cliente_hex       text,
+    fecha_creacion_lote       timestamptz,
+    -- Actual production/output date (resolving ejecución's fyh_fin). Prefer this over
+    -- fecha_creacion_lote for display: the latter is the migration timestamp for backfilled
+    -- rolls. Null for in-process input rolls whose ejecución hasn't finished.
+    fecha_produccion          timestamptz,
+    -- Display-only label for a RIB / Regular badge. Lives on item_rollo_detalle
+    -- (PK item_id), so it's a property of the item, not the lote — rib and regular
+    -- are distinct item_ids that may share a display nombre. item_id is the grouping
+    -- discriminator; flg_rib is just shown, not filtered or keyed on. Left nullable:
+    -- a missing detail row reads as unknown, not a misleading "Regular".
+    flg_rib                   boolean
 )
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path TO 'iam','public','calidad','inventario','mes'
 AS $$
+    -- p_solo_output: when true, restricts to finished output rolls (es_output) —
+    -- for the "final QC" flow, so mid-process componente/input rolls from earlier
+    -- pasos don't bleed into a screen meant to show only closure-step output.
     SELECT
         v.lote_id,
         v.lote_codigo,
@@ -244,10 +278,18 @@ AS $$
         v.maquina_codigo,
         v.ancho,
         l.cantidad  AS peso,
-        v.fecha_creacion_lote
+        v.color_id,
+        v.color_nombre,
+        v.color_hex,
+        v.color_x_cliente_hex,
+        v.fecha_creacion_lote,
+        v.fecha_produccion,
+        ird.flg_rib
     FROM calidad.vw_lotes_pendientes_inspeccion v
     JOIN inventario.lote l ON l.id = v.lote_id
+    LEFT JOIN item_rollo_detalle ird ON ird.item_id = v.item_id
     WHERE v.partida_id = p_partida_id
+      AND (NOT p_solo_output OR v.es_output)
     ORDER BY v.partida_paso_ejecucion_id, v.fecha_creacion_lote;
 $$;
 
@@ -612,5 +654,5 @@ GRANT EXECUTE ON FUNCTION calidad.dar_de_baja_lote(INT) TO authenticated;
 
 GRANT EXECUTE ON FUNCTION calidad.crear_inspeccion(jsonb)               TO authenticated;
 GRANT EXECUTE ON FUNCTION calidad.get_inspeccion(bigint)                 TO authenticated;
-GRANT EXECUTE ON FUNCTION calidad.get_lotes_pendientes_partida(bigint)   TO authenticated;
+GRANT EXECUTE ON FUNCTION calidad.get_lotes_pendientes_partida(bigint, boolean)   TO authenticated;
 GRANT EXECUTE ON FUNCTION calidad.bulk_aprobar_lotes(int[], int, text)   TO authenticated;

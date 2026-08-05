@@ -152,7 +152,7 @@ WHERE NOT EXISTS (
 -- Replaces the old "ordenes de produccion" view: after the schema redesign
 -- mes.partida IS the commercial order. Paso execution state is derived from
 -- partida_paso_ejecucion (no estado column on partida_paso anymore).
-DROP VIEW IF EXISTS mes.vw_partidas;
+DROP VIEW IF EXISTS mes.vw_partidas CASCADE;
 CREATE OR REPLACE VIEW mes.vw_partidas AS
 SELECT
     p.id,
@@ -177,8 +177,8 @@ SELECT
     vc.color_hex,
     p.tenido_id,
     t.tenido,
-    p.articulo_tipo_id,
-    at.nombre                                                              AS articulo_tipo,
+    p.grupo_articulo_id,
+    ga.nombre                                                              AS grupo_articulo,
     p.fibra,
     p.flg_antipilling,
     p.flg_doble_bolsa,
@@ -219,7 +219,7 @@ FROM mes.partida p
 LEFT JOIN tercero c        ON c.id  = p.tercero_id
 LEFT JOIN vw_colores vc    ON vc.color_x_cliente_id = p.color_x_cliente_id
 LEFT JOIN tenido t         ON t.id  = p.tenido_id
-LEFT JOIN articulo_tipo at ON at.id = p.articulo_tipo_id
+LEFT JOIN grupo_articulo ga ON ga.id = p.grupo_articulo_id
 LEFT JOIN prioridad pr     ON pr.id = p.prioridad_id
 LEFT JOIN usuario prof     ON prof.id = p.usr_cre
 LEFT JOIN LATERAL (
@@ -326,6 +326,7 @@ GRANT SELECT ON mes.vw_partida_familia_output TO anon, authenticated;
 --   flg_cumplida            producido_bueno >= demanda (and demanda > 0)
 --   num_reprocesos          count of rework children
 --   tiene_rework_activo     a child still open (not TECO/CERRADA/CANCELADA)
+DROP VIEW IF EXISTS mes.vw_partida_familia CASCADE;
 CREATE OR REPLACE VIEW mes.vw_partida_familia AS
 WITH demanda AS (
     SELECT pd.partida_id AS root_id, SUM(pd.cantidad) AS demanda_rollos
@@ -348,8 +349,8 @@ SELECT
         || '-' || LPAD(r.numero::TEXT, 4, '0')    AS codigo,
     r.tercero_id,
     c.nombre                                      AS cliente,
-    r.articulo_tipo_id,
-    at.nombre                                     AS articulo_tipo,
+    r.grupo_articulo_id,
+    ga.nombre                                     AS grupo_articulo,
     r.color_x_cliente_id,
     vc.color,
     vc.color_hex,
@@ -383,7 +384,7 @@ FROM mes.partida r
 LEFT JOIN demanda d        ON d.root_id = r.id
 LEFT JOIN salida  s        ON s.root_id = r.id
 LEFT JOIN tercero c        ON c.id  = r.tercero_id
-LEFT JOIN articulo_tipo at ON at.id = r.articulo_tipo_id
+LEFT JOIN grupo_articulo ga ON ga.id = r.grupo_articulo_id
 LEFT JOIN vw_colores vc    ON vc.color_x_cliente_id = r.color_x_cliente_id
 LEFT JOIN prioridad pr     ON pr.id = r.prioridad_id
 WHERE r.partida_origen_id IS NULL      -- roots only; children fold into the parent
@@ -534,7 +535,7 @@ GRANT SELECT ON doc.vw_facturas_proveedor TO authenticated;
 -- Designed for time-series and supplier purchase analysis; the frontend
 -- pivots months into columns.
 --
--- Source priority (same pattern as vw_precio_promedio_insumos):
+-- Source priority (factura-over-compra fallback):
 --   1. factura_proveedor_detalle — authoritative when invoice lines are entered.
 --   2. compra_detalle via compra_factura_proveedor — fallback for facturas that
 --      have no detail lines (legacy migration: headers only, no line breakdown).
@@ -841,7 +842,9 @@ SELECT
     c.nombre                            AS propietario,
     p.id AS partida_id,
     EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo,
-    lrd.entrega_id
+    lrd.entrega_id,
+    e.serie                             AS entrega_serie,
+    e.correlativo                       AS entrega_correlativo
 FROM inventario.lote l
 JOIN mov m                              ON m.lote_id = l.id AND m.saldo <= 0 AND m.has_egreso
 JOIN item i                             ON i.id = l.item_id
@@ -854,7 +857,100 @@ LEFT JOIN tercero c                     ON c.id = l.propietario_id
 LEFT JOIN mes.partida_paso_ejecucion pe ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
 LEFT JOIN mes.partida_paso pp          ON pp.id = pe.partida_paso_id
 LEFT JOIN mes.partida p                ON p.id = pp.partida_id
-LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_cliente_id;
+LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_cliente_id
+LEFT JOIN doc.entrega e                 ON e.id = lrd.entrega_id;
+
+
+-- ── inventario.vw_venta_rollos_devolvibles ───────────────────────
+-- Locates rolls a client can return under a given venta (client-QC dyed
+-- return, concept #2 in DEVOLUCION_REPROCESO_FLOW_SPEC.md), so the frontend
+-- can launch registrar_devolucion_cliente from a venta screen.
+--
+-- NOTE: does NOT reuse lrd.entrega_id (that carries the INGRESS anchor
+-- forward through production — see mes.sql registrar_produccion — so its
+-- venta_id is always NULL). The dispatch entrega/venta is instead derived
+-- from the roll's own egress movement, same pattern as
+-- doc.registrar_devolucion_cliente's entrega_origen_id derivation.
+--
+-- Eligibility: still out with the client (net saldo <= 0 since its last
+-- dispatch). No separate "already returned" check is needed — a return
+-- posts an ingress movement that brings saldo back >= 0, which drops the
+-- roll out of this view on its own; the ledger is the single source of truth.
+CREATE OR REPLACE VIEW inventario.vw_venta_rollos_devolvibles AS
+WITH ultimo_despacho AS (
+    SELECT DISTINCT ON (im.lote_id)
+        im.lote_id,
+        im.documento_id AS entrega_id,
+        e.venta_id,
+        et.codigo        AS entrega_tipo_codigo
+    FROM inventario.item_movimientos im
+    JOIN doc.entrega e      ON e.id = im.documento_id AND im.documento_tipo = 'entrega'
+    JOIN doc.entrega_tipo et ON et.id = e.entrega_tipo_id
+    WHERE im.origen_ubicacion_id IS NOT NULL
+      AND et.codigo IN ('VENTA_EGRESO', 'DESPACHO_CLIENTE')
+      AND e.venta_id IS NOT NULL
+    ORDER BY im.lote_id, im.id DESC
+),
+saldo AS (
+    SELECT lote_id, SUM(cantidad * (
+        CASE WHEN destino_ubicacion_id IS NOT NULL THEN  1 ELSE 0 END +
+        CASE WHEN origen_ubicacion_id  IS NOT NULL THEN -1 ELSE 0 END
+    )) AS saldo
+    FROM inventario.item_movimientos
+    GROUP BY lote_id
+)
+SELECT
+    ud.venta_id,
+    l.id                                 AS lote_id,
+    EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0') AS lote_codigo,
+    l.item_id,
+    i.codigo                             AS item_codigo,
+    i.nombre                             AS item_nombre,
+    art.nombre                           AS articulo_nombre,
+    vc.color,
+    l.cantidad                           AS peso,
+    ud.entrega_id,
+    ud.entrega_tipo_codigo,
+    l.propietario_id,
+    p.id                                 AS partida_id,
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS partida_codigo
+FROM ultimo_despacho ud
+JOIN inventario.lote l                  ON l.id = ud.lote_id
+JOIN saldo s                            ON s.lote_id = l.id AND s.saldo <= 0
+JOIN item i                             ON i.id = l.item_id
+JOIN item_rollo_detalle ird             ON ird.item_id = i.id
+JOIN articulo art                       ON art.id = ird.articulo_id
+JOIN inventario.lote_rollo_detalle lrd  ON lrd.lote_id = l.id AND lrd.flg_tenido = true
+LEFT JOIN vw_colores vc                 ON vc.color_x_cliente_id = lrd.color_x_cliente_id
+LEFT JOIN mes.partida_paso_ejecucion pe ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
+LEFT JOIN mes.partida_paso pp           ON pp.id = pe.partida_paso_id
+LEFT JOIN mes.partida p                 ON p.id = pp.partida_id;
+
+GRANT SELECT ON inventario.vw_venta_rollos_devolvibles TO authenticated;
+
+
+-- ── inventario.vw_venta_entregas_devolvibles ─────────────────────
+-- Guía grain of the above: the frontend's default selection unit is "return
+-- this whole guía" (defaults to all its rolls), with vw_venta_rollos_devolvibles
+-- used underneath for a free pick of particular rolls when the return is
+-- partial. Same aggregate-via-GROUP-BY pattern as guia_remision_detalle
+-- (see [[document-model-philosophy]]) — no separate source of truth, just a
+-- rollup of the roll-grain view above.
+CREATE OR REPLACE VIEW inventario.vw_venta_entregas_devolvibles AS
+SELECT
+    r.venta_id,
+    r.entrega_id,
+    r.entrega_tipo_codigo,
+    e.serie          AS entrega_serie,
+    e.correlativo    AS entrega_correlativo,
+    e.fecha_emision,
+    COUNT(*)         AS n_rollos,
+    SUM(r.peso)      AS peso_total
+FROM inventario.vw_venta_rollos_devolvibles r
+JOIN doc.entrega e ON e.id = r.entrega_id
+GROUP BY r.venta_id, r.entrega_id, r.entrega_tipo_codigo, e.serie, e.correlativo, e.fecha_emision;
+
+GRANT SELECT ON inventario.vw_venta_entregas_devolvibles TO authenticated;
 
 DROP VIEW IF EXISTS mes.vw_partida_resumen_tenido;
 -- ── mes.partida_resumen_tenido ────────────────────────────────
@@ -1159,8 +1255,15 @@ GROUP BY
 ORDER BY art.nombre, vc.color, i.nombre;
 
 -- ── inventario.vw_stock_insumos ───────────────────────────────
--- Insumo stock totals with tipo/colorante attributes, location-agnostic.
--- Aggregates item_saldo across locations (item_saldo key is item_id + ubicacion_id).
+-- Insumo stock + MAP valuation + tipo/colorante attributes, location-agnostic.
+-- Flat single-pass projection of the insumo subtype (class-table inheritance:
+-- item + item_insumo_detalle): each table is joined exactly once, aggregated once.
+-- Values at item_valoracion.precio_promedio — the same MAP carrying-value source
+-- as vw_stock_items_valorado (inventory carrying value, not invoice-derived
+-- replacement/recipe cost).
+-- Net-stock filter <> 0 (aggregates item_saldo across locations incl. the NULL
+-- fungible bucket) so debt positions net correctly instead of being dropped.
+-- Financial view: granted to authenticated only (exposes cost).
 CREATE OR REPLACE VIEW inventario.vw_stock_insumos AS
 SELECT
     si.item_id,
@@ -1173,67 +1276,24 @@ SELECT
     intp.nombre                 AS insumo_tipo_nombre,
     iid.colorante_tipo_id,
     ct.codigo                   AS colorante_tipo_codigo,
-    ct.nombre                   AS colorante_tipo_nombre
+    ct.nombre                   AS colorante_tipo_nombre,
+    iv.precio_promedio,
+    ROUND((SUM(si.cantidad_actual) * COALESCE(iv.precio_promedio, 0))::numeric, 4)::NUMERIC(16,4)
+                                AS stock_valorado
 FROM inventario.item_saldo si
 JOIN item i        ON i.id = si.item_id
 JOIN item_tipo it  ON it.id = i.item_tipo_id AND it.codigo = 'INSUMO'
 JOIN unidad un     ON un.id = i.unidad_id
-LEFT JOIN item_insumo_detalle iid  ON iid.item_id = si.item_id
-LEFT JOIN insumo_tipo intp         ON intp.id = iid.insumo_tipo_id
-LEFT JOIN colorante_tipo ct        ON ct.id = iid.colorante_tipo_id
-WHERE si.cantidad_actual > 0
+LEFT JOIN item_insumo_detalle iid       ON iid.item_id = si.item_id
+LEFT JOIN insumo_tipo intp              ON intp.id = iid.insumo_tipo_id
+LEFT JOIN colorante_tipo ct             ON ct.id = iid.colorante_tipo_id
+LEFT JOIN inventario.item_valoracion iv ON iv.item_id = si.item_id
+WHERE si.cantidad_actual != 0
 GROUP BY si.item_id, i.codigo, i.nombre, un.codigo,
          iid.insumo_tipo_id, intp.codigo, intp.nombre,
-         iid.colorante_tipo_id, ct.codigo, ct.nombre;
-
--- ── inventario.vw_precio_promedio_insumos ────────────────────
--- Weighted average cost per insumo item.
--- Primary source: factura_proveedor_detalle (what was actually invoiced).
--- Fallback: compra_detalle (estimated purchase price, used when no
--- invoice detail lines exist yet for that item).
--- Used for recipe cost reference and margin display — not balance sheet
--- inventory valuation.
-CREATE OR REPLACE VIEW inventario.vw_precio_promedio_insumos AS
-WITH fpd AS (
-    -- Authoritative: invoiced prices
-    SELECT
-        fpd.item_id,
-        SUM(fpd.cantidad * fpd.precio_unitario) AS valor_total,
-        SUM(fpd.cantidad)                        AS cantidad_total
-    FROM doc.factura_proveedor_detalle fpd
-    GROUP BY fpd.item_id
-),
-cd AS (
-    -- Fallback: purchase order prices
-    SELECT
-        cd.item_id,
-        SUM(cd.cantidad * cd.precio_unitario) AS valor_total,
-        SUM(cd.cantidad)                       AS cantidad_total
-    FROM doc.compra_detalle cd
-    -- Only use compra rows for items with no invoice detail yet
-    WHERE NOT EXISTS (
-        SELECT 1 FROM doc.factura_proveedor_detalle fpd
-        WHERE fpd.item_id = cd.item_id
-    )
-    GROUP BY cd.item_id
-),
-combinado AS (
-    SELECT item_id, valor_total, cantidad_total FROM fpd
-    UNION ALL
-    SELECT item_id, valor_total, cantidad_total FROM cd
-)
-SELECT
-    c.item_id,
-    vi.item_codigo,
-    vi.item_nombre,
-    vi.unidad_codigo,
-    ROUND(SUM(c.valor_total) / NULLIF(SUM(c.cantidad_total), 0), 4) AS precio_promedio_usd,
-    SUM(c.cantidad_total)                                            AS cantidad_comprada
-FROM combinado c
-JOIN vw_items vi ON vi.item_id = c.item_id
-GROUP BY c.item_id, vi.item_codigo, vi.item_nombre, vi.unidad_codigo;
-
-GRANT SELECT ON inventario.vw_precio_promedio_insumos TO authenticated;
+         iid.colorante_tipo_id, ct.codigo, ct.nombre,
+         iv.precio_promedio
+HAVING SUM(si.cantidad_actual) != 0;
 
 -- ── inventario.vw_lotes_disponibles ──────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_lotes_disponibles AS
@@ -1253,28 +1313,39 @@ FROM inventario.vw_stock_lotes_ubicacion sa
 LEFT JOIN vw_items vi ON vi.item_id = sa.item_id
 LEFT JOIN inventario.lote l ON l.id = sa.lote_id;
 
--- ── calidad.vw_lotes_pendientes_inspeccion ────────────────────
--- Three QC eligibility paths:
+-- ── calidad.vw_qc_pendiente_output ─────────────────────────────
+-- Path A only — QC on a production-output roll (a lote materialized by
+-- registrar_produccion, documento_tipo='partida_paso_ejecucion') against the
+-- ejecucion that created it. In the current production model output is
+-- materialized at the producing/closure step; mid-route steps only route the
+-- roll (per-step output tracking is WIP, not modeled now), and mid-process QC of
+-- a roll still being worked is the INPUT side (vw_qc_pendiente_input).
 --
---   Path A — pure output roll (pc.lote_id IS NULL):
---     Lote was created by a partida_paso_ejecucion and is not a rework input.
---     Inspectable once against the ejecucion that created it.
+-- Pending = estado_calidad='PENDIENTE'. This IS the authoritative signal in the
+-- current schema: every QC write path (crear_inspeccion, bulk_aprobar_lotes,
+-- bulk_rechazar_lotes — funciones/calidad.sql) flips estado_calidad in the SAME
+-- transaction as the inspeccion INSERT, so PENDIENTE ⟺ "no inspeccion recorded".
+-- The NOT EXISTS(inspeccion for creating ejec) is kept as a cheap belt-and-
+-- suspenders (runs only over the already-tiny PENDIENTE-output set), but
+-- estado_calidad is the indexable driver — see idx_lote_pendiente_qc_output
+-- (migration/patches/62). documento_id already IS the creating ejecucion, so
+-- unlike Path B/C no LATERAL "active step" resolution is needed.
 --
---   Path B — original input roll (pc.lote_id IS NOT NULL, documento_tipo != 'partida_paso_ejecucion'):
---     Raw fabric roll assigned to a partida via partida_componente.
---     Inspectable per paso, as long as not yet consumed (lote_saldo > 0).
+-- NOTE — legacy divergence, intentionally NOT preserved: some backfilled lotes
+-- carry estado_calidad='APROBADO' with no inspeccion row (old bulk data loads
+-- that set the column directly). The pre-split view keyed on inspeccion-existence
+-- and so listed those ~2k already-approved rolls as "pending"; keying on
+-- estado_calidad here correctly drops them. That is a deliberate behavior change
+-- scoped to legacy data artifacts, per "design for the current schema, forget
+-- legacy" — no current function can produce that state.
 --
---   Path C — rework input roll (pc.lote_id IS NOT NULL, documento_tipo = 'partida_paso_ejecucion'):
---     Output lote from a previous partida now assigned as input to a rework child
---     (crear_reproceso Case B). Pe.id points to the OLD ejecucion; active_ppe resolves
---     the CURRENT rework paso. The old inspection is irrelevant here.
---     Treated identically to Path B — pc.lote_id IS NOT NULL is the discriminator.
+-- pc guard: a lote that is also an assigned component is a rework input — Path
+-- B/C territory. Excluding it keeps the two views disjoint so the compatibility
+-- UNION doesn't double-count it.
 --
--- The lateral fires for Paths B and C (pc.lote_id IS NOT NULL).
--- All context columns (ejecucion, paso, operacion, maquina, partida) are sourced from
--- active_ppe/pc for Paths B+C, and from pe/pp for Path A.
--- DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion;
-CREATE OR REPLACE VIEW calidad.vw_lotes_pendientes_inspeccion AS
+-- Gates dispatch downstream (vw_despacho_pendiente requires estado_calidad
+-- ='APROBADO'), a separate concern from whether QC has been recorded here.
+CREATE OR REPLACE VIEW calidad.vw_qc_pendiente_output AS
 SELECT
     l.id AS lote_id,
     EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0') AS lote_codigo,
@@ -1283,14 +1354,8 @@ SELECT
     vi.item_nombre,
     l.documento_tipo,
     l.documento_id,
-    CASE WHEN pc.lote_id IS NOT NULL
-         THEN active_ppe.ejecucion_id
-         ELSE pe.id
-    END                                                 AS partida_paso_ejecucion_id,
-    CASE WHEN pc.lote_id IS NOT NULL
-         THEN active_ppe.paso_id
-         ELSE pp.id
-    END                                                 AS partida_paso_id,
+    pe.id                                               AS partida_paso_ejecucion_id,
+    pp.id                                                AS partida_paso_id,
     m.id                                                AS maquina_id,
     m.codigo                                            AS maquina_codigo,
     o.id                                                AS operacion_id,
@@ -1304,23 +1369,117 @@ SELECT
     p.flg_antipilling,
     p.prioridad_id,
     pr.prioridad,
+    p.color_x_cliente_id,
+    vc.color_id,
+    vc.color AS color_nombre,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
     l.propietario_id,
     c.nombre AS cliente_nombre,
-    l.fyh_cre AS fecha_creacion_lote
+    l.fyh_cre AS fecha_creacion_lote,
+    pe.fyh_fin                                          AS fecha_produccion,
+    true                                                 AS es_output
 FROM inventario.lote l
 JOIN vw_items vi ON vi.item_id = l.item_id AND vi.item_tipo_codigo = 'ROLLO'
-LEFT JOIN mes.partida_paso_ejecucion pe
-    ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
-LEFT JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
-LEFT JOIN mes.partida_componente pc ON pc.lote_id = l.id
--- Fires for Paths B and C: any lote in partida_componente (original input or rework input).
--- EN_PROCESO takes priority; falls back to most recently started COMPLETADO paso so rolls
--- remain inspectable in the window between step completion and next step starting.
-LEFT JOIN LATERAL (
+JOIN mes.partida_paso_ejecucion pe ON pe.id = l.documento_id AND l.documento_tipo = 'partida_paso_ejecucion'
+JOIN mes.partida_paso pp ON pp.id = pe.partida_paso_id
+JOIN mes.partida p ON p.id = pp.partida_id
+LEFT JOIN mes.operacion o ON o.id = pp.operacion_id
+LEFT JOIN mes.maquina m   ON m.id = pe.maquina_id
+LEFT JOIN tercero c    ON c.id  = p.tercero_id
+LEFT JOIN prioridad pr ON pr.id = p.prioridad_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+WHERE l.estado_calidad = 'PENDIENTE'
+  -- pc guard: a lote that is ALSO an assigned component is a rework input — that's
+  -- Path B/C (vw_qc_pendiente_input) territory. Excluding it here keeps the two
+  -- views disjoint so the compatibility UNION doesn't double-count it.
+  AND NOT EXISTS (
+      SELECT 1 FROM mes.partida_componente pc WHERE pc.lote_id = l.id
+  )
+  -- Defensive (redundant with estado_calidad in the current schema, cheap here).
+  AND NOT EXISTS (
+      SELECT 1 FROM calidad.inspeccion ci
+      WHERE ci.lote_id = l.id AND ci.partida_paso_ejecucion_id = pe.id
+  )
+  -- Closed/cancelled partidas have no pending QC work. Legacy 'Despachado' partidas
+  -- are migrated as CERRADA (11_data_migration).
+  AND COALESCE(p.estado_produccion, 'CREADA') NOT IN ('CERRADA', 'CANCELADA');
+
+-- ── calidad.vw_qc_pendiente_input ──────────────────────────────
+-- Paths B+C only — mid-process inspection of a roll still assigned as a live
+-- component of an in-progress partida (raw fabric intake, or a rework input
+-- re-entering via crear_reproceso Case B). Does NOT gate dispatch; it's a
+-- production-time checkpoint, distinct in consequence from vw_qc_pendiente_output.
+--
+--   Path B — original input roll (documento_tipo != 'partida_paso_ejecucion'):
+--     Raw fabric roll assigned to a partida via partida_componente.
+--     Inspectable per paso, as long as not yet consumed (lote_saldo > 0).
+--
+--   Path C — rework input roll (documento_tipo = 'partida_paso_ejecucion'):
+--     Output lote from a previous partida now assigned as input to a rework child.
+--     The old inspection (against the OLD ejecucion) is irrelevant here — active_ppe
+--     resolves the CURRENT rework paso instead.
+--
+-- Driven from non-terminal partidas first (~900 rows today) via a MATERIALIZED CTE,
+-- not from the full lote table — bounds the LATERAL "active step" resolution to
+-- that partida's own partida_componente rows instead of fanning it out over every
+-- roll ever created. MATERIALIZED is required, not stylistic: without it Postgres
+-- inlines the CTE and, on the measured cardinalities, mis-estimates its way into
+-- leading with a Seq Scan on inventario.lote instead (measured 3.1s vs 0.9s with
+-- the fence — see performance diagnosis, 2026-07-31). Re-check this fence after
+-- any major shift in partida/lote row counts; the plan choice depends on it.
+-- EN_PROCESO takes priority; falls back to most recently started COMPLETADO paso so
+-- rolls remain inspectable in the window between step completion and next step start.
+-- A JOIN (not LEFT JOIN) LATERAL naturally drops rolls with no active step at all.
+CREATE OR REPLACE VIEW calidad.vw_qc_pendiente_input AS
+WITH partidas_activas AS MATERIALIZED (
+    SELECT id FROM mes.partida
+    WHERE COALESCE(estado_produccion, 'CREADA') NOT IN ('CERRADA', 'CANCELADA')
+)
+SELECT
+    l.id AS lote_id,
+    EXTRACT(YEAR FROM l.fyh_cre)::int % 100 || '-' || LPAD(l.secuencia::text, 5, '0') AS lote_codigo,
+    l.item_id,
+    vi.item_codigo,
+    vi.item_nombre,
+    l.documento_tipo,
+    l.documento_id,
+    active_ppe.ejecucion_id                             AS partida_paso_ejecucion_id,
+    active_ppe.paso_id                                  AS partida_paso_id,
+    m.id                                                AS maquina_id,
+    m.codigo                                            AS maquina_codigo,
+    o.id                                                AS operacion_id,
+    o.codigo                                            AS operacion_codigo,
+    p.id                                                AS partida_id,
+    p.partida_origen_id,
+    EXTRACT(YEAR FROM p.fyh_cre)::text || '-' || LPAD(p.numero::text, 4, '0') AS partida_codigo,
+    p.ancho,
+    p.rendimiento,
+    p.malla,
+    p.flg_antipilling,
+    p.prioridad_id,
+    pr.prioridad,
+    p.color_x_cliente_id,
+    vc.color_id,
+    vc.color AS color_nombre,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
+    l.propietario_id,
+    c.nombre AS cliente_nombre,
+    l.fyh_cre AS fecha_creacion_lote,
+    active_ppe.active_fyh_fin                           AS fecha_produccion,
+    false                                                AS es_output
+FROM partidas_activas pa
+JOIN mes.partida p ON p.id = pa.id
+JOIN mes.partida_componente pc ON pc.partida_id = pa.id AND pc.lote_id IS NOT NULL
+JOIN inventario.lote l ON l.id = pc.lote_id
+JOIN vw_items vi ON vi.item_id = l.item_id AND vi.item_tipo_codigo = 'ROLLO'
+JOIN LATERAL (
     SELECT ppe.id           AS ejecucion_id,
            ppe.maquina_id   AS active_maquina_id,
            pp2.id           AS paso_id,
-           pp2.operacion_id AS active_operacion_id
+           pp2.operacion_id AS active_operacion_id,
+           ppe.fyh_fin      AS active_fyh_fin
     FROM mes.partida_paso_ejecucion ppe
     JOIN mes.partida_paso pp2 ON pp2.id = ppe.partida_paso_id
     WHERE pp2.partida_id = pc.partida_id
@@ -1330,44 +1489,46 @@ LEFT JOIN LATERAL (
         pp2.secuencia DESC,
         ppe.fyh_inicio DESC
     LIMIT 1
-) active_ppe ON pc.lote_id IS NOT NULL
-LEFT JOIN mes.operacion o ON o.id = CASE WHEN pc.lote_id IS NOT NULL
-                                         THEN active_ppe.active_operacion_id
-                                         ELSE pp.operacion_id END
-LEFT JOIN mes.maquina m   ON m.id = CASE WHEN pc.lote_id IS NOT NULL
-                                         THEN active_ppe.active_maquina_id
-                                         ELSE pe.maquina_id END
-LEFT JOIN mes.partida p   ON p.id = CASE WHEN pc.lote_id IS NOT NULL
-                                         THEN pc.partida_id
-                                         ELSE pp.partida_id END
-LEFT JOIN tercero c    ON c.id  = l.propietario_id
+) active_ppe ON true
+LEFT JOIN mes.operacion o ON o.id = active_ppe.active_operacion_id
+LEFT JOIN mes.maquina m   ON m.id = active_ppe.active_maquina_id
+LEFT JOIN tercero c    ON c.id  = p.tercero_id
 LEFT JOIN prioridad pr ON pr.id = p.prioridad_id
-WHERE (
-    -- Path A: pure output roll — inspectable once against the creating ejecucion
-    (pc.lote_id IS NULL
-     AND pe.id IS NOT NULL
-     AND NOT EXISTS (
-         SELECT 1 FROM calidad.inspeccion ci
-         WHERE ci.lote_id = l.id AND ci.partida_paso_ejecucion_id = pe.id
-     ))
-    OR
-    -- Paths B+C: input roll (original or rework re-entry) — inspectable per paso.
-    -- lote_saldo guard drops consumed rolls once PROD_CONSUMO is posted.
-    (pc.lote_id IS NOT NULL
-     AND active_ppe.ejecucion_id IS NOT NULL
-     AND NOT EXISTS (
-         SELECT 1 FROM calidad.inspeccion ci
-         WHERE ci.lote_id = l.id AND ci.partida_paso_ejecucion_id = active_ppe.ejecucion_id
-     )
-     AND EXISTS (
-         SELECT 1 FROM inventario.lote_saldo ls
-         WHERE ls.lote_id = l.id AND ls.cantidad_actual > 0
-     ))
-)
--- Closed/cancelled partidas have no pending QC work. Legacy 'Despachado' partidas
--- are migrated as CERRADA (11_data_migration), so this excludes the dispatched bulk
--- — including Path A output rolls, which have no lote_saldo guard to drop them.
-AND COALESCE(p.estado_produccion, 'CREADA') NOT IN ('CERRADA', 'CANCELADA');
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+WHERE
+  -- "Already inspected" is checked against the whole PASO (any of its ejecucion
+  -- runs), not just active_ppe's single most-recent run: a paso can have multiple
+  -- ejecucion rows (normal run + lagging continuation, e.g. a batch split across
+  -- machine capacity), and active_ppe always surfaces the newest one for context
+  -- (maquina/operacion). Scoping the EXISTS to that one run alone would resurface
+  -- rolls already inspected under an earlier run of the same paso as false pending.
+  NOT EXISTS (
+      SELECT 1
+      FROM calidad.inspeccion ci
+      JOIN mes.partida_paso_ejecucion ppe_chk ON ppe_chk.id = ci.partida_paso_ejecucion_id
+      WHERE ci.lote_id = l.id
+        AND ppe_chk.partida_paso_id = active_ppe.paso_id
+  )
+  AND EXISTS (
+      SELECT 1 FROM inventario.lote_saldo ls
+      WHERE ls.lote_id = l.id AND ls.cantidad_actual > 0
+  );
+
+-- ── calidad.vw_lotes_pendientes_inspeccion ────────────────────
+-- Compatibility union — same column contract as before the split. Existing
+-- consumers (get_lotes_pendientes_partida, bulk_aprobar_lotes, bulk_rechazar_lotes,
+-- vw_partidas_pendientes_calidad, vw_auditoria_pendiente) keep working unchanged.
+-- Cheap: each UNION ALL branch keeps its own WHERE/join shape, so Postgres plans
+-- and pushes predicates into each branch independently instead of merging them
+-- into one CASE-expression-laden join tree (which was the actual cost driver in
+-- the pre-split view — see performance diagnosis, 2026-07-30).
+-- New call sites that only need one path (e.g. a dispatch-gate screen, or an
+-- in-process QC screen) should query vw_qc_pendiente_output / _input directly
+-- and skip this union entirely.
+CREATE OR REPLACE VIEW calidad.vw_lotes_pendientes_inspeccion AS
+SELECT * FROM calidad.vw_qc_pendiente_output
+UNION ALL
+SELECT * FROM calidad.vw_qc_pendiente_input;
 
 -- ── calidad.vw_inspecciones ───────────────────────────────────
 DROP VIEW IF EXISTS calidad.vw_inspecciones;
@@ -1386,6 +1547,10 @@ SELECT
                                                                             AS partida_codigo,
     p.partida_origen_id,
     t.nombre                                                                AS cliente_nombre,
+    vc.color_id,
+    vc.color                                                                AS color_nombre,
+    vc.color_hex,
+    vc.color_x_cliente_hex,
     op.codigo                                                               AS operacion_codigo,
     i.resultado,
     i.observacion,
@@ -1399,6 +1564,7 @@ LEFT JOIN mes.partida_paso_ejecucion ppe ON ppe.id = i.partida_paso_ejecucion_id
 LEFT JOIN mes.partida_paso           pp  ON pp.id  = ppe.partida_paso_id
 LEFT JOIN mes.partida                p   ON p.id   = pp.partida_id
 LEFT JOIN tercero                    t   ON t.id   = p.tercero_id
+LEFT JOIN vw_colores                 vc  ON vc.color_x_cliente_id = p.color_x_cliente_id
 LEFT JOIN mes.operacion              op  ON op.id  = pp.operacion_id
 LEFT JOIN mes.empleado               e   ON e.id   = i.empleado_id;
 
@@ -1409,20 +1575,31 @@ LEFT JOIN mes.empleado               e   ON e.id   = i.empleado_id;
 -- lotes_asignados_total: total input rolls reserved for this partida
 -- tiene_rework_activo:   at least one non-closed rework partida linked to this one
 -- partida_origen_id:     non-NULL means this row is itself a rework
+-- lotes_output_pendientes_qc / peso_output_pendiente_kg:
+--   subset scoped to es_output=true (finished output rolls, always produced at the
+--   partida's closure step per PROD_CONSUMO semantics — see vw_lotes_pendientes_inspeccion).
+--   Lets a "final QC only" consumer filter/sort without a separate view.
 DROP VIEW IF EXISTS calidad.vw_partidas_pendientes_calidad;
 CREATE OR REPLACE VIEW calidad.vw_partidas_pendientes_calidad AS
 WITH base AS (
     SELECT
-        partida_id,
-        partida_codigo,
-        partida_origen_id,
-        cliente_nombre,
-        prioridad_id,
-        operacion_codigo,
-        lote_id,
-        fecha_creacion_lote
-    FROM calidad.vw_lotes_pendientes_inspeccion
-    WHERE partida_id IS NOT NULL
+        v.partida_id,
+        v.partida_codigo,
+        v.partida_origen_id,
+        v.cliente_nombre,
+        v.prioridad_id,
+        v.color_id,
+        v.color_nombre,
+        v.color_hex,
+        v.color_x_cliente_hex,
+        v.operacion_codigo,
+        v.lote_id,
+        v.fecha_creacion_lote,
+        v.es_output,
+        l.cantidad AS peso_kg
+    FROM calidad.vw_lotes_pendientes_inspeccion v
+    JOIN inventario.lote l ON l.id = v.lote_id
+    WHERE v.partida_id IS NOT NULL
 ),
 agg AS (
     SELECT
@@ -1431,12 +1608,19 @@ agg AS (
         partida_origen_id,
         cliente_nombre,
         prioridad_id,
+        color_id,
+        color_nombre,
+        color_hex,
+        color_x_cliente_hex,
         COUNT(*)                                                             AS lotes_pendientes_qc,
         array_agg(DISTINCT operacion_codigo ORDER BY operacion_codigo)
             FILTER (WHERE operacion_codigo IS NOT NULL)                     AS operaciones_pendientes,
-        MIN(fecha_creacion_lote)                                            AS lote_pendiente_mas_antiguo
+        MIN(fecha_creacion_lote)                                            AS lote_pendiente_mas_antiguo,
+        COUNT(*)         FILTER (WHERE es_output)                           AS lotes_output_pendientes_qc,
+        COALESCE(SUM(peso_kg) FILTER (WHERE es_output), 0)                  AS peso_output_pendiente_kg
     FROM base
-    GROUP BY partida_id, partida_codigo, partida_origen_id, cliente_nombre, prioridad_id
+    GROUP BY partida_id, partida_codigo, partida_origen_id, cliente_nombre, prioridad_id,
+             color_id, color_nombre, color_hex, color_x_cliente_hex
 )
 SELECT
     a.partida_id,
@@ -1444,9 +1628,15 @@ SELECT
     a.partida_origen_id,
     a.cliente_nombre,
     a.prioridad_id,
+    a.color_id,
+    a.color_nombre,
+    a.color_hex,
+    a.color_x_cliente_hex,
     a.lotes_pendientes_qc,
     a.operaciones_pendientes,
     a.lote_pendiente_mas_antiguo,
+    a.lotes_output_pendientes_qc,
+    a.peso_output_pendiente_kg,
     (
         SELECT COUNT(DISTINCT pc.lote_id)
         FROM mes.partida_componente pc
@@ -1478,7 +1668,7 @@ ORDER BY a.lote_pendiente_mas_antiguo;
 -- count of QC-pending rolls. Sourced from vw_lotes_pendientes_inspeccion
 -- so SUM(rollos) == lotes_pendientes_qc in vw_partidas_pendientes_calidad
 -- by construction.
-DROP VIEW IF EXISTS calidad.vw_auditoria_pendiente;
+-- DROP VIEW IF EXISTS calidad.vw_auditoria_pendiente;
 CREATE OR REPLACE VIEW calidad.vw_auditoria_pendiente AS
 SELECT
     p.id                                                                       AS partida_id,
@@ -1487,7 +1677,7 @@ SELECT
     vc.color,
     vc.color_hex,
     t.tenido,
-    at.nombre                                                                  AS articulo_tipo,
+    ga.nombre                                                                  AS grupo_articulo,
     p.fibra,
     p.malla,
     p.ancho,
@@ -1507,9 +1697,9 @@ JOIN mes.partida              p   ON p.id   = vl.partida_id
 LEFT JOIN tercero             ter ON ter.id  = p.tercero_id
 LEFT JOIN vw_colores          vc  ON vc.color_x_cliente_id = p.color_x_cliente_id
 LEFT JOIN tenido              t   ON t.id    = p.tenido_id
-LEFT JOIN articulo_tipo       at  ON at.id   = p.articulo_tipo_id
+LEFT JOIN grupo_articulo      ga  ON ga.id   = p.grupo_articulo_id
 JOIN item                     i   ON i.id    = l.item_id
-JOIN item_rollo_detalle       ird ON ird.item_id = l.item_id
+LEFT JOIN item_rollo_detalle  ird ON ird.item_id = l.item_id
 LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id  = l.id
 LEFT JOIN doc.entrega   gr  ON gr.id   = lrd.entrega_id
 GROUP BY
@@ -1517,7 +1707,7 @@ GROUP BY
     p.tercero_id, ter.nombre,
     p.color_x_cliente_id, vc.color, vc.color_hex,
     p.tenido_id, t.tenido,
-    p.articulo_tipo_id, at.nombre,
+    p.grupo_articulo_id, ga.nombre,
     p.fibra, p.malla, p.rendimiento, p.ancho, p.observacion,
     gr.id, gr.serie, gr.correlativo,
     i.id, i.codigo, i.nombre,
@@ -1655,6 +1845,7 @@ LEFT JOIN mes.partida_paso_ejecucion_termofijado pt ON pt.ejecucion_id = pe.id;
 -- Driver is backed by idx_partida_activa (partial index on the two active states).
 -- The frontend adds operacion_id + listo and orders by fyh_listo (FCFS):
 --   vw_cola_estacion?operacion_id=eq.<op>&estado=eq.PENDIENTE&listo=is.true&order=fyh_listo.asc.nullslast
+DROP VIEW IF EXISTS mes.vw_cola_estacion;
 CREATE OR REPLACE VIEW mes.vw_cola_estacion AS
 SELECT
     pp.id                                                                AS paso_id,
@@ -1673,6 +1864,7 @@ SELECT
     p.color_x_cliente_id,
     vc.color,
     vc.color_hex,
+    p.partida_origen_id,
     -- latest execution run (ejecucion_id for anular, plus start time / machine)
     pe.id                                                                AS ejecucion_id,
     pe.fyh_inicio,
@@ -1707,6 +1899,237 @@ WHERE p.estado_produccion IN ('PROGRAMADA','EN_PRODUCCION')
   AND pp.estado            IN ('PENDIENTE','EN_PROCESO');
 
 GRANT SELECT ON mes.vw_cola_estacion TO authenticated;
+
+-- ── mes.vw_wip ────────────────────────────────────────────────
+-- Real-time work-in-process BOARD: one row per active partida, answering
+-- "where is this order on the floor right now, on which machine, and how long
+-- has it sat in that state?". Complements the other two floor views —
+-- vw_pasos is step-centric (full history), vw_cola_estacion is a per-station
+-- FCFS queue; this one is partida-centric and pre-filtered to live WIP, so it's
+-- the natural driver for a plant-floor big screen / manager dashboard.
+--
+-- Current-step pick per partida (first match wins):
+--   1. the EN_PROCESO paso            → something is physically running,
+--   2. lowest-secuencia PENDIENTE paso whose predecessors are all settled
+--                                     → ready and waiting at its station,
+--   3. lowest-secuencia PENDIENTE paso → blocked behind unfinished work.
+-- situacion encodes which case won. horas_en_estado is the dwell time — long
+-- EN_COLA = a starved station, long EN_PROCESO vs tiempo_estandar = running over.
+-- Driver filter (PROGRAMADA/EN_PRODUCCION) is backed by idx_partida_activa.
+CREATE OR REPLACE VIEW mes.vw_wip AS
+SELECT
+    p.id                                                                   AS partida_id,
+    EXTRACT(YEAR FROM p.fyh_cre)::text || '-' || LPAD(p.numero::text, 4, '0') AS partida_codigo,
+    p.estado_produccion,
+    p.prioridad_id,
+    pr.prioridad,
+    p.tercero_id,
+    c.nombre                                                               AS cliente,
+    p.color_x_cliente_id,
+    vc.color,
+    vc.color_hex,
+    p.fecha_acordada,
+    (p.fecha_acordada IS NOT NULL AND p.fecha_acordada < CURRENT_DATE)      AS flg_atraso,
+    -- progress across the whole route
+    tot.total_pasos,
+    tot.pasos_hechos,
+    CASE WHEN tot.total_pasos > 0
+        THEN ROUND(tot.pasos_hechos::numeric / tot.total_pasos * 100, 0)
+        ELSE 0 END                                                         AS progreso_porcentaje,
+    -- current step
+    cur.paso_id                                                            AS paso_actual_id,
+    cur.secuencia                                                          AS secuencia_actual,
+    cur.operacion_id,
+    o.codigo                                                               AS operacion_codigo,
+    o.nombre                                                               AS operacion_nombre,
+    cur.ejecucion_id,
+    cur.maquina_id,
+    m.codigo                                                               AS maquina_codigo,
+    m.nombre                                                               AS maquina_nombre,
+    -- live situation + dwell
+    CASE
+        WHEN cur.paso_id IS NULL             THEN 'SIN_PASO'
+        WHEN cur.estado_paso = 'EN_PROCESO'  THEN 'EN_PROCESO'
+        WHEN cur.listo                       THEN 'EN_COLA'
+        ELSE 'BLOQUEADA'
+    END                                                                    AS situacion,
+    cur.desde,
+    ROUND((EXTRACT(EPOCH FROM (now() - cur.desde)) / 3600)::numeric, 1)     AS horas_en_estado,
+    cur.tiempo_estandar
+FROM mes.partida p
+LEFT JOIN tercero c     ON c.id  = p.tercero_id
+LEFT JOIN vw_colores vc ON vc.color_x_cliente_id = p.color_x_cliente_id
+LEFT JOIN prioridad pr  ON pr.id = p.prioridad_id
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*)                                                        AS total_pasos,
+        COUNT(*) FILTER (WHERE pp.estado IN ('COMPLETADO','OMITIDO'))   AS pasos_hechos
+    FROM mes.partida_paso pp
+    WHERE pp.partida_id = p.id
+) tot ON true
+LEFT JOIN LATERAL (
+    SELECT
+        pp.id                                                          AS paso_id,
+        pp.secuencia,
+        pp.operacion_id,
+        pp.estado                                                      AS estado_paso,
+        pp.tiempo_estandar,
+        pe.id                                                          AS ejecucion_id,
+        pe.maquina_id,
+        NOT EXISTS (
+            SELECT 1 FROM mes.partida_paso prev
+            WHERE prev.partida_id = pp.partida_id
+              AND prev.secuencia  < pp.secuencia
+              AND prev.estado NOT IN ('COMPLETADO','OMITIDO')
+        )                                                              AS listo,
+        -- when the current state began: run start if running; else the moment
+        -- predecessors cleared (dropped into the queue); else the partida's
+        -- schedule/creation time for the very first step.
+        CASE
+            WHEN pp.estado = 'EN_PROCESO' THEN pe.fyh_inicio
+            ELSE COALESCE(
+                (SELECT MAX(pe2.fyh_fin)
+                   FROM mes.partida_paso prev
+                   JOIN mes.partida_paso_ejecucion pe2 ON pe2.partida_paso_id = prev.id
+                  WHERE prev.partida_id = pp.partida_id
+                    AND prev.secuencia  < pp.secuencia
+                    AND prev.estado IN ('COMPLETADO','OMITIDO')),
+                p.fyh_programacion, p.fyh_cre)
+        END                                                            AS desde
+    FROM mes.partida_paso pp
+    LEFT JOIN LATERAL (
+        SELECT id, maquina_id, fyh_inicio
+        FROM mes.partida_paso_ejecucion
+        WHERE partida_paso_id = pp.id
+        ORDER BY fyh_inicio DESC NULLS LAST
+        LIMIT 1
+    ) pe ON true
+    WHERE pp.partida_id = p.id
+      AND pp.estado IN ('PENDIENTE','EN_PROCESO')
+    ORDER BY CASE WHEN pp.estado = 'EN_PROCESO' THEN 0 ELSE 1 END, pp.secuencia
+    LIMIT 1
+) cur ON true
+LEFT JOIN mes.operacion o ON o.id = cur.operacion_id
+LEFT JOIN mes.maquina m   ON m.id = cur.maquina_id
+WHERE p.estado_produccion IN ('PROGRAMADA','EN_PRODUCCION');
+
+GRANT SELECT ON mes.vw_wip TO authenticated;
+
+-- ── mes.vw_maquina_cola ───────────────────────────────────────
+-- Machine-centric board: one row per SCHEDULED activity (mes.programacion),
+-- so the frontend groups by maquina_id and renders each machine's current run
+-- plus everything queued behind it (order by fecha, orden_cola). Companion to
+-- vw_wip (partida-centric) — together they are the two axes of the floor board.
+--
+-- Polymorphic like get_actividades_sin_programar: a programacion row is either a
+-- 'partida_paso' (dyeing/finishing step) or a 'LAVADO_MAQUINA' (standalone wash);
+-- the two legs are UNION-ed to a common shape (wash lines carry NULL partida info).
+--
+-- Scope is the live board: today's rows plus any still-open activity carried over
+-- from earlier days. Idle machines have zero rows here by design — the board
+-- frontend LEFT JOINs mes.vw_maquinas to surface machines with nothing scheduled.
+-- flg_actual marks the line currently running on the machine; horas_en_estado is
+-- its dwell so an over-running batch is obvious at a glance.
+CREATE OR REPLACE VIEW mes.vw_maquina_cola AS
+WITH cola AS (
+    -- leg A · planned production step
+    SELECT
+        prog.maquina_id,
+        prog.fecha,
+        prog.secuencia                                                     AS orden_cola,
+        prog.id                                                            AS programacion_id,
+        prog.nota,
+        prog.actividad_tipo,
+        prog.actividad_id,
+        pp.partida_id,
+        EXTRACT(YEAR FROM p.fyh_cre)::text || '-' || LPAD(p.numero::text, 4, '0') AS partida_codigo,
+        p.tercero_id,
+        c.nombre                                                           AS cliente,
+        p.color_x_cliente_id,
+        vc.color,
+        vc.color_hex,
+        o.codigo                                                           AS operacion_codigo,
+        o.nombre                                                           AS operacion_nombre,
+        pp.secuencia                                                       AS paso_secuencia,
+        pp.estado::text                                                    AS estado_actividad,
+        (pp.estado = 'EN_PROCESO')                                         AS flg_actual,
+        CASE WHEN pp.estado = 'EN_PROCESO' THEN pe.fyh_inicio END          AS desde
+    FROM mes.programacion prog
+    JOIN mes.partida_paso pp ON pp.id = prog.actividad_id
+    JOIN mes.partida p       ON p.id  = pp.partida_id
+    JOIN mes.operacion o     ON o.id  = pp.operacion_id
+    LEFT JOIN tercero c      ON c.id  = p.tercero_id
+    LEFT JOIN vw_colores vc  ON vc.color_x_cliente_id = p.color_x_cliente_id
+    LEFT JOIN LATERAL (
+        SELECT fyh_inicio
+        FROM mes.partida_paso_ejecucion
+        WHERE partida_paso_id = pp.id
+        ORDER BY fyh_inicio DESC NULLS LAST
+        LIMIT 1
+    ) pe ON true
+    WHERE prog.actividad_tipo = 'partida_paso'
+      AND (prog.fecha >= CURRENT_DATE OR pp.estado IN ('PENDIENTE','EN_PROCESO'))
+
+    UNION ALL
+
+    -- leg B · standalone machine wash
+    SELECT
+        prog.maquina_id,
+        prog.fecha,
+        prog.secuencia,
+        prog.id,
+        prog.nota,
+        prog.actividad_tipo,
+        prog.actividad_id,
+        NULL::bigint,
+        NULL::text,
+        NULL::int,
+        NULL::text,
+        NULL::int,
+        NULL::text,
+        NULL::text,
+        'LAVADO_MAQUINA',
+        'Lavado de máquina',
+        NULL::smallint,
+        lm.estado::text,
+        (lm.estado = 'EN_PROCESO'),
+        CASE WHEN lm.estado = 'EN_PROCESO' THEN lm.fyh_inicio END
+    FROM mes.programacion prog
+    JOIN mes.lavado_maquina lm ON lm.id = prog.actividad_id
+    WHERE prog.actividad_tipo = 'LAVADO_MAQUINA'
+      AND (prog.fecha >= CURRENT_DATE OR lm.estado IN ('PENDIENTE','EN_PROCESO'))
+)
+SELECT
+    m.id                                                                   AS maquina_id,
+    m.codigo                                                               AS maquina_codigo,
+    m.nombre                                                               AS maquina_nombre,
+    m.estado_actual                                                        AS maquina_estado,
+    mt.operacion_id                                                        AS maquina_operacion_id,
+    cola.fecha,
+    cola.orden_cola,
+    cola.programacion_id,
+    cola.nota,
+    cola.actividad_tipo,
+    cola.actividad_id,
+    cola.partida_id,
+    cola.partida_codigo,
+    cola.tercero_id,
+    cola.cliente,
+    cola.color_x_cliente_id,
+    cola.color,
+    cola.color_hex,
+    cola.operacion_codigo,
+    cola.operacion_nombre,
+    cola.paso_secuencia,
+    cola.estado_actividad,
+    cola.flg_actual,
+    cola.desde,
+    ROUND((EXTRACT(EPOCH FROM (now() - cola.desde)) / 3600)::numeric, 1)    AS horas_en_estado
+FROM cola
+JOIN mes.maquina m        ON m.id  = cola.maquina_id
+LEFT JOIN mes.maquina_tipo mt ON mt.id = m.maquina_tipo_id;
+
+GRANT SELECT ON mes.vw_maquina_cola TO authenticated;
 
 -- ── inventario.vw_items_movimientos ───────────────────────────
 CREATE OR REPLACE VIEW inventario.vw_items_movimientos AS
@@ -2006,8 +2429,8 @@ SELECT
     vc.color_hex,
     p.tenido_id,
     t.tenido,
-    p.articulo_tipo_id,
-    at.nombre                                                                 AS articulo_tipo,
+    p.grupo_articulo_id,
+    ga.nombre                                                                 AS grupo_articulo,
     p.fibra,
     p.malla,
     p.rendimiento,
@@ -2041,7 +2464,7 @@ FROM mes.partida p
 LEFT JOIN tercero       ter ON ter.id = p.tercero_id
 LEFT JOIN vw_colores    vc  ON vc.color_x_cliente_id = p.color_x_cliente_id
 LEFT JOIN tenido        t   ON t.id  = p.tenido_id
-LEFT JOIN articulo_tipo at  ON at.id = p.articulo_tipo_id
+LEFT JOIN grupo_articulo ga ON ga.id = p.grupo_articulo_id
 
 -- Walk from partida down to the actual rolls
 JOIN mes.partida_componente            pc  ON pc.partida_id = p.id
@@ -2081,7 +2504,7 @@ GROUP BY
     p.tercero_id, ter.nombre,
     p.color_x_cliente_id, vc.color, vc.color_hex,
     p.tenido_id, t.tenido,
-    p.articulo_tipo_id, at.nombre,
+    p.grupo_articulo_id, ga.nombre,
     p.fibra, p.malla, p.rendimiento, p.ancho, p.fecha_acordada,
     gr.id, gr.serie, gr.correlativo,
     l.item_id, i.codigo, i.nombre, ird.flg_rib;
@@ -2098,7 +2521,7 @@ GRANT SELECT ON inventario.vw_stock_items                  TO anon, authenticate
 GRANT SELECT ON inventario.vw_stock_items_ubicacion        TO anon, authenticated;
 GRANT SELECT ON inventario.vw_stock_items_valorado         TO authenticated;
 GRANT SELECT ON inventario.vw_stock_x_proveedor            TO authenticated;
-GRANT SELECT ON inventario.vw_stock_insumos                TO anon, authenticated;
+GRANT SELECT ON inventario.vw_stock_insumos                TO authenticated;
 GRANT SELECT ON inventario.vw_lotes_disponibles            TO anon, authenticated;
 GRANT SELECT ON inventario.vw_lotes_rollos_despachados     TO anon, authenticated;
 GRANT SELECT ON inventario.vw_items_movimientos            TO anon, authenticated;
@@ -2107,6 +2530,8 @@ GRANT SELECT ON mes.vw_empleados_activos          TO authenticated;
 GRANT SELECT ON mes.vw_pasos                      TO anon, authenticated;
 GRANT SELECT ON mes.vw_partida_produccion_rollos  TO anon, authenticated;
 GRANT SELECT ON calidad.vw_lotes_pendientes_inspeccion    TO authenticated;
+GRANT SELECT ON calidad.vw_qc_pendiente_output             TO authenticated;
+GRANT SELECT ON calidad.vw_qc_pendiente_input              TO authenticated;
 GRANT SELECT ON calidad.vw_inspecciones                   TO authenticated;
 GRANT SELECT ON calidad.vw_partidas_pendientes_calidad    TO authenticated;
 GRANT SELECT ON calidad.vw_auditoria_pendiente            TO authenticated;
@@ -2144,6 +2569,8 @@ DROP VIEW IF EXISTS calidad.vw_auditoria_pendiente         CASCADE;
 DROP VIEW IF EXISTS calidad.vw_partidas_pendientes_calidad CASCADE;
 DROP VIEW IF EXISTS calidad.vw_inspecciones                CASCADE;
 DROP VIEW IF EXISTS calidad.vw_lotes_pendientes_inspeccion CASCADE;
+DROP VIEW IF EXISTS calidad.vw_qc_pendiente_input          CASCADE;
+DROP VIEW IF EXISTS calidad.vw_qc_pendiente_output          CASCADE;
 
 -- mes views
 DROP VIEW IF EXISTS mes.vw_cola_estacion                   CASCADE;
@@ -2169,7 +2596,6 @@ DROP VIEW IF EXISTS inventario.vw_stock_items_ubicacion    CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_items              CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_insumos            CASCADE;
 DROP VIEW IF EXISTS inventario.vw_lotes_disponibles        CASCADE;
-DROP VIEW IF EXISTS inventario.vw_precio_promedio_insumos  CASCADE;
 DROP VIEW IF EXISTS inventario.vw_item_proveedor_entrega      CASCADE;
 DROP VIEW IF EXISTS inventario.vw_items_movimientos        CASCADE;
 DROP VIEW IF EXISTS inventario.vw_stock_lotes_ubicacion    CASCADE;
@@ -2294,3 +2720,248 @@ SELECT
 FROM inventario.cuadre c;
 
 GRANT SELECT ON inventario.vw_cuadre TO authenticated;
+
+-- ── doc.vw_catalogo_precios_historico ─────────────────────────
+-- Every catalog price row ever written (active + superseded), with
+-- display names joined in. catalogo_precios is already historic by
+-- design — upsert_catalogo_precio (funciones/facturacion.sql) never
+-- overwrites a row in place, it closes the old one (fyh_elm) and
+-- inserts a new one — so this just surfaces that lineage.
+--
+-- RLS on the underlying table (comercial_ver policy, migration/10)
+-- applies here same as any other view, so frontend can query/filter
+-- this directly (.eq() on any dimension, or none for the full list)
+-- without a round trip per combination.
+--
+-- grupo_articulo_id/tenido_id here are the raw stored values (TENIDO
+-- rows already normalized to their pricing family by upsert_catalogo_precio
+-- — see doc.fn_familia_precio). Filtering for one specific combo's
+-- lineage must normalize the same way first.
+DROP VIEW IF EXISTS doc.vw_catalogo_precios_historico CASCADE;
+CREATE OR REPLACE VIEW doc.vw_catalogo_precios_historico AS
+SELECT
+    cp.id,
+    cp.operacion_id,
+    op.nombre               AS operacion,
+    cp.color_x_cliente_id,
+    c.color,
+    cp.tercero_id,
+    t.nombre                AS cliente,
+    cp.grupo_articulo_id,
+    ga.nombre                AS grupo_articulo,
+    cp.tenido_id,
+    ten.tenido,
+    cp.fibra,
+    cp.precio_kg,
+    cp.costo_kg,
+    cp.usr_cre,
+    cp.fyh_cre,
+    cp.usr_elm,
+    cp.fyh_elm,
+    (cp.fyh_elm IS NULL)     AS activo
+FROM doc.catalogo_precios cp
+JOIN mes.operacion op             ON op.id = cp.operacion_id
+LEFT JOIN color_x_cliente cxc     ON cxc.id = cp.color_x_cliente_id
+LEFT JOIN public.color c          ON c.id   = cxc.color_id
+LEFT JOIN tercero t                ON t.id   = COALESCE(cp.tercero_id, cxc.tercero_id)
+LEFT JOIN public.grupo_articulo ga ON ga.id  = cp.grupo_articulo_id
+LEFT JOIN tenido ten                ON ten.id = cp.tenido_id
+ORDER BY cp.fyh_cre DESC;
+
+GRANT SELECT ON doc.vw_catalogo_precios_historico TO authenticated;
+
+-- ── doc.vw_familia_precio ───────────────────────────────────────
+-- Read model for doc.articulo_tipo_familia (the grupo_articulo → pricing
+-- family mapping table; renamed to grupo_articulo_familia in migration 34,
+-- not yet applied — GRUPO_ARTICULO_HANDOFF.md decision 12). Written via
+-- doc.upsert_familia_precio (funciones/facturacion.sql), read by
+-- doc.fn_familia_precio for TENIDO pricing only.
+--
+-- flg_default: tercero_id IS NULL → applies to every client unless a
+-- per-client row overrides it. Both can exist for the same grupo — the
+-- override wins (fn_familia_precio ORDER BY tercero_id NULLS LAST).
+--
+-- flg_bucket_remapped surfaces the documented one-hop landmine in
+-- fn_familia_precio: familia_grupo_id is itself resolved through this same
+-- table with no recursion, so a bucket that is ALSO a mapped subject (e.g.
+-- default 4,9→18 while a client override sends 4,9→20) only resolves
+-- correctly today because of ORDER BY luck between the two rows. TRUE here
+-- means the bucket in this row has its own mapping row(s) and needs eyeballing
+-- before relying on it — do not add a second hop to fix this, see the
+-- doc.familia_precio backlog item in GRUPO_ARTICULO_HANDOFF.md instead.
+--
+-- Legacy articulo_tipo_id/familia_id are intentionally NOT projected — they
+-- are being phased out and new rows (via upsert_familia_precio) never
+-- populate them.
+DROP VIEW IF EXISTS doc.vw_familia_precio CASCADE;
+CREATE OR REPLACE VIEW doc.vw_familia_precio AS
+SELECT
+    f.grupo_articulo_id,
+    g.nombre                AS grupo_articulo,
+    f.tercero_id,
+    t.nombre                 AS cliente,
+    (f.tercero_id IS NULL)   AS flg_default,
+    f.familia_grupo_id,
+    gf.nombre                AS familia_grupo,
+    EXISTS (
+        SELECT 1 FROM doc.articulo_tipo_familia f2
+        WHERE f2.grupo_articulo_id = f.familia_grupo_id
+    )                         AS flg_bucket_remapped,
+    f.usr_cre,
+    f.fyh_cre,
+    f.usr_mod,
+    f.fyh_mod
+FROM doc.articulo_tipo_familia f
+JOIN public.grupo_articulo g  ON g.id  = f.grupo_articulo_id
+JOIN public.grupo_articulo gf ON gf.id = f.familia_grupo_id
+LEFT JOIN tercero t            ON t.id  = f.tercero_id
+ORDER BY g.nombre, flg_default DESC;
+
+GRANT SELECT ON doc.vw_familia_precio TO authenticated;
+
+
+-- ── mes.vw_partida_comercial ────────────────────────────────────────────────
+-- DERIVED dispatch-fulfillment + billing projection, at FAMILIA (root) level.
+-- This is the authoritative truth mes.partida.estado_comercial only CACHES
+-- (see doc.recompute_estado_comercial, funciones/despacho.sql) — if they ever
+-- disagree, THIS view is right. Reuses mes.vw_partida_familia_output for the
+-- terminal-lote dedup rule so the numbers can't drift from cerrar_partida /
+-- get_partida_familia. See VENTA_MODULE_HANDOFF.md decisions #9, #12.
+--
+-- dispatched_ahora = terminal APROBADO lotes with a live SERV_EGR/VENTA_EGR
+--   (no later SERV_DEV_ING/DEV_CLI_ING undoing it) — mirrors recompute's fold.
+-- pendiente        = GREATEST(0, total_terminal - dispatched_ahora)
+-- Billing columns roll up doc.venta_detalle for this root partida (venta lines
+-- bill against INTENT, i.e. always the root — decision #6), excluding ANULADA
+-- ventas. A partida can have venta lines with no dispatch yet is NOT possible
+-- (venta is born at dispatch — decision on venta lifecycle) so these two halves
+-- are always consistent by construction.
+-- ─────────────────────────────────────────────────────────────────────────
+DROP VIEW IF EXISTS mes.vw_partida_comercial;
+CREATE VIEW mes.vw_partida_comercial AS
+WITH terminal AS (
+    SELECT root_id, lote_id
+    FROM mes.vw_partida_familia_output
+    WHERE estado_calidad = 'APROBADO'
+),
+fulfillment AS (
+    SELECT
+        t.root_id,
+        COUNT(*) AS total_terminal,
+        COUNT(*) FILTER (
+            WHERE EXISTS (
+                SELECT 1 FROM inventario.item_movimientos im
+                JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+                WHERE im.lote_id = t.lote_id AND imt.codigo IN ('SERV_EGR','VENTA_EGR')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM inventario.item_movimientos im2
+                JOIN inventario.item_movimiento_tipo imt2 ON imt2.id = im2.item_movimiento_tipo_id
+                WHERE im2.lote_id = t.lote_id AND imt2.codigo IN ('SERV_DEV_ING','DEV_CLI_ING')
+            )
+        ) AS dispatched_ahora
+    FROM terminal t
+    GROUP BY t.root_id
+)
+SELECT
+    p.id                                                                     AS partida_id,
+    EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS codigo,
+    p.tercero_id,
+    c.nombre                                                                 AS cliente,
+    p.estado_comercial                                                       AS estado_comercial_cache,
+    COALESCE(f.total_terminal, 0)                                            AS total_terminal,
+    COALESCE(f.dispatched_ahora, 0)                                          AS dispatched_ahora,
+    GREATEST(0, COALESCE(f.total_terminal, 0) - COALESCE(f.dispatched_ahora, 0)) AS pendiente,
+    v.venta_ids,
+    v.referencia_refs,
+    v.total_kg_facturado,
+    v.total_importe
+FROM mes.partida p
+JOIN tercero c ON c.id = p.tercero_id
+LEFT JOIN fulfillment f ON f.root_id = p.id
+LEFT JOIN LATERAL (
+    SELECT
+        jsonb_agg(DISTINCT vd.venta_id)                                            AS venta_ids,
+        jsonb_agg(DISTINCT (ve.referencia_serie || '-' || ve.referencia_correlativo))
+            FILTER (WHERE ve.referencia_serie IS NOT NULL)                         AS referencia_refs,
+        SUM(vd.cantidad_kg)                                                        AS total_kg_facturado,
+        SUM(vd.cantidad_kg * COALESCE(
+            (SELECT SUM(c.precio_kg) FROM doc.venta_detalle_cargo c WHERE c.venta_detalle_id = vd.id), 0
+        ))                                                                         AS total_importe
+    FROM doc.venta_detalle vd
+    JOIN doc.venta ve ON ve.id = vd.venta_id AND ve.flg_elm = false
+    WHERE vd.partida_id = p.id
+) v ON true
+WHERE p.partida_origen_id IS NULL   -- root only, matches mes.vw_partida_familia convention
+  AND p.fyh_elm IS NULL;
+
+GRANT SELECT ON mes.vw_partida_comercial TO authenticated;
+
+
+-- ── doc.vw_venta ────────────────────────────────────────────────────────────
+-- Read surface for the sales spine: ITEM line (venta_detalle, one per
+-- articulo×tenido×color) + its CHARGE sub-lines aggregated (venta_detalle_cargo,
+-- one per operación — see migration/patches/56_venta_detalle_item_grain.sql /
+-- VENTA_PER_ITEM_BILLING_SPEC.md). importe = cantidad_kg × Σcargo.precio_kg.
+-- Composed description fills in when venta_detalle.descripcion is blank
+-- (doc.fn_descripcion_linea — a manual override, if present, always wins).
+-- ─────────────────────────────────────────────────────────────────────────
+DROP VIEW IF EXISTS doc.vw_venta;
+CREATE VIEW doc.vw_venta AS
+SELECT
+    v.id                AS venta_id,
+    v.tercero_id,
+    t.nombre            AS cliente,
+    v.fecha,
+    v.referencia_serie,
+    v.referencia_correlativo,
+    vd.id               AS detalle_id,
+    vd.linea,
+    vd.tipo,
+    vd.item_id,
+    it.nombre           AS item_nombre,
+    vd.articulo_id,
+    art.nombre          AS articulo,
+    vd.partida_id,
+    pcod.codigo         AS partida_codigo,
+    vd.color_x_cliente_id,
+    vc.color,
+    vd.tenido_id,
+    ten.tenido,
+    vd.grupo_articulo_id,
+    ga.nombre           AS grupo_articulo,
+    vd.cantidad_kg,
+    vd.cantidad_rollos,
+    cg.precio_kg_total,
+    ROUND(vd.cantidad_kg * COALESCE(cg.precio_kg_total, 0), 2) AS importe,
+    cg.cargos,
+    COALESCE(
+        vd.descripcion,
+        doc.fn_descripcion_linea(
+            vd.tipo, vd.item_id, vd.articulo_id, vd.color_x_cliente_id, vd.tenido_id
+        )
+    )                   AS descripcion
+FROM doc.venta v
+JOIN tercero t ON t.id = v.tercero_id
+LEFT JOIN doc.venta_detalle vd ON vd.venta_id = v.id
+LEFT JOIN LATERAL (
+    SELECT SUM(c.precio_kg) AS precio_kg_total,
+           jsonb_agg(jsonb_build_object(
+               'operacion_id', c.operacion_id,
+               'operacion',    (SELECT nombre FROM mes.operacion WHERE id = c.operacion_id),
+               'precio_kg',    c.precio_kg) ORDER BY c.operacion_id NULLS FIRST) AS cargos
+    FROM doc.venta_detalle_cargo c WHERE c.venta_detalle_id = vd.id
+) cg ON true
+LEFT JOIN public.articulo art      ON art.id = vd.articulo_id
+LEFT JOIN item it                  ON it.id = vd.item_id
+LEFT JOIN vw_colores vc            ON vc.color_x_cliente_id = vd.color_x_cliente_id
+LEFT JOIN tenido ten                ON ten.id = vd.tenido_id
+LEFT JOIN grupo_articulo ga        ON ga.id = vd.grupo_articulo_id
+LEFT JOIN LATERAL (
+    SELECT EXTRACT(YEAR FROM p.fyh_cre)::TEXT || '-' || LPAD(p.numero::TEXT, 4, '0') AS codigo
+    FROM mes.partida p WHERE p.id = vd.partida_id
+) pcod ON true
+WHERE v.flg_elm = false;
+
+GRANT SELECT ON doc.vw_venta TO authenticated;
+

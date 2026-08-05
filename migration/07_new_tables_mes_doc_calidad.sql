@@ -715,17 +715,22 @@ CREATE TABLE doc.compra_entrega (
 -- and insert a new row. This preserves pricing history for invoice
 -- reconstruction without a separate history table.
 --
--- Antipilling — two separate concerns, two separate rows:
---   1. TENIDO rows carry flg_antipilling=false/true to track costo_kg per recipe variant.
---      Both variants may share the same precio_kg (negotiated at base level) but differ
---      in costo_kg because the antipilling recipe uses different/more chemicals.
---   2. ANTIPILLING ghost operation row (client-level wildcard, tercero_id only):
---      the service charge billed as a second invoice line when partida.flg_antipilling=true.
---      Rate: 0.15/kg Urban, 0.10/kg others (maintained via upsert_catalogo_precio).
+-- Antipilling: billed as its own line via the ANTIPILLING ghost operation row
+-- (client-level wildcard, tercero_id only) — Rate: 0.15/kg Urban, 0.10/kg
+-- others (maintained via upsert_catalogo_precio). That's the only antipilling
+-- concept this table carries: precio_kg is the SAME for a TENIDO combo whether
+-- or not antipilling applies, so there is no flg_antipilling dimension here —
+-- the recipe used to cost it (receta.tenido.flg_antipilling) is a separate,
+-- non-authoritative concern (see costo_kg below). Patch 46 removed
+-- flg_antipilling from this table after a same-day stopgap (patch 45) revealed
+-- it was colliding the two "same price, different cost basis" rows under the
+-- active-row unique index — it was never a real pricing dimension.
 --
--- costo_kg: chemical cost per kg snapshot at time of price-setting (ex-IGV).
+-- costo_kg: non-authoritative cost snapshot (ex-IGV) taken at price-setting
+-- time from whichever approved receta.tenido matches the other dimensions
+-- (base recipe preferred). Drifts if the recipe changes later — doc.fn_precio_info
+-- recomputes cost live for margin preview, so this column is informational only.
 -- NULL for legacy rows and non-dyeing operations.
--- Margin is always derived: (precio_kg - costo_kg) / precio_kg.
 --
 -- tercero_id: client-level wildcard dimension.
 -- Specificity tiers (high → low):
@@ -737,16 +742,12 @@ CREATE TABLE IF NOT EXISTS doc.catalogo_precios (
     id                  BIGINT   GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 
     -- Lookup dimensions (NULL = wildcard)
-    -- flg_antipilling: distinguishes base recipe cost from antipilling variant cost on TENIDO rows.
-    --   NULL = wildcard (applies to both). Only set when recipe cost differs (TENIDO op).
-    --   ANTIPILLING operation rows always have flg_antipilling = NULL.
     operacion_id        SMALLINT NOT NULL REFERENCES mes.operacion(id),
     color_x_cliente_id  INT      REFERENCES color_x_cliente(id),
     tercero_id          INT      REFERENCES tercero(id),
     articulo_tipo_id    SMALLINT REFERENCES articulo_tipo(id),
     tenido_id           INT      REFERENCES tenido(id),
     fibra               SMALLINT,
-    flg_antipilling     BOOLEAN,
 
     -- Prices (USD/kg)
     precio_kg           NUMERIC(10,4) NOT NULL CHECK (precio_kg >= 0),

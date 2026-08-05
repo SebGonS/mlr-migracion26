@@ -15,12 +15,13 @@
 -- DROP TABLE IF EXISTS public.sertks2;
 -- PERCHADO (percha sheet, 28/05–12/06):
 
-ALTER TABLE public.mersan RENAME COLUMN "hora inicio" TO hora_inicio;
-ALTER TABLE public.mersan RENAME COLUMN "hora final" TO hora_final;
-ALTER TABLE public.sertks1 RENAME COLUMN "hora inicio" TO hora_inicio;
-ALTER TABLE public.sertks1 RENAME COLUMN "hora final" TO hora_final;
-ALTER TABLE public.sertks2 RENAME COLUMN "hora inicio" TO hora_inicio;
-ALTER TABLE public.sertks2 RENAME COLUMN "hora final" TO hora_final;
+-- already renamed on first run:
+-- ALTER TABLE public.mersan RENAME COLUMN "hora inicio" TO hora_inicio;
+-- ALTER TABLE public.mersan RENAME COLUMN "hora final" TO hora_final;
+-- ALTER TABLE public.sertks1 RENAME COLUMN "hora inicio" TO hora_inicio;
+-- ALTER TABLE public.sertks1 RENAME COLUMN "hora final" TO hora_final;
+-- ALTER TABLE public.sertks2 RENAME COLUMN "hora inicio" TO hora_inicio;
+-- ALTER TABLE public.sertks2 RENAME COLUMN "hora final" TO hora_final;
 
 -- SELECT * FROM receta.tenido WHERE id=6925;
 -- SELECT * FROM vw_colores WHERE color_x_cliente_id=929;
@@ -58,11 +59,11 @@ ALTER TABLE public.sertks2 RENAME COLUMN "hora final" TO hora_final;
 --             5094,4700,5233,5231,5234,5232,5229,5243,6392,5230,
 --             5242,5238,5235,5239,5240,5241,5236,5941,5943,5940,5942,
 --             5196,5175,5968,5991,5986,5988,4714,4715,5177,
-            5987,5993,5989,5992,5995,6107,5990,
-            6100,6102,6099,6101,5985,5174,5994,6095,6096,
-            6085,6084,6088,6083,6094,6087,6090,6108,6091,
-            6086,6145,6144,6146,6143,6147,6106,6089,
-            4969,6105,6093
+--             5987,5993,5989,5992,5995,6107,5990,
+--             6100,6102,6099,6101,5985,5174,5994,6095,6096,
+--             6085,6084,6088,6083,6094,6087,6090,6108,6091,
+--             6086,6145,6144,6146,6143,6147,6106,6089,
+--             4969,6105,6093
 --         )
 --     );
 --   DELETE FROM inventario.lote
@@ -75,11 +76,11 @@ ALTER TABLE public.sertks2 RENAME COLUMN "hora final" TO hora_final;
 --             5094,4700,5233,5231,5234,5232,5229,5243,6392,5230,
 --             5242,5238,5235,5239,5240,5241,5236,5941,5943,5940,5942,
 --             5196,5175,5968,5991,5986,5988,4714,4715,5177,
-            5987,5993,5989,5992,5995,6107,5990,
-            6100,6102,6099,6101,5985,5174,5994,6095,6096,
-            6085,6084,6088,6083,6094,6087,6090,6108,6091,
-            6086,6145,6144,6146,6143,6147,6106,6089,
-            4969,6105,6093
+--             5987,5993,5989,5992,5995,6107,5990,
+--             6100,6102,6099,6101,5985,5174,5994,6095,6096,
+--             6085,6084,6088,6083,6094,6087,6090,6108,6091,
+--             6086,6145,6144,6146,6143,6147,6106,6089,
+--             4969,6105,6093
 --         )
 --     );
 --   DELETE FROM mes.partida_paso_ejecucion
@@ -92,11 +93,11 @@ ALTER TABLE public.sertks2 RENAME COLUMN "hora final" TO hora_final;
 --             5094,4700,5233,5231,5234,5232,5229,5243,6392,5230,
 --             5242,5238,5235,5239,5240,5241,5236,5941,5943,5940,5942,
 --             5196,5175,5968,5991,5986,5988,4714,4715,5177,
-            5987,5993,5989,5992,5995,6107,5990,
-            6100,6102,6099,6101,5985,5174,5994,6095,6096,
-            6085,6084,6088,6083,6094,6087,6090,6108,6091,
-            6086,6145,6144,6146,6143,6147,6106,6089,
-            4969,6105,6093
+--             5987,5993,5989,5992,5995,6107,5990,
+--             6100,6102,6099,6101,5985,5174,5994,6095,6096,
+--             6085,6084,6088,6083,6094,6087,6090,6108,6091,
+--             6086,6145,6144,6146,6143,6147,6106,6089,
+--             4969,6105,6093
 --         )
 --   );
 --   DELETE FROM mes.partida_paso
@@ -106,11 +107,11 @@ ALTER TABLE public.sertks2 RENAME COLUMN "hora final" TO hora_final;
 --         5094,4700,5233,5231,5234,5232,5229,5243,6392,5230,
 --         5242,5238,5235,5239,5240,5241,5236,5941,5943,5940,5942,
 --         5196,5175,5968,5991,5986,5988,4714,4715,5177,
-            5987,5993,5989,5992,5995,6107,5990,
-            6100,6102,6099,6101,5985,5174,5994,6095,6096,
-            6085,6084,6088,6083,6094,6087,6090,6108,6091,
-            6086,6145,6144,6146,6143,6147,6106,6089,
-            4969,6105,6093
+--         5987,5993,5989,5992,5995,6107,5990,
+--         6100,6102,6099,6101,5985,5174,5994,6095,6096,
+--         6085,6084,6088,6083,6094,6087,6090,6108,6091,
+--         6086,6145,6144,6146,6143,6147,6106,6089,
+--         4969,6105,6093
 --     );
 -- ═══════════════════════════════════════════════════════════════════════════════
 DO $$
@@ -150,21 +151,30 @@ BEGIN
                TO_DATE(fecha, 'DD/MM/YYYY') AS fecha,
                REPLACE(hora_inicio, '.', ':')::time AS hora_inicio,
                REPLACE(hora_final,  '.', ':')::time AS hora_fin,
-               rollos::numeric
+               CASE WHEN rollos::text ~ '\+' THEN
+                   regexp_replace(rollos::text, '\+.*$', '')::numeric
+                   + regexp_replace(rollos::text, '^.*\+', '')::numeric
+               ELSE rollos::numeric END AS rollos
         FROM public.mersan WHERE partida::text ~ '^\d+$' AND fecha IS NOT NULL AND TRIM(fecha) != ''
         UNION ALL
         SELECT partida::bigint, v_serteks1_id::int,
                TO_DATE(fecha, 'DD/MM/YYYY') AS fecha,
                REPLACE(hora_inicio, '.', ':')::time AS hora_inicio,
                REPLACE(hora_final,  '.', ':')::time AS hora_fin,
-               rollos::numeric
+               CASE WHEN rollos::text ~ '\+' THEN
+                   regexp_replace(rollos::text, '\+.*$', '')::numeric
+                   + regexp_replace(rollos::text, '^.*\+', '')::numeric
+               ELSE rollos::numeric END AS rollos
         FROM public.sertks1 WHERE partida::text ~ '^\d+$' AND fecha IS NOT NULL AND TRIM(fecha) != ''
         UNION ALL
         SELECT partida::bigint, v_serteks2_id::int,
                TO_DATE(fecha, 'DD/MM/YYYY') AS fecha,
                REPLACE(hora_inicio, '.', ':')::time AS hora_inicio,
                REPLACE(hora_final,  '.', ':')::time AS hora_fin,
-               rollos::numeric
+               CASE WHEN rollos::text ~ '\+' THEN
+                   regexp_replace(rollos::text, '\+.*$', '')::numeric
+                   + regexp_replace(rollos::text, '^.*\+', '')::numeric
+               ELSE rollos::numeric END AS rollos
         FROM public.sertks2 WHERE partida::text ~ '^\d+$' AND fecha IS NOT NULL AND TRIM(fecha) != ''
     LOOP
         IF rec.hora_inicio IS NULL THEN
@@ -556,5 +566,5 @@ JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
 JOIN inventario.vw_stock_lotes sl      ON sl.lote_id = l.id
 WHERE l.fyh_elm IS NULL
   AND lrd.entrega_id IS NULL
-  AND lrd.orden_servicio_id IS NULL
+  -- AND lrd.orden_servicio_id IS NULL  -- column removed post-migration
 GROUP BY 1 ORDER BY 1 DESC;

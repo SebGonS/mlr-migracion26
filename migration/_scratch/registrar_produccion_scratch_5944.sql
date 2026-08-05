@@ -1683,8 +1683,125 @@ SET cantidad_recibida = COALESCE((
 ), 0)
 WHERE cd.compra_id = 989;
 
-
+SELECT * FROM tercero
 
 ROLLBACK;
 SELECT * FROM doc.orden_servicio;
 SELECT * FROM doc.orden_servicio_detalle;
+
+
+
+
+
+-- Compras with entrega linked but no COMPRA_ING movements
+SELECT
+    c.id                        AS compra_id,
+    c.fecha,
+    t.nombre                    AS proveedor,
+    COUNT(DISTINCT ce.entrega_id) AS n_guias,
+    SUM(cd.cantidad)            AS qty_ordenada,
+    SUM(cd.cantidad_recibida)   AS qty_recibida,
+    COUNT(DISTINCT im.doc_movimiento_id) AS n_movimientos
+FROM doc.compra c
+JOIN tercero t ON t.id = c.tercero_id
+JOIN doc.compra_entrega ce ON ce.compra_id = c.id
+JOIN doc.compra_detalle cd ON cd.compra_id = c.id
+LEFT JOIN inventario.item_movimientos im
+    ON im.item_movimiento_tipo_id = (
+        SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING'
+    )
+    AND im.documento_tipo = 'compra'
+    AND im.documento_id = c.id
+WHERE c.fyh_elm IS NULL
+  AND c.fecha >= '2026-05-25'   -- post go-live only
+GROUP BY c.id, c.fecha, t.nombre
+HAVING SUM(cd.cantidad_recibida) = 0
+    OR COUNT(DISTINCT im.doc_movimiento_id) = 0
+ORDER BY c.id DESC;
+
+
+
+-- What exists for compra 992
+SELECT 'compra_detalle' AS tabla, cd.item_id, i.nombre, cd.cantidad, cd.cantidad_recibida
+FROM doc.compra_detalle cd JOIN item i ON i.id = cd.item_id
+WHERE cd.compra_id = 992
+
+UNION ALL
+
+SELECT 'entrega_detalle', grd.item_id, i.nombre, grd.cantidad, NULL
+FROM doc.compra_entrega ce
+JOIN doc.entrega_detalle grd ON grd.entrega_id = ce.entrega_id
+JOIN item i ON i.id = grd.item_id
+WHERE ce.compra_id = 992
+
+UNION ALL
+
+SELECT 'item_movimientos', im.item_id, i.nombre, im.cantidad, NULL
+FROM inventario.item_movimientos im
+JOIN item i ON i.id = im.item_id
+JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+WHERE imt.codigo = 'COMPRA_ING'
+  AND im.documento_tipo = 'compra'
+  AND im.documento_id = 992
+
+ORDER BY 1, 2;
+
+
+
+SELECT
+    c.id                            AS compra_id,
+    im.documento_tipo,
+    im.documento_id,
+    imt.codigo                      AS mov_tipo,
+    SUM(im.cantidad)                AS qty_total,
+    COUNT(*)                        AS n_rows
+FROM doc.compra c
+JOIN doc.compra_entrega ce ON ce.compra_id = c.id
+LEFT JOIN inventario.item_movimientos im
+    ON im.item_movimiento_tipo_id = (
+        SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING'
+    )
+    AND (
+        (im.documento_tipo = 'compra'  AND im.documento_id = c.id)
+     OR (im.documento_tipo = 'entrega' AND im.documento_id = ce.entrega_id)
+    )
+LEFT JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+WHERE c.id IN (986, 987, 988, 990, 991, 992)
+GROUP BY c.id, im.documento_tipo, im.documento_id, imt.codigo
+ORDER BY c.id, im.documento_tipo;
+
+
+-- Step 1: sync the counter for 988 and 990 (stock already exists)
+SELECT doc.fn_refresh_compra_detalle_qtys(988);
+SELECT doc.fn_refresh_compra_detalle_qtys(990);
+
+
+
+SELECT * FROM item WHERE nombre ILIKE '%agua%o%'
+SELECT * FROM doc.compra
+WHERE id IN (
+    SELECT compra_id FROM doc.compra_detalle
+    WHERE item_id = 21
+)
+ORDER by id desc;
+
+
+
+SELECT lote_id FROM mes.partida_componente WHERE partida_id=6452
+
+SELECT * FROM inventario.pesaje WHERE lote_id IN (SELECT lote_id FROM mes.partida_componente WHERE partida_id=6452
+)
+
+
+
+UPDATE mes.lavado_maquina
+SET estado     = 'COMPLETADO',
+    fyh_inicio = COALESCE(fyh_inicio, fyh_cre),
+    fyh_fin    = COALESCE(fyh_fin, fyh_cre),
+    nota       = COALESCE(nota || ' | ', '')
+                 || 'Backfill 2026-08-04: COMPLETADO sin consumo. Recetas requieren '
+                 || 'ajuste manual; drawdown fisico ya reconciliado en cuadre 35.',
+    usr_mod    = 8,          -- set to your user id
+    fyh_mod    = now()
+WHERE estado IN ('PENDIENTE','EN_PROCESO')
+  AND fyh_cre < '2026-08-03 13:28:00+00';   -- excludes 61 & 62 by design

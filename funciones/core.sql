@@ -44,14 +44,20 @@ jsonb_build_object(
           SELECT jsonb_build_object(
             'articulo_id', ir.articulo_id,
             'articulo',ar.nombre,
-            'articulo_tipo_id', ta.id,
-            'articulo_tipo', ta.nombre,
+            'grupo_articulo_id', ta.id,
+            'grupo_articulo', ta.nombre,
             'fibra', ar.fibra,
-            'flg_rib', ir.flg_rib
+            'flg_rib', ir.flg_rib,
+            'construccion_id', ar.construccion_id,
+            'construccion', co.nombre,
+            'titulo', ar.titulo,
+            'preparacion', ar.preparacion
           )
           FROM item_rollo_detalle ir
           LEFT JOIN articulo ar ON ar.id=ir.articulo_id
-          LEFT JOIN articulo_tipo ta ON ta.id=ar.articulo_tipo_id
+          LEFT JOIN grupo_articulo_miembro gam ON gam.articulo_id = ar.id
+          LEFT JOIN grupo_articulo ta ON ta.id = gam.grupo_articulo_id
+          LEFT JOIN construccion co ON co.id = ar.construccion_id
           WHERE ir.item_id = i.item_id
         )
       )
@@ -405,7 +411,7 @@ $function$;
 -- partial state can exist after creation.
 --
 -- Required payload fields:
---   tercero_id, color_x_cliente_id, tenido_id, articulo_tipo_id, fibra
+--   tercero_id, color_x_cliente_id, tenido_id, grupo_articulo_id, fibra
 --   partida_detalles[]  — { item_id, cantidad, unidad_id }
 --
 -- Optional payload fields:
@@ -438,6 +444,9 @@ DECLARE
     v_overflow_item_id     INT;
     v_rollos_submitted     INT;
     v_cantidad_planificada NUMERIC;
+    v_grupo                INT;
+    v_fibra                SMALLINT;
+    v_fibra_max            SMALLINT;
 BEGIN
     IF NOT jwt_has_permission('comercial.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere comercial.crear'
@@ -454,11 +463,41 @@ BEGIN
     IF (p_partida->>'tenido_id') IS NULL THEN
         RAISE EXCEPTION 'tenido_id es requerido' USING ERRCODE = 'not_null_violation';
     END IF;
-    IF (p_partida->>'articulo_tipo_id') IS NULL THEN
-        RAISE EXCEPTION 'articulo_tipo_id es requerido' USING ERRCODE = 'not_null_violation';
+    -- CLEAN BREAK (migración 32): la partida se identifica por grupo_articulo_id.
+    -- grupo_articulo_id no se acepta ni se escribe aquí — lo deriva del grupo el
+    -- trigger trg_bi_partida_derive_grupo_articulo (puente temporal hasta que la
+    -- migración de precios mueva a sus lectores).
+    IF (p_partida->>'grupo_articulo_id') IS NULL THEN
+        RAISE EXCEPTION 'grupo_articulo_id es requerido' USING ERRCODE = 'not_null_violation';
     END IF;
     IF (p_partida->>'fibra') IS NULL THEN
         RAISE EXCEPTION 'fibra es requerido' USING ERRCODE = 'not_null_violation';
+    END IF;
+
+    v_grupo := (p_partida->>'grupo_articulo_id')::int;
+    v_fibra := (p_partida->>'fibra')::smallint;
+
+    PERFORM 1 FROM grupo_articulo WHERE id = v_grupo AND fyh_elm IS NULL;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'grupo_articulo_id % no existe o está dado de baja.', v_grupo
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+
+    -- ── Techo de fibra ────────────────────────────────────────────────────────
+    -- fibra = sistemas de tintura EJECUTADOS. Puede ser MENOR a lo que el sustrato
+    -- requiere (colores jaspeados: reactivo solo sobre algodón/poliéster deja el
+    -- poliéster blanco), pero nunca MAYOR — correr disperso sobre algodón puro no
+    -- tiene sentido. El techo es el MAX de lo que requieren los miembros del grupo.
+    SELECT MAX(a.fibra) INTO v_fibra_max
+    FROM grupo_articulo_miembro gm
+    JOIN articulo a ON a.id = gm.articulo_id
+    WHERE gm.grupo_articulo_id = v_grupo;
+
+    IF v_fibra_max IS NOT NULL AND v_fibra > v_fibra_max THEN
+        RAISE EXCEPTION
+            'fibra % excede el máximo del grupo (%): no se pueden correr más sistemas de tintura de los que requiere el sustrato.',
+            v_fibra, v_fibra_max
+            USING ERRCODE = 'check_violation';
     END IF;
 
     -- ── Roll validations (only when componentes provided) ────────────────────
@@ -485,16 +524,23 @@ BEGIN
                 USING DETAIL = v_error_payload::text;
         END IF;
 
-        -- Article type: all rolls must match the order's articulo_tipo_id
+        -- Composición: cada rollo asignado debe pertenecer al grupo de la partida.
+        -- Reemplaza la antigua igualdad contra grupo_articulo_id: misma severidad,
+        -- pero expresable para lotes mezclados — un grupo con varios miembros acepta
+        -- rollos de cualquiera de ellos, y sigue rechazando telas ajenas al grupo.
         IF EXISTS (
             SELECT 1
             FROM jsonb_array_elements(p_partida->'componentes') c
             JOIN inventario.lote l      ON l.id  = (c->>'lote_id')::int
             JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
             JOIN articulo a             ON a.id   = ird.articulo_id
-            WHERE a.articulo_tipo_id IS DISTINCT FROM (p_partida->>'articulo_tipo_id')::smallint
+            WHERE NOT EXISTS (
+                SELECT 1 FROM grupo_articulo_miembro gm
+                WHERE gm.grupo_articulo_id = v_grupo
+                  AND gm.articulo_id       = a.id
+            )
         ) THEN
-            RAISE EXCEPTION 'Los rollos asignados no coinciden con el tipo de artículo de la partida'
+            RAISE EXCEPTION 'Los rollos asignados no pertenecen al grupo de artículo de la partida'
                 USING ERRCODE = 'check_violation';
         END IF;
 
@@ -518,7 +564,7 @@ BEGIN
 
     -- ── Header ────────────────────────────────────────────────────────────────
     INSERT INTO mes.partida (
-        prioridad_id, tercero_id, tenido_id, articulo_tipo_id, fibra,
+        prioridad_id, tercero_id, tenido_id, grupo_articulo_id, fibra,
         malla, rendimiento, ancho, color_x_cliente_id, flg_antipilling, flg_doble_bolsa,
         fecha_acordada, observacion
     )
@@ -526,8 +572,8 @@ BEGIN
         (p_partida->>'prioridad_id')::int,
         (p_partida->>'tercero_id')::int,
         (p_partida->>'tenido_id')::int,
-        (p_partida->>'articulo_tipo_id')::smallint,
-        (p_partida->>'fibra')::smallint,
+        v_grupo,
+        v_fibra,
         p_partida->>'malla',
         p_partida->>'rendimiento',
         p_partida->>'ancho',
@@ -551,6 +597,7 @@ BEGIN
     IF p_partida->'pasos' IS NOT NULL AND jsonb_array_length(p_partida->'pasos') > 0 THEN
         -- Machine is assigned later on the scheduling board (mes.programacion), not here.
         -- Bath ratio lives on programacion (machine-coupled), not on paso.
+        -- Backend computes secuencia from array position to avoid frontend desync bugs.
         INSERT INTO mes.partida_paso(
             partida_id, secuencia, operacion_id,
             receta_id,
@@ -558,13 +605,13 @@ BEGIN
         )
         SELECT
             v_partida_id,
-            (p->>'secuencia')::smallint,
+            (ROW_NUMBER() OVER ()) * 10,
             (p->>'operacion_id')::smallint,
             (p->>'receta_id')::int,
             (p->>'ph_objetivo')::numeric,
             (p->>'temperatura_objetivo')::numeric,
             (p->>'tiempo_estandar')::int
-        FROM jsonb_array_elements(p_partida->'pasos') p;
+        FROM jsonb_array_elements(p_partida->'pasos') WITH ORDINALITY AS t(p, idx);
     END IF;
 
     -- ── Roll reservations (optional at creation; validated above if present) ──
@@ -696,14 +743,16 @@ BEGIN
     END IF;
 
     -------------------------------------------------------------------------
-    -- CREADA only: identity fields — tercero, tenido, color, articulo_tipo, fibra, antipilling
+    -- CREADA only: identity fields — tercero, tenido, color, grupo_articulo, fibra, antipilling
     -------------------------------------------------------------------------
     IF v_estado = 'CREADA' THEN
         UPDATE mes.partida
         SET tercero_id          = COALESCE((p_partida->>'tercero_id')::INT,           tercero_id),
             tenido_id           = COALESCE((p_partida->>'tenido_id')::INT,            tenido_id),
             color_x_cliente_id  = COALESCE((p_partida->>'color_x_cliente_id')::INT,  color_x_cliente_id),
-            articulo_tipo_id    = COALESCE((p_partida->>'articulo_tipo_id')::SMALLINT, articulo_tipo_id),
+            -- Identidad de sustrato: grupo_articulo_id. grupo_articulo_id lo deriva el
+            -- trigger trg_bi_partida_derive_grupo_articulo; nunca se escribe aquí.
+            grupo_articulo_id   = COALESCE((p_partida->>'grupo_articulo_id')::INT,   grupo_articulo_id),
             fibra               = COALESCE((p_partida->>'fibra')::SMALLINT,           fibra),
             flg_antipilling     = COALESCE((p_partida->>'flg_antipilling')::BOOLEAN,  flg_antipilling),
             flg_doble_bolsa     = COALESCE((p_partida->>'flg_doble_bolsa')::BOOLEAN,  flg_doble_bolsa),
@@ -820,56 +869,145 @@ BEGIN
     -- Bulk upsert: update existing, insert new (planning columns only)
     -- Machine is assigned on the scheduling board (mes.programacion), not on the step.
     -- Bath ratio lives on programacion (machine-coupled), not on paso.
+    -- Backend computes secuencia from array position to avoid frontend desync bugs.
+    --
+    -- secuencia MUST be numbered once across the whole ordered array — existing and
+    -- new pasos share the range, so numbering them in two independent passes lets a
+    -- new paso reuse a secuencia already held by an existing one (violates
+    -- partida_paso_partida_id_secuencia_key). We therefore:
+    --   0) delete removed pasos first (frees their secuencia slots),
+    --   1) park surviving existing pasos in a temporary high range so no live row
+    --      blocks the target secuencia (the unique constraint is not deferrable),
+    --   2) UPDATE existing + INSERT new using one unified ROW_NUMBER over the array.
+
+    -- 0) Eliminar pasos que ya no están en la lista (solo si no han sido ejecutados).
+    -- Cascade first into mes.programacion: a deleted paso may still be sitting on
+    -- the scheduling board, and leaving that row behind creates an orphan whose
+    -- actividad_id points at nothing (get_programacion_diaria then silently
+    -- returns paso_id=NULL for it, which poisons the frontend's next save).
+    DELETE FROM mes.programacion
+    WHERE actividad_tipo = 'partida_paso'
+      AND actividad_id IN (
+          SELECT pp.id
+          FROM mes.partida_paso pp
+          WHERE pp.partida_id = p_partida_id
+            AND pp.id NOT IN (
+                SELECT (p->>'id')::BIGINT
+                FROM jsonb_array_elements(p_pasos) p
+                WHERE p->>'id' IS NOT NULL
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM mes.partida_paso_ejecucion pe
+                WHERE pe.partida_paso_id = pp.id
+            )
+      );
+
+    DELETE FROM mes.partida_paso
+    WHERE partida_id = p_partida_id
+      AND id NOT IN (
+          SELECT (p->>'id')::BIGINT
+          FROM jsonb_array_elements(p_pasos) p
+          WHERE p->>'id' IS NOT NULL
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM mes.partida_paso_ejecucion pe
+          WHERE pe.partida_paso_id = mes.partida_paso.id
+      );
+
+    -- 1) Park all surviving pasos out of the target secuencia range so neither the
+    --    UPDATE nor the INSERT below transiently collides with a not-yet-moved row.
+    UPDATE mes.partida_paso
+    SET secuencia = secuencia + 10000
+    WHERE partida_id = p_partida_id
+      AND secuencia < 10000;
+
+    -- Unified ordering: existing (has id) and new (no id) pasos numbered together
+    -- by array position → 10, 20, 30 … with no cross-set overlap.
     WITH datos AS (
         SELECT
-            (p->>'id')::BIGINT                AS id,
-            (p->>'secuencia')::SMALLINT       AS secuencia,
-            (p->>'operacion_id')::SMALLINT    AS operacion_id,
-            (p->>'receta_id')::INT            AS receta_id,
-            (p->>'ph_objetivo')::NUMERIC      AS ph_objetivo,
+            (p->>'id')::BIGINT                    AS id,
+            (ROW_NUMBER() OVER ()) * 10           AS secuencia,
+            (p->>'operacion_id')::SMALLINT        AS operacion_id,
+            (p->>'receta_id')::INT                AS receta_id,
+            (p->>'ph_objetivo')::NUMERIC          AS ph_objetivo,
             (p->>'temperatura_objetivo')::NUMERIC AS temperatura_objetivo,
-            (p->>'tiempo_estandar')::INT      AS tiempo_estandar
-        FROM jsonb_array_elements(p_pasos) p
+            (p->>'tiempo_estandar')::INT          AS tiempo_estandar
+        FROM jsonb_array_elements(p_pasos) AS p
     )
+    -- 2a) Update existing pasos by id
+    UPDATE mes.partida_paso pp
+    SET secuencia = d.secuencia,
+        operacion_id = d.operacion_id,
+        receta_id = d.receta_id,
+        ph_objetivo = d.ph_objetivo,
+        temperatura_objetivo = d.temperatura_objetivo,
+        tiempo_estandar = d.tiempo_estandar,
+        usr_mod = v_usr_id,
+        fyh_mod = NOW()
+    FROM datos d
+    WHERE d.id IS NOT NULL
+      AND pp.id = d.id
+      AND NOT EXISTS (
+          SELECT 1 FROM mes.partida_paso_ejecucion pe
+          WHERE pe.partida_paso_id = pp.id
+            AND pe.estado IN ('EN_PROCESO', 'COMPLETADO', 'OMITIDO')
+      );
+
+    -- 2a-bis) Executed pasos are protected from column edits above, but their
+    -- secuencia must still follow their array position (kept in sync with the
+    -- reordered range) — otherwise the parked +10000 value would linger or the
+    -- restore step would land on a slot already taken. Move only secuencia.
+    UPDATE mes.partida_paso pp
+    SET secuencia = d.secuencia
+    FROM (
+        SELECT
+            (p->>'id')::BIGINT          AS id,
+            (ROW_NUMBER() OVER ()) * 10 AS secuencia
+        FROM jsonb_array_elements(p_pasos) AS p
+    ) d
+    WHERE d.id IS NOT NULL
+      AND pp.id = d.id
+      AND pp.secuencia >= 10000
+      AND EXISTS (
+          SELECT 1 FROM mes.partida_paso_ejecucion pe
+          WHERE pe.partida_paso_id = pp.id
+            AND pe.estado IN ('EN_PROCESO', 'COMPLETADO', 'OMITIDO')
+      );
+
+    -- 2b) Insert new pasos (without id), reusing the same unified secuencia
     INSERT INTO mes.partida_paso(
         partida_id, secuencia, operacion_id,
         receta_id,
         ph_objetivo, temperatura_objetivo, tiempo_estandar,
         usr_cre
     )
+    WITH datos AS (
+        SELECT
+            (p->>'id')::BIGINT                    AS id,
+            (ROW_NUMBER() OVER ()) * 10           AS secuencia,
+            (p->>'operacion_id')::SMALLINT        AS operacion_id,
+            (p->>'receta_id')::INT                AS receta_id,
+            (p->>'ph_objetivo')::NUMERIC          AS ph_objetivo,
+            (p->>'temperatura_objetivo')::NUMERIC AS temperatura_objetivo,
+            (p->>'tiempo_estandar')::INT          AS tiempo_estandar
+        FROM jsonb_array_elements(p_pasos) AS p
+    )
     SELECT p_partida_id, d.secuencia, d.operacion_id,
-           d.receta_id,
-           d.ph_objetivo, d.temperatura_objetivo, d.tiempo_estandar,
+           d.receta_id, d.ph_objetivo, d.temperatura_objetivo, d.tiempo_estandar,
            v_usr_id
     FROM datos d
-    ON CONFLICT (partida_id, secuencia)
-    DO UPDATE SET
-        operacion_id            = EXCLUDED.operacion_id,
-        receta_id               = EXCLUDED.receta_id,
-        ph_objetivo             = EXCLUDED.ph_objetivo,
-        temperatura_objetivo    = EXCLUDED.temperatura_objetivo,
-        tiempo_estandar         = EXCLUDED.tiempo_estandar,
-        usr_mod                 = v_usr_id,
-        fyh_mod                 = NOW()
-        WHERE NOT EXISTS (
-            SELECT 1 FROM mes.partida_paso_ejecucion pe
-            WHERE pe.partida_paso_id = mes.partida_paso.id
-              AND pe.estado IN ('EN_PROCESO', 'COMPLETADO', 'OMITIDO')
-        );
+    WHERE d.id IS NULL;
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
 
-    -- Eliminar pasos que ya no están en la lista (solo si no han sido ejecutados)
-    DELETE FROM mes.partida_paso
+    -- Safety net: any paso still parked (present in DB but absent from p_pasos and
+    -- undeletable due to an ejecucion) gets restored below the reordered range so it
+    -- never collides. Should be empty in normal edits — the frontend always sends
+    -- every non-removable paso — but guarantees no row is left stranded at +10000.
+    UPDATE mes.partida_paso
+    SET secuencia = secuencia - 10000 + 100000
     WHERE partida_id = p_partida_id
-      AND secuencia NOT IN (
-          SELECT (p->>'secuencia')::SMALLINT
-          FROM jsonb_array_elements(p_pasos) p
-      )
-      AND NOT EXISTS (
-          SELECT 1 FROM mes.partida_paso_ejecucion pe
-          WHERE pe.partida_paso_id = mes.partida_paso.id
-      );
+      AND secuencia >= 10000;
 
     PERFORM mes.actualizar_estado_partida(p_partida_id);
 
@@ -1016,20 +1154,6 @@ BEGIN
             USING ERRCODE = 'check_violation';
     END IF;
 
-    IF EXISTS (
-        SELECT 1
-        FROM jsonb_array_elements(p_componentes) i
-        JOIN inventario.lote l       ON l.id = (i->>'lote_id')::INT
-        JOIN item_rollo_detalle ird  ON ird.item_id = l.item_id
-        JOIN articulo a              ON a.id = ird.articulo_id
-        JOIN mes.partida p           ON p.id = p_partida_id
-        WHERE a.articulo_tipo_id IS DISTINCT FROM p.articulo_tipo_id
-    ) THEN
-        RAISE EXCEPTION
-            'Los rollos asignados no coinciden con el tipo de artículo de la partida (articulo_tipo_id)'
-            USING ERRCODE = 'check_violation';
-    END IF;
-
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('actualizar_componentes_partida', v_usr_id,
             jsonb_build_object('partida_id', p_partida_id, 'componentes', p_componentes));
@@ -1172,8 +1296,15 @@ $function$;
 
 
 
+-- RETURNS bigint (the created entrega_id) — changed 2026-07-14 from `text` (a
+-- formatted message) so callers get what a good RPC should return: the id.
+-- BREAKING CHANGE for both of its direct callers (receipt/CLIENTE_ENVIO_PROCESO
+-- and dispatch/VENTA_EGRESO+DESPACHO_CLIENTE flows) — frontend must be updated
+-- to read the returned id instead of a display message. See
+-- VENTA_MODULE_HANDOFF.md item 6b.
+-- DROP FUNCTION IF EXISTS doc.crear_entrega(jsonb);
 CREATE OR REPLACE FUNCTION doc.crear_entrega(p_entrega jsonb)
-RETURNS text
+RETURNS bigint
 LANGUAGE plpgsql
  SECURITY DEFINER
  SET search_path TO 'iam', 'notification', 'public','doc','inventario'
@@ -1208,6 +1339,21 @@ BEGIN
  IF v_entrega_tipo.codigo = 'COMPRA_INGRESO' THEN
      RAISE EXCEPTION 'Use doc.registrar_entrega_compra para entregas de proveedor (COMPRA_INGRESO).'
          USING HINT = 'crear_entrega handles client flows only (SERVICIO_INGRESO, despacho, devolucion).';
+ END IF;
+
+ -- Devolution tipos have dedicated RPCs with domain-specific validation.
+ IF v_entrega_tipo.codigo IN ('DEVOLUCION_CLIENTE_SERVICIO', 'DEVOLUCION_CLIENTE_VENTA') THEN
+     RAISE EXCEPTION 'Use doc.registrar_devolucion_cliente para devoluciones de cliente (%).',
+         v_entrega_tipo.codigo
+         USING HINT = 'registrar_devolucion_cliente validates prior dispatch to the same tercero.';
+ END IF;
+ IF v_entrega_tipo.codigo = 'DEVOLUCION_CLIENTE_CRUDO' THEN
+     RAISE EXCEPTION 'Use doc.registrar_devolucion_crudo_cliente para devoluciones de crudo.'
+         USING HINT = 'registrar_devolucion_crudo_cliente validates service ingress origin.';
+ END IF;
+ IF v_entrega_tipo.codigo = 'DEVOLUCION_PROVEEDOR' THEN
+     RAISE EXCEPTION 'Use doc.registrar_devolucion_proveedor para devoluciones a proveedor.'
+         USING HINT = 'registrar_devolucion_proveedor validates INSUMO item tipo.';
  END IF;
 
  -- Movement timestamp: for incoming entregas use fecha_recepcion (allows backdating), for outgoing use now()
@@ -1268,6 +1414,25 @@ IF v_entrega_tipo.flg_emitida THEN
                 DETAIL  = v_error_payload::text;
     END IF;
 END IF; -- stock validation (flg_emitida only)
+
+-- Guard: inbound devolutions (flg_emitida=false) must reference lots that are actually
+-- out (saldo=0). vw_stock_lotes only contains rows with cantidad_disponible > 0, so a
+-- JOIN hit means the lot is still in stock → already returned or never dispatched.
+IF NOT v_entrega_tipo.flg_emitida AND v_entrega_tipo.codigo LIKE 'DEVOLUCION%' THEN
+    SELECT jsonb_agg(jsonb_build_object('lote_id', ei.lote_id, 'cantidad_disponible', sl.cantidad_disponible))
+    INTO v_error_payload
+    FROM (
+        SELECT DISTINCT (i->>'lote_id')::int AS lote_id
+        FROM jsonb_array_elements(p_entrega->'items') i
+        WHERE (i->>'lote_id') IS NOT NULL
+    ) ei
+    JOIN inventario.vw_stock_lotes sl ON sl.lote_id = ei.lote_id;
+
+    IF v_error_payload IS NOT NULL THEN
+        RAISE EXCEPTION 'Devolución inválida: los siguientes lotes ya tienen stock positivo (¿ya fueron devueltos?)'
+            USING DETAIL = v_error_payload::text;
+    END IF;
+END IF;
 -----------------------------------------------------------------------------------------------------------------------
 -- tercero validation applies to all entrega types
 IF (p_entrega->>'tercero_id') IS NULL THEN
@@ -1415,7 +1580,7 @@ SELECT ur.user_id,'Nueva entrega y movimientos', COALESCE((SELECT COALESCE(nombr
 FROM iam.user_rol ur LEFT JOIN usuario p ON p.id=ur.user_id
 LEFT JOIN iam.rol r ON ur.rol_id=r.id
 WHERE r.code IN ('jefe_planta','compras','inventario') AND v_usr_id<>ur.user_id;
-   RETURN format('Guía de remisión con ID %s creada correctamente.', v_entrega_id);
+   RETURN v_entrega_id;
 EXCEPTION
     WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS
@@ -1453,13 +1618,11 @@ GRANT USAGE ON SCHEMA mes to authenticated;
 --
 -- p_datos:
 -- {
---   "serie":         "F",          -- optional; hilo invoice series
---   "correlativo":   "201",        -- optional; hilo invoice number (NULL → headless entrega)
---   "fecha_emision": "2026-06-25", -- optional, defaults to today
---   "ubicacion_id":  8,            -- optional, defaults to ALM_CRU
---   "observacion":   null,
---   "rendimiento":   "3.90",       -- applied to all rolls (lrd.rendimiento)
---   "ancho":         "90",         -- applied to all rolls (lrd.ancho)
+--   "correlativo":     "F-201/2024",  -- required; hilo supplier invoice/factura
+--   "fecha_emision":   "2026-06-25", -- optional, defaults to today
+--   "ubicacion_id":    8,            -- optional, defaults to ALM_CRU
+--   "rendimiento":     "3.90",       -- applied to all rolls (lrd.rendimiento)
+--   "ancho":           "90",         -- applied to all rolls (lrd.ancho)
 --   "flg_antipilling": false,
 --   "lineas": [
 --     {
@@ -1471,6 +1634,10 @@ GRANT USAGE ON SCHEMA mes to authenticated;
 --     }
 --   ]
 -- }
+-- serie auto-generated (serie='II-'||nextval(ingreso_interno_seq)) so the same
+-- factura hilo can recur across multiple ingress dates without violating
+-- UNIQUE(tercero_id, serie, correlativo, entrega_tipo_id). correlativo is the
+-- user-supplied factura hilo reference — required.
 -- Returns the new entrega_id (BIGINT).
 -- ═══════════════════════════════════════════════════════════════
 CREATE OR REPLACE FUNCTION doc.crear_ingreso_interno(p_datos jsonb)
@@ -1504,6 +1671,10 @@ BEGIN
     INSERT INTO logs_api(function_name, user_id, params)
     VALUES ('crear_ingreso_interno', v_usr_id, p_datos);
 
+    IF NULLIF(TRIM(p_datos->>'correlativo'), '') IS NULL THEN
+        RAISE EXCEPTION 'crear_ingreso_interno: correlativo (factura hilo) es requerido';
+    END IF;
+
     SELECT id INTO STRICT v_ent_tipo_id
     FROM doc.entrega_tipo WHERE codigo = 'INGRESO_INTERNO';
 
@@ -1524,14 +1695,13 @@ BEGIN
     INSERT INTO doc.entrega (
         entrega_tipo_id, tercero_id,
         serie,                  correlativo,
-        fecha_emision, observacion, usr_cre
+        fecha_emision, usr_cre
     ) VALUES (
         v_ent_tipo_id,
         1,  -- MLR self; INGRESO_INTERNO has no external counterparty
-        p_datos->>'serie',       -- e.g. 'F'; NULL → headless
-        p_datos->>'correlativo', -- e.g. '201' or '201 / 2024'
+        'II-' || nextval('doc.ingreso_interno_seq')::TEXT,  -- auto, always unique
+        p_datos->>'correlativo',  -- hilo supplier invoice/factura, e.g. 'F-201/2024'
         COALESCE((p_datos->>'fecha_emision')::DATE, CURRENT_DATE),
-        p_datos->>'observacion',
         v_usr_id
     )
     RETURNING id INTO v_ent_id;
@@ -1694,6 +1864,310 @@ WHERE gr.id = p_entrega_id;
 $$;
 
 GRANT EXECUTE ON FUNCTION doc.get_entrega(BIGINT) TO authenticated;
+
+-- ═══════════════════════════════════════════════════════════════
+-- doc.actualizar_entrega
+-- Edit an inbound entrega (SERVICIO_INGRESO, COMPRA_INGRESO, etc.)
+-- in-place without changing its ID.
+--
+-- Header fields (all optional — omit key to keep current value):
+--   serie, correlativo, fecha_emision, fecha_recepcion, tercero_id
+--
+-- Line edit (supply "items" key to replace all lines):
+--   Reverses the original inventory movements, soft-deletes the lotes
+--   created by this entrega, deletes entrega_detalle rows, then
+--   recreates everything exactly as crear_entrega would.
+--   Items without lote_id → new-roll path (create lotes + lrd).
+--   Items with lote_id    → devolution path (move existing lote).
+--
+-- Blocked when:
+--   • entrega is anulada
+--   • entrega is outbound (flg_emitida = true) — use anular + crear
+--   • any lote born from this entrega has downstream movements
+-- ═══════════════════════════════════════════════════════════════
+CREATE OR REPLACE FUNCTION doc.actualizar_entrega(
+    p_entrega_id BIGINT,
+    p_datos      JSONB
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'iam', 'notification', 'public', 'doc', 'inventario'
+AS $function$
+DECLARE
+    v_usr_id        INT  := get_user_id();
+    v_entrega       RECORD;
+    v_reversal_tipo SMALLINT;
+    v_doc_mov_id    BIGINT;
+    v_fecha_mov     TIMESTAMPTZ;
+    v_linea_rec     RECORD;
+    v_detalle_id    BIGINT;
+    v_compra_id     BIGINT;
+    v_compra_det_id BIGINT;
+BEGIN
+    IF NOT jwt_has_permission('comercial.editar') THEN
+        RAISE EXCEPTION 'Sin permiso: se requiere comercial.editar'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO logs_api(function_name, user_id, params)
+    VALUES ('actualizar_entrega', v_usr_id,
+            jsonb_build_object('entrega_id', p_entrega_id, 'datos', p_datos));
+
+    SELECT gr.id, gr.fyh_elm, gr.tercero_id,
+           grt.flg_emitida, grt.codigo AS tipo_codigo,
+           grt.item_movimiento_tipo_id
+    INTO v_entrega
+    FROM doc.entrega gr
+    JOIN doc.entrega_tipo grt ON grt.id = gr.entrega_tipo_id
+    WHERE gr.id = p_entrega_id
+    FOR UPDATE OF gr;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Guía #% no encontrada.', p_entrega_id;
+    END IF;
+    IF v_entrega.fyh_elm IS NOT NULL THEN
+        RAISE EXCEPTION 'Guía #% ya está anulada; no se puede editar.', p_entrega_id;
+    END IF;
+    IF v_entrega.flg_emitida THEN
+        RAISE EXCEPTION
+            'Guía #% es una guía de salida; use anular + crear para corregirla.',
+            p_entrega_id
+            USING HINT = 'actualizar_entrega sólo admite guías de entrada (flg_emitida = false).';
+    END IF;
+
+    -- Devolution tipos have dedicated anulación RPCs (funciones/devoluciones.sql)
+    -- and no edit path — anular + re-registrar with the correct data instead.
+    IF v_entrega.tipo_codigo IN ('DEVOLUCION_CLIENTE_SERVICIO', 'DEVOLUCION_CLIENTE_VENTA') THEN
+        RAISE EXCEPTION 'Use doc.anular_devolucion_cliente para corregir esta devolución (%).', v_entrega.tipo_codigo;
+    END IF;
+
+    -- Block if any lote born from this entrega has downstream movements
+    IF EXISTS (
+        SELECT 1
+        FROM inventario.lote l
+        JOIN inventario.item_movimientos im ON im.lote_id = l.id
+        WHERE l.documento_tipo = 'entrega'
+          AND l.documento_id   = p_entrega_id
+          AND l.fyh_elm        IS NULL
+          AND NOT (im.documento_tipo = 'entrega' AND im.documento_id = p_entrega_id)
+    ) THEN
+        RAISE EXCEPTION
+            'No se puede editar la guía #%: uno o más lotes ya tienen movimientos posteriores (producción, pesaje, redespacho).',
+            p_entrega_id;
+    END IF;
+
+    -- ── Header update (only fields present in p_datos are touched) ──────────
+    UPDATE doc.entrega SET
+        serie           = CASE WHEN p_datos ? 'serie'
+                               THEN p_datos->>'serie'
+                               ELSE serie           END,
+        correlativo     = CASE WHEN p_datos ? 'correlativo'
+                               THEN p_datos->>'correlativo'
+                               ELSE correlativo     END,
+        fecha_emision   = CASE WHEN p_datos ? 'fecha_emision'
+                               THEN (p_datos->>'fecha_emision')::TIMESTAMPTZ
+                               ELSE fecha_emision   END,
+        fecha_recepcion = CASE WHEN p_datos ? 'fecha_recepcion'
+                               THEN (p_datos->>'fecha_recepcion')::TIMESTAMPTZ
+                               ELSE fecha_recepcion END,
+        tercero_id      = CASE WHEN p_datos ? 'tercero_id'
+                               THEN (p_datos->>'tercero_id')::INT
+                               ELSE tercero_id      END,
+        usr_mod         = v_usr_id,
+        fyh_mod         = NOW()
+    WHERE id = p_entrega_id;
+
+    -- ── Line replacement (only when "items" key is supplied) ────────────────
+    IF p_datos ? 'items' THEN
+
+        -- Resolve the PO this entrega is linked to (if any), so replacement
+        -- lines can keep the EKPO link and cantidad_recibida can be resynced.
+        SELECT ce.compra_id INTO v_compra_id
+        FROM doc.compra_entrega ce WHERE ce.entrega_id = p_entrega_id LIMIT 1;
+
+        -- Resolve the paired reversal movement tipo (same table as anular_entrega)
+        SELECT imt2.id INTO v_reversal_tipo
+        FROM inventario.item_movimiento_tipo imt1
+        JOIN inventario.item_movimiento_tipo imt2
+          ON imt2.codigo = CASE imt1.codigo
+              WHEN 'COMPRA_ING' THEN 'DEV_PROV_EGR'
+              WHEN 'SERV_ING'   THEN 'DEV_CLI_EGR'
+              WHEN 'SERV_EGR'   THEN 'SERV_DEV_ING'
+              WHEN 'VENTA_EGR'  THEN 'DEV_CLI_ING'
+              ELSE NULL END
+        WHERE imt1.id = v_entrega.item_movimiento_tipo_id;
+
+        IF v_reversal_tipo IS NULL THEN
+            RAISE EXCEPTION
+                'Guía #%: no existe tipo de movimiento de reversal para "%". Contactar administrador.',
+                p_entrega_id, v_entrega.tipo_codigo;
+        END IF;
+
+        -- Post counter-movements for all original movements
+        SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
+
+        INSERT INTO inventario.item_movimientos (
+            doc_movimiento_id, item_id, lote_id,
+            item_movimiento_tipo_id,
+            origen_ubicacion_id, destino_ubicacion_id,
+            cantidad, fecha_hora,
+            documento_tipo, documento_id, observacion
+        )
+        SELECT
+            v_doc_mov_id, im.item_id, im.lote_id,
+            v_reversal_tipo,
+            im.destino_ubicacion_id,  -- swap: was destination, now origin
+            im.origen_ubicacion_id,   -- swap: was origin, now destination
+            im.cantidad, NOW(),
+            'entrega', p_entrega_id,
+            'EDICION guía #' || p_entrega_id
+        FROM inventario.item_movimientos im
+        WHERE im.documento_tipo = 'entrega'
+          AND im.documento_id   = p_entrega_id;
+
+        -- Soft-delete lotes that were created by this entrega
+        UPDATE inventario.lote
+        SET usr_elm = v_usr_id, fyh_elm = NOW()
+        WHERE documento_tipo = 'entrega'
+          AND documento_id   = p_entrega_id
+          AND fyh_elm        IS NULL;
+
+        -- Drop old detalle lines
+        DELETE FROM doc.entrega_detalle WHERE entrega_id = p_entrega_id;
+
+        -- New doc_mov_id for the incoming replacement movements
+        SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
+
+        v_fecha_mov := COALESCE(
+            (p_datos->>'fecha_recepcion')::TIMESTAMPTZ,
+            NOW()
+        );
+
+        -- (a) New-roll lines (lote_id absent): create lotes + lrd + movements
+        FOR v_linea_rec IN
+            SELECT
+                COALESCE((item->>'linea')::SMALLINT, idx::SMALLINT) AS linea,
+                (item->>'item_id')::INT                             AS item_id,
+                (item->>'ubicacion_id')::INT                        AS ubicacion_id,
+                (item->>'cantidad')::NUMERIC                        AS cantidad,
+                COALESCE((item->>'cantidad_rollos')::INT, 1)        AS cantidad_rollos,
+                (item->>'compra_detalle_id')::BIGINT                AS compra_detalle_id_explicit
+            FROM jsonb_array_elements(p_datos->'items') WITH ORDINALITY AS t(item, idx)
+            WHERE item->>'lote_id' IS NULL
+        LOOP
+            -- Resolve EKPO link: explicit from payload, or auto-match by item_id
+            -- (mirrors doc.registrar_entrega_compra) so the corrected line keeps
+            -- counting toward the PO instead of going silently unlinked.
+            v_compra_det_id := v_linea_rec.compra_detalle_id_explicit;
+            IF v_compra_det_id IS NULL AND v_compra_id IS NOT NULL THEN
+                SELECT id INTO v_compra_det_id
+                FROM doc.compra_detalle
+                WHERE compra_id = v_compra_id AND item_id = v_linea_rec.item_id
+                ORDER BY id LIMIT 1;
+            END IF;
+
+            INSERT INTO doc.entrega_detalle (entrega_id, linea, item_id, cantidad, n_rollos, compra_detalle_id)
+            VALUES (p_entrega_id, v_linea_rec.linea, v_linea_rec.item_id,
+                    v_linea_rec.cantidad, v_linea_rec.cantidad_rollos, v_compra_det_id)
+            RETURNING id INTO v_detalle_id;
+
+            WITH nuevos_lotes AS (
+                INSERT INTO inventario.lote (
+                    item_id, documento_tipo, documento_id,
+                    cantidad, propietario_id, usr_cre
+                )
+                SELECT
+                    v_linea_rec.item_id, 'entrega', p_entrega_id,
+                    COALESCE(
+                        v_linea_rec.cantidad / NULLIF(v_linea_rec.cantidad_rollos, 0),
+                        v_linea_rec.cantidad
+                    ),
+                    (p_datos->>'propietario_id')::INT,
+                    v_usr_id
+                FROM generate_series(1, v_linea_rec.cantidad_rollos)
+                RETURNING id, item_id, cantidad
+            ),
+            lrd_rows AS (
+                INSERT INTO inventario.lote_rollo_detalle (lote_id, entrega_id, flg_tenido)
+                SELECT nl.id, p_entrega_id, false
+                FROM nuevos_lotes nl
+                JOIN item      i  ON i.id  = nl.item_id
+                JOIN item_tipo it ON it.id = i.item_tipo_id AND it.codigo = 'ROLLO'
+            )
+            INSERT INTO inventario.item_movimientos (
+                doc_movimiento_id, item_id, lote_id,
+                item_movimiento_tipo_id,
+                origen_ubicacion_id, destino_ubicacion_id,
+                cantidad, fecha_hora,
+                documento_tipo, documento_id, documento_linea_id, usr_cre
+            )
+            SELECT
+                v_doc_mov_id, nl.item_id, nl.id,
+                v_entrega.item_movimiento_tipo_id,
+                NULL,
+                COALESCE((p_datos->>'destino_ubicacion_id')::INT, v_linea_rec.ubicacion_id),
+                nl.cantidad, v_fecha_mov,
+                'entrega', p_entrega_id, v_detalle_id, v_usr_id
+            FROM nuevos_lotes nl;
+        END LOOP;
+
+        -- (b) Devolution lines (lote_id present): move existing lotes back in
+        WITH items AS (
+            SELECT
+                COALESCE((item->>'linea')::SMALLINT, idx::SMALLINT) AS linea,
+                (item->>'item_id')::INT                             AS item_id,
+                (item->>'cantidad')::NUMERIC(12,4)                  AS cantidad,
+                (item->>'lote_id')::INT                             AS lote_id,
+                (item->>'ubicacion_id')::INT                        AS ubicacion_id,
+                COALESCE(
+                    (item->>'compra_detalle_id')::BIGINT,
+                    (SELECT cd.id FROM doc.compra_detalle cd
+                     WHERE cd.compra_id = v_compra_id AND cd.item_id = (item->>'item_id')::INT
+                     ORDER BY cd.id LIMIT 1)
+                ) AS compra_detalle_id
+            FROM jsonb_array_elements(p_datos->'items') WITH ORDINALITY AS t(item, idx)
+            WHERE item->>'lote_id' IS NOT NULL
+        ),
+        det AS (
+            INSERT INTO doc.entrega_detalle
+                (entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id, compra_detalle_id)
+            SELECT p_entrega_id, linea, item_id, cantidad, lote_id, ubicacion_id, compra_detalle_id
+            FROM items
+            RETURNING id, linea
+        )
+        INSERT INTO inventario.item_movimientos (
+            doc_movimiento_id, item_id, lote_id,
+            item_movimiento_tipo_id,
+            destino_ubicacion_id,
+            cantidad, fecha_hora,
+            documento_tipo, documento_id, documento_linea_id
+        )
+        SELECT
+            v_doc_mov_id, i.item_id, i.lote_id,
+            v_entrega.item_movimiento_tipo_id,
+            i.ubicacion_id,
+            i.cantidad, v_fecha_mov,
+            'entrega', p_entrega_id, d.id
+        FROM items i
+        JOIN det d ON d.linea = i.linea;
+
+        -- Resync compra_detalle.cantidad_recibida against the movements just posted
+        IF v_compra_id IS NOT NULL THEN
+            PERFORM doc.fn_refresh_compra_detalle_qtys(v_compra_id);
+        END IF;
+
+    END IF; -- items replacement
+
+    RETURN format('Guía #%s actualizada correctamente.', p_entrega_id);
+EXCEPTION WHEN OTHERS THEN
+    RAISE LOG 'Error in actualizar_entrega - User: %, entrega: %, Error: %',
+        v_usr_id, p_entrega_id, SQLERRM;
+    RAISE;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION doc.actualizar_entrega(BIGINT, JSONB) TO authenticated;
 
 GRANT EXECUTE ON FUNCTION mes.crear_partida(jsonb)                            TO authenticated;
 GRANT EXECUTE ON FUNCTION mes.actualizar_partida(int, jsonb)                  TO authenticated;

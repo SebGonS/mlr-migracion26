@@ -47,6 +47,7 @@ DECLARE
     v_message text; v_detail text; v_hint text; v_context text; v_sqlstate text;
     v_usr_id            int     := get_user_id();
     v_item_id           int;
+    v_entrega_id        bigint;
     v_peso_actual       numeric;
     v_peso_declarado    numeric;
     v_ubicacion_id      int;
@@ -63,28 +64,57 @@ BEGIN
         RAISE EXCEPTION 'Se requiere motivo para anular el pesaje.';
     END IF;
 
-    -- Resolve lote + declared weight from entrega ingress
-    SELECT l.item_id, l.cantidad, grd.cantidad
-    INTO   v_item_id, v_peso_actual, v_peso_declarado
+    -- Resolve lote + originating entrega header
+    SELECT l.item_id, l.cantidad, lrd.entrega_id
+    INTO   v_item_id, v_peso_actual, v_entrega_id
     FROM   inventario.lote l
     JOIN   inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
-    JOIN   doc.entrega_detalle grd     ON grd.id = lrd.entrega_detalle_id
     WHERE  l.id = p_lote_id AND l.fyh_elm IS NULL;
 
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'Lote % no encontrado, ya anulado, o sin guía de ingreso asociada.', p_lote_id;
+        RAISE EXCEPTION 'Lote % no encontrado, ya anulado, o sin registro de rollo asociado.', p_lote_id;
+    END IF;
+
+    IF v_entrega_id IS NULL THEN
+        RAISE EXCEPTION 'Lote % no tiene guía de ingreso asociada.', p_lote_id;
+    END IF;
+
+    -- Declared weight: prefer a per-roll line (lote_id set directly).
+    -- Fall back to an aggregated line (lote_id NULL, n_rollos > 1, used by
+    -- compra-sourced ingresos — see funciones/compras.sql) prorated evenly
+    -- across its declared roll count.
+    SELECT grd.cantidad INTO v_peso_declarado
+    FROM doc.entrega_detalle grd
+    WHERE grd.lote_id = p_lote_id;
+
+    IF NOT FOUND THEN
+        SELECT grd.cantidad / NULLIF(grd.n_rollos, 0) INTO v_peso_declarado
+        FROM doc.entrega_detalle grd
+        WHERE grd.entrega_id = v_entrega_id
+          AND grd.item_id    = v_item_id
+          AND grd.lote_id IS NULL;
+    END IF;
+
+    IF v_peso_declarado IS NULL THEN
+        RAISE EXCEPTION 'Lote % (guía %): no se encontró línea de entrega_detalle para determinar el peso declarado.',
+            p_lote_id, v_entrega_id;
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM inventario.pesaje WHERE lote_id = p_lote_id) THEN
         RAISE EXCEPTION 'Lote % no tiene registro de pesaje activo.', p_lote_id;
     END IF;
 
-    -- Guard: no downstream beyond PESAJE_POS/NEG (roll not yet in production)
+    -- Guard: no downstream beyond PESAJE_POS/NEG and the lote's own ingress
+    -- movement (roll not yet in production). The ingress movement itself
+    -- (documento_tipo='entrega', documento_id=v_entrega_id) is what created
+    -- the lote and is not a downstream event — exclude it, mirroring the
+    -- equivalent guard in doc.anular_entrega.
     IF EXISTS (
         SELECT 1 FROM inventario.item_movimientos im
         JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
         WHERE im.lote_id = p_lote_id
           AND imt.codigo NOT IN ('PESAJE_POS', 'PESAJE_NEG')
+          AND NOT (im.documento_tipo = 'entrega' AND im.documento_id = v_entrega_id)
     ) THEN
         RAISE EXCEPTION
             'Lote % ya tiene movimientos de producción u otros. No se puede anular el pesaje.',
@@ -226,6 +256,7 @@ DECLARE
     v_tipo_ajuste_pos   smallint;
     v_tipo_ajuste_neg   smallint;
     v_doc_mov_id        bigint;
+    v_orig_doc_mov_ids  bigint[];
     v_count_neg         int;
     v_count_pos         int;
 BEGIN
@@ -248,7 +279,25 @@ BEGIN
             p_cuadre_id, v_cuadre_estado;
     END IF;
 
-    -- Guard: surplus lotes created by this cuadre must have no downstream movements
+    SELECT id INTO v_tipo_ajuste_pos FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS';
+    SELECT id INTO v_tipo_ajuste_neg FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG';
+    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
+
+    -- Scope to only the movements posted by the most recent finalizar_cuadre
+    -- call (its single doc_movimiento_id batch). A cuadre may have been
+    -- finalized more than once historically (finalize -> anular -> finalize
+    -- again); reversing the whole documento_id history would also re-touch
+    -- prior, already-settled batches and (worse) the counter-movements this
+    -- same call is about to insert, since they share documento_id too.
+    SELECT ARRAY[MAX(im.doc_movimiento_id)]
+    INTO   v_orig_doc_mov_ids
+    FROM   inventario.item_movimientos im
+    JOIN   inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+    WHERE  im.documento_tipo = 'cuadre'
+      AND  im.documento_id   = p_cuadre_id
+      AND  imt.codigo IN ('AJUSTE_NEG','AJUSTE_POS');
+
+    -- Guard: surplus lotes created by this batch must have no downstream movements
     IF EXISTS (
         SELECT 1
         FROM   inventario.lote l
@@ -256,21 +305,25 @@ BEGIN
         JOIN   inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
         WHERE  l.documento_tipo = 'cuadre'
           AND  l.documento_id   = p_cuadre_id
-          AND  imt.codigo       <> 'AJUSTE_POS'
+          AND  EXISTS (
+              SELECT 1 FROM inventario.item_movimientos im2
+              JOIN inventario.item_movimiento_tipo imt2 ON imt2.id = im2.item_movimiento_tipo_id
+              WHERE im2.lote_id = l.id
+                AND im2.doc_movimiento_id = ANY(v_orig_doc_mov_ids)
+                AND imt2.codigo = 'AJUSTE_POS'
+          )
+          AND  im.doc_movimiento_id <> ALL(v_orig_doc_mov_ids)
     ) THEN
         RAISE EXCEPTION
             'No se puede anular el cuadre #%: los lotes de sobrante ya tienen movimientos posteriores. Anule esos documentos primero.',
             p_cuadre_id;
     END IF;
 
-    SELECT id INTO v_tipo_ajuste_pos FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_POS';
-    SELECT id INTO v_tipo_ajuste_neg FROM inventario.item_movimiento_tipo WHERE codigo = 'AJUSTE_NEG';
-    SELECT nextval('inventario.mov_doc_seq') INTO v_doc_mov_id;
-
     -- Reverse AJUSTE_NEG (faltantes): restore each deducted lote back to stock
     INSERT INTO inventario.item_movimientos(
         doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-        destino_ubicacion_id, cantidad, precio_unitario, documento_tipo, documento_id
+        destino_ubicacion_id, cantidad, precio_unitario, documento_tipo, documento_id,
+        reversion_movimiento_id
     )
     SELECT
         v_doc_mov_id,
@@ -278,19 +331,22 @@ BEGIN
         im.origen_ubicacion_id,   -- was taken from here → restore to same location
         im.cantidad,
         im.precio_unitario,
-        'cuadre', p_cuadre_id
+        'cuadre', p_cuadre_id,
+        im.id
     FROM   inventario.item_movimientos im
     JOIN   inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-    WHERE  im.documento_tipo = 'cuadre'
-      AND  im.documento_id   = p_cuadre_id
-      AND  imt.codigo        = 'AJUSTE_NEG';
+    WHERE  im.documento_tipo   = 'cuadre'
+      AND  im.documento_id     = p_cuadre_id
+      AND  im.doc_movimiento_id = ANY(v_orig_doc_mov_ids)
+      AND  imt.codigo          = 'AJUSTE_NEG';
 
     GET DIAGNOSTICS v_count_neg = ROW_COUNT;
 
     -- Reverse AJUSTE_POS (sobrantes): remove each surplus lote from stock
     INSERT INTO inventario.item_movimientos(
         doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-        origen_ubicacion_id, cantidad, precio_unitario, documento_tipo, documento_id
+        origen_ubicacion_id, cantidad, precio_unitario, documento_tipo, documento_id,
+        reversion_movimiento_id
     )
     SELECT
         v_doc_mov_id,
@@ -298,21 +354,31 @@ BEGIN
         im.destino_ubicacion_id,  -- was added here → remove from same location
         im.cantidad,
         im.precio_unitario,
-        'cuadre', p_cuadre_id
+        'cuadre', p_cuadre_id,
+        im.id
     FROM   inventario.item_movimientos im
     JOIN   inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
-    WHERE  im.documento_tipo = 'cuadre'
-      AND  im.documento_id   = p_cuadre_id
-      AND  imt.codigo        = 'AJUSTE_POS';
+    WHERE  im.documento_tipo   = 'cuadre'
+      AND  im.documento_id     = p_cuadre_id
+      AND  im.doc_movimiento_id = ANY(v_orig_doc_mov_ids)
+      AND  imt.codigo          = 'AJUSTE_POS';
 
     GET DIAGNOSTICS v_count_pos = ROW_COUNT;
 
-    -- Soft-delete surplus lotes created by the cuadre
-    UPDATE inventario.lote
+    -- Soft-delete surplus lotes created by the batch being reversed
+    UPDATE inventario.lote l
     SET fyh_elm = NOW(), usr_elm = v_usr_id
-    WHERE documento_tipo = 'cuadre'
-      AND documento_id   = p_cuadre_id
-      AND fyh_elm        IS NULL;
+    WHERE l.documento_tipo = 'cuadre'
+      AND l.documento_id   = p_cuadre_id
+      AND l.fyh_elm        IS NULL
+      AND EXISTS (
+          SELECT 1
+          FROM   inventario.item_movimientos im
+          JOIN   inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+          WHERE  im.lote_id = l.id
+            AND  im.doc_movimiento_id = ANY(v_orig_doc_mov_ids)
+            AND  imt.codigo = 'AJUSTE_POS'
+      );
 
     -- Reset cuadre to borrador
     UPDATE inventario.cuadre
@@ -610,10 +676,22 @@ BEGIN
         RAISE EXCEPTION 'Inspección #% no encontrada.', p_inspeccion_id;
     END IF;
 
-    -- Lote must still be alive
-    IF NOT EXISTS (SELECT 1 FROM inventario.lote WHERE id = v_lote_id AND fyh_elm IS NULL) THEN
-        RAISE EXCEPTION
-            'El lote #% ya fue dado de baja. Use calidad.revertir_baja_lote primero.', v_lote_id;
+    -- Lote must still be alive, UNLESS it was soft-deleted by mes.anular_produccion
+    -- reversing the very step that created it (PROD_ING_REV, no PROD_SCRAP). That case
+    -- predates the guard added to anular_produccion that now blocks it going forward —
+    -- this branch exists only to unblock inspections already orphaned that way. There is
+    -- nothing to restore (the roll legitimately no longer exists); just drop the record.
+    IF EXISTS (SELECT 1 FROM inventario.lote WHERE id = v_lote_id AND fyh_elm IS NOT NULL) THEN
+        IF EXISTS (
+            SELECT 1 FROM inventario.item_movimientos im
+            JOIN inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
+            WHERE im.lote_id = v_lote_id AND imt.codigo = 'PROD_SCRAP'
+        ) THEN
+            RAISE EXCEPTION
+                'El lote #% ya fue dado de baja. Use calidad.revertir_baja_lote primero.', v_lote_id;
+        END IF;
+        -- else: lote was reversed via mes.anular_produccion — fall through and delete
+        -- the orphaned inspection below.
     END IF;
 
     -- Guard: no dispatch or scrap movements
@@ -699,6 +777,7 @@ DECLARE
     v_ubicacion_id      int;
     v_scrap_rev_tipo_id smallint;
     v_doc_mov_id        bigint;
+    v_scrap_mov_id      bigint;
 BEGIN
     IF NOT jwt_has_permission('calidad.crear') THEN
         RAISE EXCEPTION 'Sin permiso: se requiere calidad.crear'
@@ -748,7 +827,7 @@ BEGIN
     WHERE  l.id = p_lote_id;
 
     -- Restore to the same location the PROD_SCRAP movement took from
-    SELECT im.origen_ubicacion_id INTO v_ubicacion_id
+    SELECT im.id, im.origen_ubicacion_id INTO v_scrap_mov_id, v_ubicacion_id
     FROM   inventario.item_movimientos im
     JOIN   inventario.item_movimiento_tipo imt ON imt.id = im.item_movimiento_tipo_id
     WHERE  im.lote_id = p_lote_id AND imt.codigo = 'PROD_SCRAP'
@@ -766,11 +845,13 @@ BEGIN
     -- PROD_SCRAP_REV: ingress — restores roll to stock at its original location
     INSERT INTO inventario.item_movimientos(
         doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
-        destino_ubicacion_id, cantidad, documento_tipo, documento_id
+        destino_ubicacion_id, cantidad, documento_tipo, documento_id,
+        reversion_movimiento_id
     )
     VALUES (
         v_doc_mov_id, v_item_id, p_lote_id, v_scrap_rev_tipo_id,
-        v_ubicacion_id, v_cantidad, 'calidad_baja', p_lote_id
+        v_ubicacion_id, v_cantidad, 'calidad_baja', p_lote_id,
+        v_scrap_mov_id
     );
 
     -- Un-delete lote
@@ -905,3 +986,4 @@ END;
 $function$;
 
 GRANT EXECUTE ON FUNCTION calidad.bulk_anular_decision_calidad(INT[], TEXT) TO authenticated;
+

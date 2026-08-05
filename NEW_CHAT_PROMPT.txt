@@ -1,0 +1,32 @@
+Continue the MLR migration venta/commercial-layer work. Read
+VENTA_MIGRATION_HANDOFF_2026-07-20.md in the project root FIRST — it has the full
+status, what's done/committed, what's mid-flight, and exact next steps. Then read
+PRICING_OWNERSHIP_MODEL.md and VENTA_MODULE_HANDOFF.md for the settled design (don't
+re-litigate anything marked DONE there).
+
+START with item C in the handoff (highest priority, unresolved): run
+migration/diagnostics/venta_detalle_schema_check.sql to check whether doc.venta_detalle
+uses articulo_tipo_id (what the committed migrate_despacho_to_venta.sql wrote) or
+grupo_articulo_id (what the current doc.vw_venta reads) — if they differ, all 6,704
+migrated venta_detalle lines from the despacho→venta migration may be silently missing
+their article classification, and need a backfill UPDATE (not a re-migration).
+
+THEN item A: run migration/diagnostics/factura_format_fixable_v2.sql §1/§2 (a corrected
+version of an earlier buggy diagnostic — v1 mis-flagged G01/G03/G06 internal refs as
+"fixable factura format" when they were never real facturas) to get the real, small set
+of despacho nfactura values that are genuine typo'd facturas (e.g. "F/002-0010502") vs.
+correctly-null internal refs / multi-factura / lost-conflict-tiebreak rows. Then write a
+small scoped UPDATE to fix just those, dry-run → verify → commit, same pattern as
+migrate_despacho_to_venta.sql.
+
+Item B (per-roll price display on vw_venta) is drafted in the handoff file but was
+reverted by the user — only re-apply if asked; confirm first whether it was ever run
+against the live DB before the revert.
+
+WORKING RULES (established this session, keep to them): DRY-RUN §0 → run §1 in a txn →
+VERIFY §2 → user pastes results → COMMIT. Never commit unverified. Legacy-gate on
+partida.fyh_cre <= '2026-05-25 15:27:52+00'::timestamptz where relevant. despacho.precio_unit
+is uniformly per-kg — never convert it, that was disproven twice already (see
+pricing-ownership-model memory / PRICING_OWNERSHIP_MODEL.md for the full reasoning
+chain — don't re-derive it). uq_venta_factura is a GLOBAL unique index
+(factura_serie, factura_numero), not per-tercero.

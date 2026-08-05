@@ -38,37 +38,51 @@
 -- ── Step 1: guard — abort if any base/antipilling pair disagrees on precio_kg ──
 -- If this fires, someone negotiated a genuinely different antipilling rate and
 -- the collapse below would silently destroy that. Resolve manually, then re-run.
+--
+-- Steps 1 and 2 are wrapped in a column-existence check so this whole patch is
+-- safely re-runnable: if an earlier attempt already got as far as dropping
+-- flg_antipilling before failing later on, re-running from the top must not
+-- error out here on a column that's already gone. PL/pgSQL only parses a
+-- statement against the catalog when it's actually reached, so a query
+-- referencing flg_antipilling inside a skipped IF branch is never touched.
 DO $$
 DECLARE
     v_tenido_op_id SMALLINT;
     v_mismatch     RECORD;
 BEGIN
-    SELECT id INTO v_tenido_op_id FROM mes.operacion WHERE codigo = 'TENIDO';
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'doc' AND table_name = 'catalogo_precios' AND column_name = 'flg_antipilling'
+    ) THEN
+        SELECT id INTO v_tenido_op_id FROM mes.operacion WHERE codigo = 'TENIDO';
 
-    FOR v_mismatch IN
-        SELECT
-            f.color_x_cliente_id, f.tercero_id, f.articulo_tipo_id, f.tenido_id, f.fibra,
-            f.precio_kg AS precio_false, t.precio_kg AS precio_true
-        FROM doc.catalogo_precios f
-        JOIN doc.catalogo_precios t
-          ON t.operacion_id = f.operacion_id
-         AND COALESCE(t.color_x_cliente_id,    -1) = COALESCE(f.color_x_cliente_id,    -1)
-         AND COALESCE(t.tercero_id,            -1) = COALESCE(f.tercero_id,            -1)
-         AND COALESCE(t.articulo_tipo_id::int, -1) = COALESCE(f.articulo_tipo_id::int, -1)
-         AND COALESCE(t.tenido_id,             -1) = COALESCE(f.tenido_id,             -1)
-         AND COALESCE(t.fibra::int,            -1) = COALESCE(f.fibra::int,            -1)
-         AND t.fyh_elm IS NULL
-         AND t.flg_antipilling = true
-        WHERE f.operacion_id = v_tenido_op_id
-          AND f.flg_antipilling = false
-          AND f.fyh_elm IS NULL
-          AND t.precio_kg IS DISTINCT FROM f.precio_kg
-    LOOP
-        RAISE EXCEPTION
-            'catalogo_precios: base/antipilling precio_kg mismatch for color_x_cliente_id=%, tercero_id=%, articulo_tipo_id=%, tenido_id=%, fibra=% (sin_antipilling=%, con_antipilling=%) — resolve manually before running patch 46',
-            v_mismatch.color_x_cliente_id, v_mismatch.tercero_id, v_mismatch.articulo_tipo_id,
-            v_mismatch.tenido_id, v_mismatch.fibra, v_mismatch.precio_false, v_mismatch.precio_true;
-    END LOOP;
+        FOR v_mismatch IN
+            SELECT
+                f.color_x_cliente_id, f.tercero_id, f.articulo_tipo_id, f.tenido_id, f.fibra,
+                f.precio_kg AS precio_false, t.precio_kg AS precio_true
+            FROM doc.catalogo_precios f
+            JOIN doc.catalogo_precios t
+              ON t.operacion_id = f.operacion_id
+             AND COALESCE(t.color_x_cliente_id,    -1) = COALESCE(f.color_x_cliente_id,    -1)
+             AND COALESCE(t.tercero_id,            -1) = COALESCE(f.tercero_id,            -1)
+             AND COALESCE(t.articulo_tipo_id::int, -1) = COALESCE(f.articulo_tipo_id::int, -1)
+             AND COALESCE(t.tenido_id,             -1) = COALESCE(f.tenido_id,             -1)
+             AND COALESCE(t.fibra::int,            -1) = COALESCE(f.fibra::int,            -1)
+             AND t.fyh_elm IS NULL
+             AND t.flg_antipilling = true
+            WHERE f.operacion_id = v_tenido_op_id
+              AND f.flg_antipilling = false
+              AND f.fyh_elm IS NULL
+              AND t.precio_kg IS DISTINCT FROM f.precio_kg
+        LOOP
+            RAISE EXCEPTION
+                'catalogo_precios: base/antipilling precio_kg mismatch for color_x_cliente_id=%, tercero_id=%, articulo_tipo_id=%, tenido_id=%, fibra=% (sin_antipilling=%, con_antipilling=%) — resolve manually before running patch 46',
+                v_mismatch.color_x_cliente_id, v_mismatch.tercero_id, v_mismatch.articulo_tipo_id,
+                v_mismatch.tenido_id, v_mismatch.fibra, v_mismatch.precio_false, v_mismatch.precio_true;
+        END LOOP;
+    ELSE
+        RAISE NOTICE 'catalogo_precios.flg_antipilling already dropped — skipping guard (already ran on a prior attempt).';
+    END IF;
 END $$;
 
 -- ── Step 2: collapse — close the redundant antipilling-variant row wherever a
@@ -80,28 +94,35 @@ DECLARE
     v_tenido_op_id SMALLINT;
     v_closed       INT;
 BEGIN
-    SELECT id INTO v_tenido_op_id FROM mes.operacion WHERE codigo = 'TENIDO';
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'doc' AND table_name = 'catalogo_precios' AND column_name = 'flg_antipilling'
+    ) THEN
+        SELECT id INTO v_tenido_op_id FROM mes.operacion WHERE codigo = 'TENIDO';
 
-    WITH closed AS (
-        UPDATE doc.catalogo_precios t
-        SET fyh_elm = NOW()
-        FROM doc.catalogo_precios f
-        WHERE t.operacion_id = v_tenido_op_id
-          AND t.flg_antipilling = true
-          AND t.fyh_elm IS NULL
-          AND f.operacion_id = v_tenido_op_id
-          AND f.flg_antipilling = false
-          AND f.fyh_elm IS NULL
-          AND COALESCE(t.color_x_cliente_id,    -1) = COALESCE(f.color_x_cliente_id,    -1)
-          AND COALESCE(t.tercero_id,            -1) = COALESCE(f.tercero_id,            -1)
-          AND COALESCE(t.articulo_tipo_id::int, -1) = COALESCE(f.articulo_tipo_id::int, -1)
-          AND COALESCE(t.tenido_id,             -1) = COALESCE(f.tenido_id,             -1)
-          AND COALESCE(t.fibra::int,            -1) = COALESCE(f.fibra::int,            -1)
-        RETURNING t.id
-    )
-    SELECT count(*) INTO v_closed FROM closed;
+        WITH closed AS (
+            UPDATE doc.catalogo_precios t
+            SET fyh_elm = NOW()
+            FROM doc.catalogo_precios f
+            WHERE t.operacion_id = v_tenido_op_id
+              AND t.flg_antipilling = true
+              AND t.fyh_elm IS NULL
+              AND f.operacion_id = v_tenido_op_id
+              AND f.flg_antipilling = false
+              AND f.fyh_elm IS NULL
+              AND COALESCE(t.color_x_cliente_id,    -1) = COALESCE(f.color_x_cliente_id,    -1)
+              AND COALESCE(t.tercero_id,            -1) = COALESCE(f.tercero_id,            -1)
+              AND COALESCE(t.articulo_tipo_id::int, -1) = COALESCE(f.articulo_tipo_id::int, -1)
+              AND COALESCE(t.tenido_id,             -1) = COALESCE(f.tenido_id,             -1)
+              AND COALESCE(t.fibra::int,            -1) = COALESCE(f.fibra::int,            -1)
+            RETURNING t.id
+        )
+        SELECT count(*) INTO v_closed FROM closed;
 
-    RAISE NOTICE 'catalogo_precios: closed % redundant antipilling-variant rows', v_closed;
+        RAISE NOTICE 'catalogo_precios: closed % redundant antipilling-variant rows', v_closed;
+    ELSE
+        RAISE NOTICE 'catalogo_precios.flg_antipilling already dropped — skipping collapse (already ran on a prior attempt).';
+    END IF;
 END $$;
 
 -- ── Step 3: drop objects that reference the column being dropped ──
@@ -111,11 +132,32 @@ DROP VIEW IF EXISTS doc.vw_catalogo_precios_historico;
 DROP VIEW IF EXISTS doc.vw_precios_pendientes;
 DROP INDEX IF EXISTS doc.uq_catalogo_precios_activo;
 
--- ── Step 4: drop the column ──
-ALTER TABLE doc.catalogo_precios DROP COLUMN flg_antipilling;
+-- ── Step 3b: drop everything that calls fn_get_precio, BEFORE touching it ──
+-- The old fn_get_precio has `p_flg_antipilling BOOLEAN DEFAULT NULL` — a
+-- default — so it's callable with only 6 args. Creating the new 6-arg
+-- fn_get_precio alongside the old 7-arg one (as a first attempt at this patch
+-- did) makes every 6-arg call ambiguous ("is not unique"), because both
+-- overloads match. The only safe order is: drop every dependent explicitly,
+-- then drop the old fn_get_precio, THEN create the new one and rebuild
+-- dependents fresh. Explicit drops (not CASCADE) so a forgotten dependent
+-- fails loudly here instead of being silently deleted.
+DROP VIEW     IF EXISTS doc.vw_pendientes_facturacion;
+DROP VIEW     IF EXISTS doc.vw_aprobados_sin_despacho;
+DROP FUNCTION IF EXISTS doc.get_precios_partida(BIGINT[]);
+DROP FUNCTION IF EXISTS doc.fn_precio_info(SMALLINT, INT, INT, SMALLINT, INT, SMALLINT, BOOLEAN);
+DROP FUNCTION IF EXISTS doc.registrar_despacho(JSONB);
+-- fn_precios_partida: dead duplicate of get_precios_partida left over from an
+-- old rename (confirmed byte-identical in restore_full.log, LANGUAGE sql,
+-- still calling the old 7-arg fn_get_precio). consulta-precios/page.tsx was
+-- calling this orphaned name; repointed to get_precios_partida separately.
+DROP FUNCTION IF EXISTS doc.fn_precios_partida(BIGINT[]);
+DROP FUNCTION IF EXISTS doc.fn_get_precio(SMALLINT, INT, INT, SMALLINT, INT, SMALLINT, BOOLEAN);
+
+-- ── Step 4: drop the column (IF EXISTS — re-runnable if a prior attempt got this far) ──
+ALTER TABLE doc.catalogo_precios DROP COLUMN IF EXISTS flg_antipilling;
 
 -- ── Step 5: rebuild the active-row unique index without it ──
-CREATE UNIQUE INDEX uq_catalogo_precios_activo
+CREATE UNIQUE INDEX IF NOT EXISTS uq_catalogo_precios_activo
     ON doc.catalogo_precios (
         operacion_id,
         COALESCE(color_x_cliente_id,    -1),
@@ -127,8 +169,9 @@ CREATE UNIQUE INDEX uq_catalogo_precios_activo
     WHERE fyh_elm IS NULL;
 
 -- ── Step 6: doc.fn_get_precio — drop the antipilling dimension ──
--- New 6-arg overload created first so dependents can be repointed before the
--- old 7-arg one is dropped (it still has live dependents at this point).
+-- Old 7-arg overload and everything that called it is gone as of Step 3b, so
+-- this is a clean create — OR REPLACE only matters if a prior attempt already
+-- got this far (re-running is then a no-op replace, not a fresh create).
 CREATE OR REPLACE FUNCTION doc.fn_get_precio(
     p_operacion_id        SMALLINT,
     p_color_x_cliente_id  INT,
@@ -959,19 +1002,6 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION doc.registrar_despacho(jsonb) TO authenticated;
-
--- ── Step 11c: drop doc.fn_precios_partida — dead duplicate of get_precios_partida ──
--- Discovered while tracing dependents: a prior rename left BOTH fn_precios_partida
--- and get_precios_partida live in the DB with identical bodies (confirmed via
--- restore_full.log — a byte-for-byte copy, LANGUAGE sql, still calling the old
--- 7-arg fn_get_precio). consulta-precios/page.tsx was calling the orphaned old
--- name; it's been repointed to get_precios_partida as part of this same change.
--- Being LANGUAGE sql, it holds a real pg_depend edge on fn_get_precio's old
--- overload — left alive, it would block the DROP FUNCTION below.
-DROP FUNCTION IF EXISTS doc.fn_precios_partida(BIGINT[]);
-
--- ── Step 12: now dependency-free — drop the old 7-arg fn_get_precio ──
-DROP FUNCTION doc.fn_get_precio(SMALLINT, INT, INT, SMALLINT, INT, SMALLINT, BOOLEAN);
 
 -- ── Step 13: recreate doc.vw_precios_pendientes without the variant dimension ──
 -- One row per missing (operacion, client/color, articulo_tipo, tenido, fibra)

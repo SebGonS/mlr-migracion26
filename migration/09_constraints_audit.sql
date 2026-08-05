@@ -266,9 +266,6 @@ REVOKE INSERT (usr_cre, fyh_cre, usr_elm, fyh_elm) ON doc.catalogo_precios FROM 
 
 -- One active row per key combination at any time.
 -- COALESCE(-1): NULL dimensions participate correctly in the unique index.
--- flg_antipilling MUST be part of the key: TENIDO base (false) and antipilling
--- (true) rows legitimately coexist for the same other dimensions (see table
--- comment above) — omitting it collided the two variants under this index.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_catalogo_precios_activo
     ON doc.catalogo_precios (
         operacion_id,
@@ -276,8 +273,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_catalogo_precios_activo
         COALESCE(tercero_id,            -1),
         COALESCE(articulo_tipo_id::int, -1),
         COALESCE(tenido_id,             -1),
-        COALESCE(fibra::int,            -1),
-        COALESCE(flg_antipilling::int,  -1)
+        COALESCE(fibra::int,            -1)
     )
     WHERE fyh_elm IS NULL;
 

@@ -1,0 +1,69 @@
+-- ============================================================================
+-- Fix: entrega 856 (compra 992) has entrega_detalle rows but NO lote/movement.
+-- Same failure mode as entrega 855 (compra 991): guía created manually,
+-- separate from the compra, skipping inventory posting.
+-- Confirmed: goods physically on hand (15kg JAKAZOL RED DS2R, 25kg JAKOFIX
+-- ORANGE ME2RL). Posting directly onto entrega 856 to preserve numbering.
+-- ============================================================================
+
+-- 0) Sanity check: still zero lote/movement for this entrega? -----------------
+SELECT 'lote' AS tabla, count(*) FROM inventario.lote
+WHERE documento_tipo = 'entrega' AND documento_id = 856
+UNION ALL
+SELECT 'item_movimientos', count(*) FROM inventario.item_movimientos
+WHERE documento_tipo = 'entrega' AND documento_id = 856;
+
+BEGIN;
+
+-- 1) Create the two missing lotes (one per entrega_detalle line) --------------
+WITH nuevos_lotes AS (
+    INSERT INTO inventario.lote (item_id, documento_tipo, documento_id, cantidad, propietario_id, usr_cre)
+    SELECT ed.item_id, 'entrega', ed.entrega_id, ed.cantidad, NULL, get_user_id()
+    FROM doc.entrega_detalle ed
+    WHERE ed.entrega_id = 856
+    RETURNING id, item_id, cantidad, documento_id
+),
+-- 2) Post the missing COMPRA_ING movement for each new lote -------------------
+mov AS (
+    INSERT INTO inventario.item_movimientos (
+        doc_movimiento_id, item_id, lote_id, item_movimiento_tipo_id,
+        destino_ubicacion_id, cantidad, fecha_hora,
+        documento_tipo, documento_id, documento_linea_id, usr_cre
+    )
+    SELECT
+        nextval('inventario.mov_doc_seq'),
+        nl.item_id, nl.id,
+        (SELECT id FROM inventario.item_movimiento_tipo WHERE codigo = 'COMPRA_ING'),
+        (SELECT ub.id FROM inventario.ubicacion ub
+         JOIN inventario.almacen alm ON alm.id = ub.almacen_id
+         WHERE alm.codigo = 'ALM_INS'),
+        nl.cantidad,
+        now(),   -- backdating to 2026-06-25 would hit fn_trg_check_corte_cuadre (cutoff), same as entrega 855 fix
+        'entrega', nl.documento_id,
+        (SELECT ed.id FROM doc.entrega_detalle ed WHERE ed.entrega_id = nl.documento_id AND ed.item_id = nl.item_id),
+        get_user_id()
+    FROM nuevos_lotes nl
+    RETURNING id
+)
+SELECT * FROM mov;
+
+-- 3) Resync cantidad_recibida on the linked compra_detalle lines --------------
+UPDATE doc.compra_detalle cd
+SET cantidad_recibida = ed.cantidad
+FROM doc.entrega_detalle ed
+WHERE ed.entrega_id = 856
+  AND cd.compra_id = 992
+  AND cd.item_id = ed.item_id;
+
+-- 4) Verify ---------------------------------------------------------------
+SELECT * FROM inventario.lote WHERE documento_tipo='entrega' AND documento_id=856;
+SELECT * FROM inventario.item_movimientos WHERE documento_tipo='entrega' AND documento_id=856;
+SELECT id, item_id, cantidad, cantidad_recibida FROM doc.compra_detalle WHERE compra_id = 992;
+
+-- Inspect the above, then:
+COMMIT;   -- or ROLLBACK if anything looks wrong
+
+
+
+
+SELECT mes.get_componentes_disponibles(6087)

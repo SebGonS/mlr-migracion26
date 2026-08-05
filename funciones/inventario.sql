@@ -698,6 +698,23 @@ BEGIN
             p_partida_id;
     END IF;
 
+    -- Guard: item_rollo_detalle.flg_rib must agree with articulo.flg_rib (migration 36
+    -- keeps these in sync via trigger going forward; this catches drift from restores
+    -- or manual patches that bypass it)
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_componente opi
+        JOIN inventario.lote l      ON l.id = opi.lote_id AND l.fyh_elm IS NULL
+        JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+        JOIN articulo a             ON a.id = ird.articulo_id
+        WHERE opi.partida_id = p_partida_id
+          AND ird.flg_rib IS DISTINCT FROM a.flg_rib
+    ) THEN
+        RAISE EXCEPTION
+            'Inconsistencia flg_rib detectada en partida #% entre item_rollo_detalle y articulo. Contactar a soporte antes de pesar.',
+            p_partida_id;
+    END IF;
+
     -- Count rolls by type assigned to this partida via partida_componente
     SELECT
         COUNT(*) FILTER (WHERE ird.flg_rib = false),
@@ -864,6 +881,23 @@ BEGIN
     ) THEN
         RAISE EXCEPTION
             'No se puede modificar pesos de la guía #%: uno o más rollos ya tienen movimientos de producción.',
+            p_entrega_id;
+    END IF;
+
+    -- Guard: item_rollo_detalle.flg_rib must agree with articulo.flg_rib (migration 36
+    -- keeps these in sync via trigger going forward; this catches drift from restores
+    -- or manual patches that bypass it)
+    IF EXISTS (
+        SELECT 1
+        FROM inventario.lote_rollo_detalle lrd
+        JOIN inventario.lote l      ON l.id = lrd.lote_id AND l.fyh_elm IS NULL
+        JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+        JOIN articulo a             ON a.id = ird.articulo_id
+        WHERE lrd.entrega_id = p_entrega_id
+          AND ird.flg_rib IS DISTINCT FROM a.flg_rib
+    ) THEN
+        RAISE EXCEPTION
+            'Inconsistencia flg_rib detectada en guía #% entre item_rollo_detalle y articulo. Contactar a soporte antes de pesar.',
             p_entrega_id;
     END IF;
 
@@ -1180,6 +1214,29 @@ BEGIN
             p_partida_id, p_item_id, COALESCE(p_entrega_id::text, 'sin guía');
     END IF;
 
+    -- Guard: item_rollo_detalle.flg_rib must agree with articulo.flg_rib for every roll
+    -- in this group. p_flg_rib comes straight from the caller (frontend) — if the roll's
+    -- own flg_rib disagrees with its articulo, don't silently trust either one.
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_componente             pc
+        JOIN inventario.lote                    l   ON l.id  = pc.lote_id AND l.fyh_elm IS NULL
+        JOIN item_rollo_detalle                 ird ON ird.item_id = l.item_id
+        JOIN articulo                           a   ON a.id = ird.articulo_id
+        LEFT JOIN inventario.lote_rollo_detalle lrd ON lrd.lote_id = l.id
+        WHERE pc.partida_id = p_partida_id
+          AND l.item_id     = p_item_id
+          AND (
+              (p_entrega_id IS NULL AND lrd.entrega_id IS NULL)
+              OR lrd.entrega_id = p_entrega_id
+          )
+          AND ird.flg_rib IS DISTINCT FROM a.flg_rib
+    ) THEN
+        RAISE EXCEPTION
+            'Inconsistencia flg_rib detectada en el grupo (partida #%, item #%, guía %) entre item_rollo_detalle y articulo. Contactar a soporte antes de pesar.',
+            p_partida_id, p_item_id, COALESCE(p_entrega_id::text, 'sin guía');
+    END IF;
+
     -- Count rolls in this group
     SELECT COUNT(DISTINCT l.id)
     INTO v_count
@@ -1387,6 +1444,23 @@ BEGIN
     END IF;
     IF v_estado IN ('TECO','CERRADA','CANCELADA') THEN
         RAISE EXCEPTION 'No se pueden corregir pesos de una orden en estado %.', v_estado;
+    END IF;
+
+    -- Guard: item_rollo_detalle.flg_rib must agree with articulo.flg_rib (migration 36
+    -- keeps these in sync via trigger going forward; this catches drift from restores
+    -- or manual patches that bypass it)
+    IF EXISTS (
+        SELECT 1
+        FROM mes.partida_componente opi
+        JOIN inventario.lote l      ON l.id = opi.lote_id AND l.fyh_elm IS NULL
+        JOIN item_rollo_detalle ird ON ird.item_id = l.item_id
+        JOIN articulo a             ON a.id = ird.articulo_id
+        WHERE opi.partida_id = p_partida_id
+          AND ird.flg_rib IS DISTINCT FROM a.flg_rib
+    ) THEN
+        RAISE EXCEPTION
+            'Inconsistencia flg_rib detectada en orden #% entre item_rollo_detalle y articulo. Contactar a soporte antes de corregir.',
+            p_partida_id;
     END IF;
 
     -- Count rolls by type
